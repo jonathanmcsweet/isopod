@@ -1,0 +1,937 @@
+#!/usr/bin/env bash
+#
+# aibox — disposable, isolated AI-coding sandboxes for VSCodium (and friends)
+#
+# Creates a rootless Podman (or Docker) container with an SSH server inside,
+# clones a git repo OR copies an explicit allowlist of host folders into it,
+# and wires up VSCodium / Cursor / JetBrains Gateway to connect over SSH.
+#
+# Isolation model:
+#   * NO bind mounts. The container never sees the host filesystem.
+#   * Files enter the box only via `git clone` (inside the box) or an
+#     explicit `--copy <path>` (a one-time copy, not a mount).
+#   * Files leave the box only via `git push` (from inside) or an explicit
+#     `aibox export`.
+#   * The IDE's server component, terminals, and any AI agent extensions all
+#     execute INSIDE the container. The agent sees the container's hostname,
+#     filesystem, and network identity — not your host's.
+#   * SSH agent forwarding and X11 forwarding are explicitly disabled.
+#
+# Requirements: bash 4+, podman or docker, ssh, ssh-keygen, ssh-keyscan.
+# Primary OS: Linux. macOS: works via podman machine / Docker Desktop.
+# Windows: run inside WSL2 (see README).
+#
+set -euo pipefail
+
+AIBOX_VERSION="0.1.0"
+
+# Resolve the directory this script lives in (following symlinks), so we can
+# find bundled helper files under lib/ regardless of how aibox was invoked.
+_resolve_script_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [ -h "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+AIBOX_DIR="$(_resolve_script_dir)"
+AIBOX_LIB="$AIBOX_DIR/lib"
+# Declarative container-hardening profile (anti-fingerprinting Tier 1 + Tier 2).
+# Settings live in this file, not inline here; override path with AIBOX_HARDENING_CONF.
+HARDENING_CONF="${AIBOX_HARDENING_CONF:-$AIBOX_DIR/security/hardening.conf}"
+
+CONFIG_DIR="${AIBOX_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aibox}"
+BOXES_DIR="$CONFIG_DIR/boxes"
+SSH_INCLUDE_FILE="$CONFIG_DIR/ssh_config"
+USER_SSH_CONFIG="$HOME/.ssh/config"
+DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
+IMAGE_LAYER_VERSION="1"   # bump to force image rebuild when Dockerfile changes
+CONTAINER_USER="dev"
+WORKSPACE="/home/dev/workspace"
+
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
+c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
+info()  { printf '%s\n' "${c_grn}==>${c_rst} $*"; }
+warn()  { printf '%s\n' "${c_yel}warning:${c_rst} $*" >&2; }
+die()   { printf '%s\n' "${c_red}error:${c_rst} $*" >&2; exit 1; }
+have()  { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+  cat <<EOF
+aibox $AIBOX_VERSION — isolated AI-coding sandboxes for VSCodium & friends
+
+Usage:
+  aibox create <name> [options]      Create and start a new sandbox
+  aibox list                         List sandboxes and their status
+  aibox info <name>                  Show connection details for a sandbox
+  aibox code <name> [--app APP]      Open the sandbox in VSCodium (or APP)
+  aibox shell <name>                 Open a shell inside the sandbox
+  aibox start <name>                 Start a stopped sandbox
+  aibox stop <name>                  Stop a running sandbox
+  aibox export <name> [dest]         Copy the workspace OUT of the sandbox
+  aibox fetch <name> [target-dir]    Pull the box's git history into a host repo
+  aibox copy-in <name> <path>...     Copy more host folders INTO the sandbox
+  aibox rm <name> [--force]          Delete a sandbox (container + keys)
+  aibox doctor                       Check host prerequisites
+  aibox help                         Show this help
+
+Options for create:
+  --repo <url>          Git repo to clone inside the box (https or ssh URL)
+  --branch <name>       Branch to clone (with --repo)
+  --copy <path>         Host folder/file to COPY into the box (repeatable).
+                        This is the explicit allowlist — nothing else from
+                        the host is ever visible inside the box.
+  --color <preset|hex>  Tint the IDE title/status/activity bars so this
+                        box's windows are visually distinct. Presets:
+                        red orange amber green teal blue purple magenta gray
+                        or any hex like '#7e22ce'. Default: auto (rotates).
+  --engine <podman|docker>   Container engine (default: podman, else docker)
+  --image <ref>         Base image (default: $DEFAULT_BASE_IMAGE).
+                        Must be Debian/Ubuntu-based (apt) for the built-in
+                        layer; anything with sshd preinstalled also works
+                        with --raw-image.
+  --memory <size>       Memory limit, e.g. 4g
+  --cpus <n>            CPU limit, e.g. 2
+  --no-sudo             Do not give the in-box user passwordless sudo
+  --port <n>            Fixed host port for SSH (default: random free port,
+                        bound to 127.0.0.1 only)
+
+Examples:
+  aibox create myproj --repo https://github.com/me/proj --color teal
+  aibox create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
+  aibox code myproj
+  aibox export myproj ./myproj-out
+  aibox fetch myproj            # from inside your host clone, pulls box history
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# engine detection
+# ---------------------------------------------------------------------------
+ENGINE=""
+detect_engine() {
+  local want="${1:-${AIBOX_ENGINE:-}}"
+  if [ -n "$want" ]; then
+    have "$want" || die "requested engine '$want' not found in PATH"
+    ENGINE="$want"
+  elif have podman; then
+    ENGINE=podman
+  elif have docker; then
+    ENGINE=docker
+  else
+    die "neither podman nor docker found. Install one (podman recommended for rootless isolation)."
+  fi
+  # Sanity check the engine actually works (daemon up / machine started)
+  if ! "$ENGINE" info >/dev/null 2>&1; then
+    case "$ENGINE" in
+      podman) die "podman is installed but not working. On macOS/Windows run: podman machine init && podman machine start" ;;
+      docker) die "docker is installed but the daemon is not reachable. Start Docker (or Docker Desktop) and retry." ;;
+    esac
+  fi
+}
+
+ctr_name() { printf 'aibox-%s' "$1"; }
+box_dir()  { printf '%s/%s' "$BOXES_DIR" "$1"; }
+
+require_box() {
+  [ -d "$(box_dir "$1")" ] || die "no such sandbox: '$1' (see: aibox list)"
+}
+
+meta_get() { # meta_get <name> <key>
+  local f; f="$(box_dir "$1")/meta"
+  [ -f "$f" ] || return 1
+  sed -n "s/^$2=//p" "$f" | head -1
+}
+
+valid_name() {
+  [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,40}$ ]]
+}
+
+# ---------------------------------------------------------------------------
+# image build (embedded Dockerfile)
+# ---------------------------------------------------------------------------
+image_tag_for() { # image_tag_for <base-image>
+  local hash
+  hash=$(printf '%s|%s' "$1" "$IMAGE_LAYER_VERSION" | cksum | awk '{print $1}')
+  printf 'localhost/aibox-base:%s' "$hash"
+}
+
+build_image() { # build_image <base-image> -> echoes tag
+  local base="$1" tag
+  tag=$(image_tag_for "$base")
+  if "$ENGINE" image exists "$tag" 2>/dev/null || "$ENGINE" image inspect "$tag" >/dev/null 2>&1; then
+    printf '%s' "$tag"; return 0
+  fi
+  info "Building sandbox base image from $base (one-time)..." >&2
+  # AIBOX_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
+  # --build-arg http_proxy=...) for proxied or unusual environments.
+  local -a extra_build=()
+  # shellcheck disable=SC2206
+  [ -n "${AIBOX_BUILD_ARGS:-}" ] && extra_build=($AIBOX_BUILD_ARGS)
+  "$ENGINE" build "${extra_build[@]}" -t "$tag" -f - . >&2 <<DOCKERFILE
+FROM $base
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends \\
+      openssh-server sudo git curl wget ca-certificates \\
+      python3 nano less procps tar gzip unzip xz-utils locales \\
+ && rm -rf /var/lib/apt/lists/* \\
+ && mkdir -p /run/sshd
+# Create the unprivileged in-box user (skip if base image already has it)
+RUN id -u $CONTAINER_USER >/dev/null 2>&1 || useradd -m -s /bin/bash $CONTAINER_USER
+# Lock down sshd: key-only auth, single user, no root login
+RUN printf '%s\\n' \\
+      'PasswordAuthentication no' \\
+      'KbdInteractiveAuthentication no' \\
+      'PermitRootLogin no' \\
+      'AllowUsers $CONTAINER_USER' \\
+      'X11Forwarding no' \\
+      'AllowAgentForwarding no' \\
+      'ClientAliveInterval 60' \\
+      > /etc/ssh/sshd_config.d/90-aibox.conf \\
+ && grep -q 'Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config \\
+      || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
+# Entrypoint: regenerate host keys on first boot so every box is unique,
+# then run sshd in the foreground as PID 1.
+RUN printf '%s\\n' \\
+      '#!/bin/sh' \\
+      'if [ ! -f /etc/ssh/.aibox-host-keys ]; then' \\
+      '  rm -f /etc/ssh/ssh_host_*' \\
+      '  ssh-keygen -A >/dev/null' \\
+      '  touch /etc/ssh/.aibox-host-keys' \\
+      'fi' \\
+      'mkdir -p /run/sshd' \\
+      'exec /usr/sbin/sshd -D -e' \\
+      > /usr/local/bin/aibox-entrypoint \\
+ && chmod +x /usr/local/bin/aibox-entrypoint
+EXPOSE 22
+CMD ["/usr/local/bin/aibox-entrypoint"]
+DOCKERFILE
+  printf '%s' "$tag"
+}
+
+# ---------------------------------------------------------------------------
+# ssh config management
+# ---------------------------------------------------------------------------
+ensure_ssh_include() {
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  touch "$USER_SSH_CONFIG" && chmod 600 "$USER_SSH_CONFIG"
+  local line="Include $SSH_INCLUDE_FILE"
+  if ! grep -qsF "$line" "$USER_SSH_CONFIG"; then
+    # Include must appear before any Host block to apply globally; prepend.
+    local tmp
+    tmp=$(mktemp)
+    { printf '# aibox sandboxes\n%s\n\n' "$line"; cat "$USER_SSH_CONFIG"; } > "$tmp"
+    cat "$tmp" > "$USER_SSH_CONFIG"
+    rm -f "$tmp"
+    info "Added '$line' to ~/.ssh/config"
+  fi
+}
+
+# Regenerate the whole include file from per-box metadata.
+write_ssh_include() {
+  mkdir -p "$CONFIG_DIR"
+  local tmp
+  tmp=$(mktemp)
+  {
+    printf '# Managed by aibox — do not edit (regenerated on every change)\n\n'
+    local d name port
+    for d in "$BOXES_DIR"/*/; do
+      [ -d "$d" ] || continue
+      name=$(basename "$d")
+      port=$(meta_get "$name" port || true)
+      [ -n "$port" ] || continue
+      cat <<ENTRY
+Host $(ctr_name "$name")
+  HostName 127.0.0.1
+  Port $port
+  User $CONTAINER_USER
+  IdentityFile $(box_dir "$name")/id_ed25519
+  IdentitiesOnly yes
+  UserKnownHostsFile $(box_dir "$name")/known_hosts
+  StrictHostKeyChecking yes
+  ForwardAgent no
+  ForwardX11 no
+  LogLevel ERROR
+
+ENTRY
+    done
+  } > "$tmp"
+  mv "$tmp" "$SSH_INCLUDE_FILE"
+  chmod 600 "$SSH_INCLUDE_FILE"
+}
+
+meta_set_port() { # meta_set_port <name> <port>
+  local f; f="$(box_dir "$1")/meta"
+  if grep -q '^port=' "$f" 2>/dev/null; then
+    sed -i.bak "s/^port=.*/port=$2/" "$f" && rm -f "$f.bak"
+  else
+    printf 'port=%s\n' "$2" >> "$f"
+  fi
+}
+
+resolve_port() { # resolve_port <name> -> echoes current host port for ctr :22
+  local out
+  out=$("$ENGINE" port "$(ctr_name "$1")" 22/tcp 2>/dev/null | head -1) || return 1
+  printf '%s' "${out##*:}"
+}
+
+refresh_port() { # refresh stored port + ssh config if the mapping changed
+  local name="$1" port
+  port=$(resolve_port "$name") || return 0
+  [ -n "$port" ] || return 0
+  if [ "$port" != "$(meta_get "$name" port || true)" ]; then
+    meta_set_port "$name" "$port"
+    write_ssh_include
+  fi
+}
+
+scan_host_key() { # scan_host_key <name>
+  local name="$1" port kh tries=0
+  port=$(meta_get "$name" port)
+  kh="$(box_dir "$name")/known_hosts"
+  : > "$kh"
+  while [ $tries -lt 30 ]; do
+    if ssh-keyscan -p "$port" -T 3 127.0.0.1 2>/dev/null > "$kh" && [ -s "$kh" ]; then
+      chmod 600 "$kh"
+      return 0
+    fi
+    tries=$((tries + 1)); sleep 1
+  done
+  return 1
+}
+
+# Connect to a box using its own key/port/known_hosts explicitly, so internal
+# SSH never depends on ~/.ssh/config resolution (which OpenSSH derives from the
+# passwd database, not $HOME — important for hermetic tests and odd setups).
+box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
+  local name="$1"; shift
+  local port; port=$(meta_get "$name" port)
+  # Split leading ssh options from the remote command: everything up to the
+  # first non-option (or '--') is an ssh option; the rest is the command.
+  local -a opts=() rcmd=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --) shift; rcmd=("$@"); break ;;
+      -o) opts+=("$1" "$2"); shift 2 ;;
+      -*) opts+=("$1"); shift ;;
+      *)  rcmd=("$@"); break ;;
+    esac
+  done
+  ssh -p "$port" \
+      -i "$(box_dir "$name")/id_ed25519" \
+      -o IdentitiesOnly=yes \
+      -o UserKnownHostsFile="$(box_dir "$name")/known_hosts" \
+      -o StrictHostKeyChecking=yes \
+      -o ForwardAgent=no -o ForwardX11=no \
+      "${opts[@]}" "$CONTAINER_USER@127.0.0.1" "${rcmd[@]}"
+}
+
+wait_for_ssh() { # wait until we can actually authenticate
+  local name="$1" tries=0
+  while [ $tries -lt 30 ]; do
+    if box_ssh "$name" -o ConnectTimeout=3 -o BatchMode=yes -- true 2>/dev/null; then
+      return 0
+    fi
+    tries=$((tries + 1)); sleep 1
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# color theming
+# ---------------------------------------------------------------------------
+preset_color() {
+  case "$1" in
+    red)     printf '#b3261e' ;;
+    orange)  printf '#c2410c' ;;
+    amber)   printf '#b45309' ;;
+    green)   printf '#15803d' ;;
+    teal)    printf '#0f766e' ;;
+    blue)    printf '#1d4ed8' ;;
+    purple)  printf '#7e22ce' ;;
+    magenta) printf '#be185d' ;;
+    gray|grey) printf '#374151' ;;
+    *) return 1 ;;
+  esac
+}
+
+auto_color() { # rotate presets based on how many boxes exist
+  local presets=(teal blue purple magenta orange green amber red gray) n=0
+  local d
+  for d in "$BOXES_DIR"/*/; do [ -d "$d" ] && n=$((n + 1)); done
+  preset_color "${presets[$((n % ${#presets[@]}))]}"
+}
+
+# Write/merge .vscode/settings.json inside the box so every IDE window
+# attached to this box is tinted. Lives in the container, not on the host.
+# The merge logic lives in lib/apply_color.py; we stream it into the box over
+# stdin so nothing is left behind on the container filesystem.
+apply_color() { # apply_color <name> <hexcolor>
+  local name="$1" hex="$2" script="$AIBOX_LIB/apply_color.py"
+  [ -f "$script" ] || die "missing helper: $script (is your aibox install complete?)"
+  "$ENGINE" exec -i -u "$CONTAINER_USER" \
+      -e "AIBOX_COLOR=$hex" -e "AIBOX_NAME=$name" -e "AIBOX_WS=$WORKSPACE" \
+      "$(ctr_name "$name")" python3 - < "$script"
+}
+
+# Translate the declarative hardening profile (security/hardening.conf) into
+# `$ENGINE run` flags, printed one per line for the caller to read into an array.
+# Anti-fingerprinting Tier 1 (mask host-revealing /proc and /sys paths) + Tier 2
+# (run under a sandboxed runtime like gVisor). The two engines mask differently:
+#   podman — a single `--security-opt mask=a:b:c` covers both files and dirs.
+#   docker — no mask flag, so dirs get an empty `--tmpfs` and files a `/dev/null`
+#            bind mount.
+# Missing profile is non-fatal: the box is still created, just without the masks.
+hardening_run_args() { # hardening_run_args <engine>
+  local engine="$1" conf="$HARDENING_CONF"
+  if [ ! -f "$conf" ]; then
+    warn "hardening profile not found ($conf); creating box without fingerprint masks"
+    return 0
+  fi
+
+  local runtime="" key path kind line
+  local -a masks=() fmasks=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"                       # strip comments
+    read -r key path kind <<<"$line" || true # whitespace-split + trim
+    [ -n "${key:-}" ] || continue
+    case "$key" in
+      runtime) runtime="${path:-}" ;;
+      mask)
+        [ -n "${path:-}" ] || continue
+        if [ "${kind:-}" = "file" ]; then fmasks+=("$path"); else masks+=("$path"); fi ;;
+      *) warn "hardening profile: ignoring unknown directive '$key'" ;;
+    esac
+  done < "$conf"
+
+  # Tier 2: env var wins over the profile so it can be toggled per invocation.
+  runtime="${AIBOX_RUNTIME:-$runtime}"
+  [ -n "$runtime" ] && printf '%s\n' "--runtime" "$runtime"
+
+  # Tier 1.
+  if [ "$engine" = "docker" ]; then
+    local p
+    for p in "${masks[@]:-}";  do [ -n "$p" ] && printf '%s\n' "--tmpfs" "$p"; done
+    for p in "${fmasks[@]:-}"; do [ -n "$p" ] && printf '%s\n' "-v" "/dev/null:$p:ro"; done
+  else
+    local p joined=""
+    for p in "${masks[@]:-}" "${fmasks[@]:-}"; do
+      [ -n "$p" ] && joined="${joined:+$joined:}$p"
+    done
+    [ -n "$joined" ] && printf '%s\n' "--security-opt" "mask=$joined"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+cmd_create() {
+  local name="" repo="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
+  local memory="" cpus="" no_sudo=0 engine_opt=""
+  local -a copies=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo)    repo="$2"; shift 2 ;;
+      --branch)  branch="$2"; shift 2 ;;
+      --copy)    copies+=("$2"); shift 2 ;;
+      --color)   color="$2"; shift 2 ;;
+      --image)   base="$2"; shift 2 ;;
+      --engine)  engine_opt="$2"; shift 2 ;;
+      --memory)  memory="$2"; shift 2 ;;
+      --cpus)    cpus="$2"; shift 2 ;;
+      --port)    port="$2"; shift 2 ;;
+      --no-sudo) no_sudo=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      -*)        die "unknown option for create: $1" ;;
+      *)         [ -z "$name" ] && name="$1" || die "unexpected argument: $1"; shift ;;
+    esac
+  done
+
+  [ -n "$name" ] || die "usage: aibox create <name> [options]"
+  valid_name "$name" || die "invalid name '$name' (letters, digits, . _ - only)"
+  [ -d "$(box_dir "$name")" ] && die "sandbox '$name' already exists (aibox rm $name to delete)"
+  if [ -n "$repo" ] && [ "${#copies[@]}" -gt 0 ]; then
+    die "use either --repo or --copy, not both (you can 'aibox copy-in' later)"
+  fi
+
+  # validate copy paths up front
+  local p
+  for p in "${copies[@]:-}"; do
+    [ -z "$p" ] && continue
+    [ -e "$p" ] || die "--copy path does not exist: $p"
+  done
+
+  # resolve color
+  local hex=""
+  if [ -z "$color" ]; then
+    hex=$(auto_color)
+  elif [[ "$color" =~ ^#?[0-9a-fA-F]{6}$ ]]; then
+    hex="#${color#\#}"
+  else
+    hex=$(preset_color "$color") || die "unknown color '$color' (use a preset or '#rrggbb')"
+  fi
+
+  detect_engine "$engine_opt"
+  mkdir -p "$(box_dir "$name")"
+  chmod 700 "$CONFIG_DIR" "$BOXES_DIR" "$(box_dir "$name")" 2>/dev/null || true
+
+  local tag
+  tag=$(build_image "$base")
+
+  info "Generating dedicated SSH keypair for this box..."
+  ssh-keygen -t ed25519 -N '' -C "aibox-$name" -f "$(box_dir "$name")/id_ed25519" -q
+
+  # publish sshd on a loopback-only host port; random free port unless --port
+  local publish="127.0.0.1::22"
+  [ -n "$port" ] && publish="127.0.0.1:$port:22"
+
+  local -a run_args=(run -d --name "$(ctr_name "$name")" --hostname "$name"
+                     --label "aibox=true" --label "aibox.name=$name"
+                     -p "$publish" --pids-limit 4096)
+  [ -n "$memory" ] && run_args+=(--memory "$memory")
+  [ -n "$cpus" ]   && run_args+=(--cpus "$cpus")
+  # Anti-fingerprinting hardening from security/hardening.conf (Tier 1 + Tier 2).
+  local -a hard_args=()
+  mapfile -t hard_args < <(hardening_run_args "$ENGINE")
+  [ "${#hard_args[@]}" -gt 0 ] && run_args+=("${hard_args[@]}")
+  # AIBOX_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
+  # shellcheck disable=SC2206
+  [ -n "${AIBOX_RUN_ARGS:-}" ] && run_args+=($AIBOX_RUN_ARGS)
+  run_args+=("$tag")
+
+  info "Starting container ($ENGINE)..."
+  "$ENGINE" "${run_args[@]}" >/dev/null
+
+  local hostport
+  hostport=$(resolve_port "$name") || die "could not determine published SSH port"
+  {
+    printf 'engine=%s\n'  "$ENGINE"
+    printf 'image=%s\n'   "$tag"
+    printf 'base=%s\n'    "$base"
+    printf 'color=%s\n'   "$hex"
+    printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'port=%s\n'    "$hostport"
+  } > "$(box_dir "$name")/meta"
+
+  # sudo policy + authorized key, injected at runtime (root inside the box
+  # only — which, under rootless podman, is just your own unprivileged UID
+  # on the host)
+  local ctr; ctr=$(ctr_name "$name")
+  if [ "$no_sudo" -eq 0 ]; then
+    "$ENGINE" exec "$ctr" sh -c \
+      "printf '%s\n' '$CONTAINER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$CONTAINER_USER && chmod 440 /etc/sudoers.d/$CONTAINER_USER"
+  fi
+  "$ENGINE" exec -i "$ctr" sh -c \
+    "install -d -m 700 -o $CONTAINER_USER -g $CONTAINER_USER /home/$CONTAINER_USER/.ssh \
+     && cat > /home/$CONTAINER_USER/.ssh/authorized_keys \
+     && chown $CONTAINER_USER:$CONTAINER_USER /home/$CONTAINER_USER/.ssh/authorized_keys \
+     && chmod 600 /home/$CONTAINER_USER/.ssh/authorized_keys" \
+    < "$(box_dir "$name")/id_ed25519.pub"
+
+  ensure_ssh_include
+  write_ssh_include
+  info "Pinning the box's SSH host key..."
+  scan_host_key "$name" || die "sshd in the container never came up (check: $ENGINE logs $ctr)"
+  wait_for_ssh "$name" || die "could not authenticate to the box over SSH"
+
+  # populate the workspace
+  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" mkdir -p "$WORKSPACE"
+  if [ -n "$repo" ]; then
+    info "Cloning $repo inside the box..."
+    local -a clone=(git clone)
+    [ -n "$branch" ] && clone+=(--branch "$branch")
+    clone+=("$repo" "$WORKSPACE")
+    "$ENGINE" exec -u "$CONTAINER_USER" -w "/home/$CONTAINER_USER" "$ctr" "${clone[@]}" \
+      || warn "git clone failed inside the box — the sandbox was still created.
+         Fix and retry from inside:  aibox shell $name   then: git clone ... $WORKSPACE
+         (private repo? use an https token URL, or copy a deploy key in with copy-in)"
+  elif [ "${#copies[@]}" -gt 0 ]; then
+    do_copy_in "$name" "${copies[@]}"
+  fi
+
+  info "Applying window color $hex (this box only)..."
+  apply_color "$name" "$hex"
+
+  cat <<EOF
+
+${c_grn}Sandbox '$name' is ready.${c_rst}
+
+  SSH host        : $(ctr_name "$name")   ${c_dim}(ssh $(ctr_name "$name"))${c_rst}
+  SSH endpoint    : 127.0.0.1:$hostport   ${c_dim}(loopback only — not on your LAN)${c_rst}
+  Workspace       : $WORKSPACE
+  Window color    : $hex
+
+Open it:
+  aibox code $name                 ${c_dim}# VSCodium via Open Remote - SSH${c_rst}
+  aibox code $name --app cursor    ${c_dim}# Cursor${c_rst}
+  aibox shell $name                ${c_dim}# plain terminal${c_rst}
+  JetBrains: Gateway -> SSH -> host '$(ctr_name "$name")' -> project $WORKSPACE
+
+Get files out later:
+  aibox export $name ./out         ${c_dim}# or git push from inside the box${c_rst}
+EOF
+}
+
+do_copy_in() { # do_copy_in <name> <path>...
+  local name="$1"; shift
+  local ctr; ctr=$(ctr_name "$name")
+  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" mkdir -p "$WORKSPACE"
+  local p base
+  for p in "$@"; do
+    [ -e "$p" ] || die "path does not exist: $p"
+    base=$(basename "$(realpath "$p")")
+    info "Copying $p -> $WORKSPACE/$base (one-time copy, not a mount)"
+    "$ENGINE" cp "$p" "$ctr:$WORKSPACE/$base"
+  done
+  "$ENGINE" exec "$ctr" chown -R "$CONTAINER_USER:$CONTAINER_USER" "$WORKSPACE"
+}
+
+cmd_copy_in() {
+  local name="${1:-}"; shift || true
+  [ -n "$name" ] && [ $# -gt 0 ] || die "usage: aibox copy-in <name> <path>..."
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  do_copy_in "$name" "$@"
+}
+
+cmd_export() {
+  local name="${1:-}" dest="${2:-}"
+  [ -n "$name" ] || die "usage: aibox export <name> [dest-dir]"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  dest="${dest:-./aibox-$name-export}"
+  [ -e "$dest" ] && die "destination already exists: $dest"
+  info "Copying $WORKSPACE out of the box to $dest ..."
+  "$ENGINE" cp "$(ctr_name "$name"):$WORKSPACE" "$dest"
+  info "Done: $dest"
+}
+
+# Pull the box's git history into a host repo WITHOUT copying the working tree:
+# bundle the repo inside the box, copy the single bundle file out, and `git fetch`
+# it into the target repo as remote-tracking branches named <name>/*. This is the
+# git-native counterpart to `aibox export` — clean history, no file merges.
+cmd_fetch() {
+  local name="" target="" inbox_path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --path)    inbox_path="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      -*)        die "unknown option for fetch: $1" ;;
+      *) if [ -z "$name" ]; then name="$1"
+         elif [ -z "$target" ]; then target="$1"
+         else die "unexpected argument: $1"; fi; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: aibox fetch <name> [target-repo-dir] [--path <in-box-repo>]"
+  require_box "$name"
+  have git || die "git is required on the host for 'aibox fetch'"
+  detect_engine "$(meta_get "$name" engine || true)"
+  target="${target:-.}"
+  local ctr; ctr=$(ctr_name "$name")
+
+  # Locate the git repo inside the box: $WORKSPACE itself, or — if the workspace
+  # holds a single git subfolder (e.g. a repo cloned into a named dir) — that one.
+  local repo="$inbox_path"
+  if [ -z "$repo" ]; then
+    repo=$("$ENGINE" exec -u "$CONTAINER_USER" "$ctr" sh -c '
+      ws="'"$WORKSPACE"'"
+      if git -C "$ws" rev-parse --show-toplevel >/dev/null 2>&1; then
+        git -C "$ws" rev-parse --show-toplevel; exit 0; fi
+      n=0; hit=""
+      for d in "$ws"/*/; do
+        if git -C "$d" rev-parse --show-toplevel >/dev/null 2>&1; then n=$((n+1)); hit="$d"; fi
+      done
+      [ "$n" = 1 ] && { git -C "$hit" rev-parse --show-toplevel; exit 0; }
+      exit 1' 2>/dev/null) \
+      || die "no git repo found in the box under $WORKSPACE — pass --path <in-box-repo>"
+  fi
+
+  local bundle_box="/tmp/aibox-$name.bundle"
+  info "Bundling $repo inside the box..."
+  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null \
+    || die "git bundle failed in the box (does $repo have any commits?)"
+
+  if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # Target is a git repo: fetch the box's branches in as <name>/* tracking refs.
+    local top tmp; top=$(git -C "$target" rev-parse --show-toplevel)
+    tmp=$(mktemp "${TMPDIR:-/tmp}/aibox-${name}-XXXXXX")
+    "$ENGINE" cp "$ctr:$bundle_box" "$tmp"
+    "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
+    info "Fetching history into $top as '$name/*'..."
+    if ! git -C "$target" fetch --no-tags "$tmp" "refs/heads/*:refs/remotes/$name/*"; then
+      rm -f "$tmp"; die "git fetch from the bundle failed"
+    fi
+    rm -f "$tmp"
+    info "Done. Box branches are now available as:"
+    git -C "$target" branch -r --list "$name/*" | sed 's/^/    /'
+    printf '\nCheck one out with:\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
+  else
+    # Target is not a git repo: drop the bundle file for manual use.
+    local out="$target"
+    [ "$out" = "." ] && out="./aibox-$name.bundle"
+    [ -d "$out" ] && out="${out%/}/aibox-$name.bundle"
+    [ -e "$out" ] && die "destination already exists: $out (remove it or pick another path)"
+    "$ENGINE" cp "$ctr:$bundle_box" "$out"
+    "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
+    info "'$target' is not a git repo — wrote a bundle instead: $out"
+    printf '\nUse it from any clone:\n  git -C /path/to/clone fetch %s "refs/heads/*:refs/remotes/%s/*"\nor create a fresh repo from it:\n  git clone %s my-%s\n' "$out" "$name" "$out" "$name"
+  fi
+}
+
+cmd_list() {
+  detect_engine
+  printf '%-18s %-10s %-22s %-9s %s\n' NAME STATUS SSH PORT COLOR
+  local d name status port color
+  for d in "$BOXES_DIR"/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    status=$("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || printf 'missing')
+    port=$(meta_get "$name" port || printf '?')
+    color=$(meta_get "$name" color || printf '-')
+    printf '%-18s %-10s %-22s %-9s %s\n' "$name" "$status" "$(ctr_name "$name")" "$port" "$color"
+  done
+}
+
+cmd_info() {
+  local name="${1:-}"; [ -n "$name" ] || die "usage: aibox info <name>"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  refresh_port "$name"
+  cat <<EOF
+name      : $name
+container : $(ctr_name "$name")
+engine    : $(meta_get "$name" engine || true)
+status    : $("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || printf 'missing')
+ssh       : ssh $(ctr_name "$name")    (127.0.0.1:$(meta_get "$name" port || true), loopback only)
+workspace : $WORKSPACE
+color     : $(meta_get "$name" color || true)
+created   : $(meta_get "$name" created || true)
+key       : $(box_dir "$name")/id_ed25519
+EOF
+}
+
+cmd_start() {
+  local name="${1:-}"; [ -n "$name" ] || die "usage: aibox start <name>"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  "$ENGINE" start "$(ctr_name "$name")" >/dev/null
+  refresh_port "$name"
+  scan_host_key "$name" >/dev/null 2>&1 || true
+  info "started '$name' (ssh $(ctr_name "$name"))"
+}
+
+cmd_stop() {
+  local name="${1:-}"; [ -n "$name" ] || die "usage: aibox stop <name>"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  "$ENGINE" stop "$(ctr_name "$name")" >/dev/null
+  info "stopped '$name'"
+}
+
+cmd_shell() {
+  local name="${1:-}"; [ -n "$name" ] || die "usage: aibox shell <name>"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  exec "$ENGINE" exec -it -u "$CONTAINER_USER" -w "$WORKSPACE" "$(ctr_name "$name")" bash
+}
+
+# Resolved IDE launch command (array, since Flatpak needs 'flatpak run <id>')
+IDE_CMD=()
+
+flatpak_app() { # flatpak_app <app-id> -> sets IDE_CMD if installed
+  have flatpak || return 1
+  if flatpak info "$1" >/dev/null 2>&1; then
+    IDE_CMD=(flatpak run "$1")
+    return 0
+  fi
+  return 1
+}
+
+find_ide_bin() { # find_ide_bin <app> -> sets IDE_CMD, returns 0/1
+  local app="$1" b mac
+  IDE_CMD=()
+  case "$app" in
+    codium|vscodium)
+      for b in codium vscodium codium-insiders; do
+        have "$b" && { IDE_CMD=("$b"); return 0; }
+      done
+      mac="/Applications/VSCodium.app/Contents/Resources/app/bin/codium"
+      [ -x "$mac" ] && { IDE_CMD=("$mac"); return 0; }
+      flatpak_app com.vscodium.codium && return 0
+      flatpak_app com.vscodium.codium-insiders && return 0 ;;
+    cursor)
+      have cursor && { IDE_CMD=(cursor); return 0; }
+      mac="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
+      [ -x "$mac" ] && { IDE_CMD=("$mac"); return 0; } ;;
+    code|vscode)
+      have code && { IDE_CMD=(code); return 0; }
+      flatpak_app com.visualstudio.code && return 0 ;;
+    windsurf)
+      have windsurf && { IDE_CMD=(windsurf); return 0; } ;;
+    *)
+      have "$app" && { IDE_CMD=("$app"); return 0; } ;;
+  esac
+  return 1
+}
+
+# Flatpak IDEs run in their own sandbox on the HOST side. The Remote-SSH
+# extension (running inside that flatpak) must be able to read aibox's SSH
+# config and keys, or every connection will fail with cryptic errors.
+flatpak_access_hint() { # flatpak_access_hint <app-id>
+  local id="$1" perms
+  perms=$(flatpak info --show-permissions "$id" 2>/dev/null || true)
+  if printf '%s' "$perms" | grep -qE 'filesystems=.*\b(host|home)\b'; then
+    return 0  # broad access already granted; nothing to do
+  fi
+  warn "the '$id' Flatpak does not appear to have access to your home dir.
+         The Remote-SSH extension needs to read ~/.ssh/config and aibox's keys.
+         Grant read access with:
+           flatpak override --user --filesystem=\$HOME/.ssh:ro \\
+             --filesystem=$CONFIG_DIR:ro $id
+         then restart VSCodium and retry."
+}
+
+cmd_code() {
+  local name="" app="codium"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --app) app="$2"; shift 2 ;;
+      -*)    die "unknown option: $1" ;;
+      *)     name="$1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: aibox code <name> [--app codium|cursor|windsurf|code]"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+
+  local status
+  status=$("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || true)
+  [ "$status" = "running" ] || cmd_start "$name"
+  refresh_port "$name"
+
+  find_ide_bin "$app" \
+    || die "could not find '$app' (checked PATH, /Applications, and Flatpak). \
+Flatpak users: 'flatpak list | grep -i ${app}' to confirm the app ID is installed."
+
+  # Flatpak IDE? Check it can actually reach the SSH config/keys on the host.
+  if [ "${IDE_CMD[0]}" = "flatpak" ]; then
+    flatpak_access_hint "${IDE_CMD[2]}"
+  fi
+
+  # For VSCodium, make sure the open-source Remote-SSH extension is present.
+  if [ "$app" = "codium" ] || [ "$app" = "vscodium" ]; then
+    if ! "${IDE_CMD[@]}" --list-extensions 2>/dev/null | grep -qi '^jeanp413.open-remote-ssh$'; then
+      info "Installing 'Open Remote - SSH' extension (jeanp413.open-remote-ssh) from Open VSX..."
+      "${IDE_CMD[@]}" --install-extension jeanp413.open-remote-ssh \
+        || die "failed to install jeanp413.open-remote-ssh — install it manually from Open VSX, then retry"
+    fi
+  fi
+
+  local uri
+  uri="vscode-remote://ssh-remote+$(ctr_name "$name")$WORKSPACE"
+  info "Opening $app -> $uri"
+  "${IDE_CMD[@]}" --folder-uri "$uri" >/dev/null 2>&1 &
+  disown || true
+  cat <<EOF
+${c_dim}First connection downloads the IDE's server component INSIDE the box
+(needs network in the box). Terminals, extensions, and AI agents you start
+in that window all run inside the container.${c_rst}
+EOF
+}
+
+cmd_rm() {
+  local name="" force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force|-f) force=1; shift ;;
+      -*) die "unknown option: $1" ;;
+      *)  name="$1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: aibox rm <name> [--force]"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  if [ "$force" -ne 1 ]; then
+    printf "Delete sandbox '%s'? Anything not pushed/exported is lost. [y/N] " "$name"
+    read -r ans
+    case "$ans" in y|Y|yes|YES) ;; *) die "aborted" ;; esac
+  fi
+  "$ENGINE" rm -f "$(ctr_name "$name")" >/dev/null 2>&1 || true
+  rm -rf "$(box_dir "$name")"
+  write_ssh_include
+  info "removed '$name'"
+}
+
+cmd_doctor() {
+  printf 'aibox %s\n\n' "$AIBOX_VERSION"
+  local ok=1
+  for t in ssh ssh-keygen ssh-keyscan; do
+    if have "$t"; then printf '  [ok]      %s\n' "$t"; else printf '  [MISSING] %s\n' "$t"; ok=0; fi
+  done
+  if have podman; then
+    if podman info >/dev/null 2>&1; then printf '  [ok]      podman (working)\n'
+    else printf '  [warn]    podman installed but not working (podman machine start?)\n'; fi
+  else printf '  [--]      podman not installed\n'; fi
+  if have docker; then
+    if docker info >/dev/null 2>&1; then printf '  [ok]      docker (daemon reachable)\n'
+    else printf '  [warn]    docker installed but daemon not reachable\n'; fi
+  else printf '  [--]      docker not installed\n'; fi
+  for app in codium cursor windsurf code; do
+    if find_ide_bin "$app"; then printf '  [ok]      IDE: %-9s (%s)\n' "$app" "${IDE_CMD[*]}"; fi
+  done
+  # Anti-fingerprinting profile (Tier 1 masks + optional Tier 2 runtime).
+  if [ -f "$HARDENING_CONF" ]; then
+    printf '  [ok]      hardening profile (%s)\n' "$HARDENING_CONF"
+    local rt; rt="${AIBOX_RUNTIME:-$(awk '$1=="runtime"{print $2}' "$HARDENING_CONF" 2>/dev/null | tail -1)}"
+    if [ -n "$rt" ]; then
+      if have "$rt" || { have podman && podman info 2>/dev/null | grep -q "$rt"; }; then
+        printf '  [ok]      Tier 2 runtime: %s\n' "$rt"
+      else
+        printf '  [warn]    Tier 2 runtime "%s" not found on host — install/register it or boxes will fail to start\n' "$rt"
+      fi
+    else
+      printf '  [--]      Tier 2 runtime: off (Tier 1 masks active; see security/hardening.conf)\n'
+    fi
+  else
+    printf '  [warn]    hardening profile missing (%s) — boxes start WITHOUT fingerprint masks\n' "$HARDENING_CONF"
+  fi
+  have podman || have docker || { printf '\nInstall podman (recommended) or docker.\n'; ok=0; }
+  [ "$ok" -eq 1 ] && printf '\nAll core prerequisites look good.\n'
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+main() {
+  mkdir -p "$BOXES_DIR"
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    create)        cmd_create "$@" ;;
+    list|ls)       cmd_list "$@" ;;
+    info)          cmd_info "$@" ;;
+    code|open)     cmd_code "$@" ;;
+    shell|sh)      cmd_shell "$@" ;;
+    start)         cmd_start "$@" ;;
+    stop)          cmd_stop "$@" ;;
+    export)        cmd_export "$@" ;;
+    fetch)         cmd_fetch "$@" ;;
+    copy-in)       cmd_copy_in "$@" ;;
+    rm|remove|delete) cmd_rm "$@" ;;
+    doctor)        cmd_doctor "$@" ;;
+    version|--version|-v) printf 'aibox %s\n' "$AIBOX_VERSION" ;;
+    help|--help|-h) usage ;;
+    *) die "unknown command: $cmd (try: aibox help)" ;;
+  esac
+}
+
+# Only run main when executed directly, not when sourced (e.g. by tests).
+# Tests set AIBOX_SOURCED=1 to load functions without side effects.
+if [ -z "${AIBOX_SOURCED:-}" ]; then
+  main "$@"
+fi

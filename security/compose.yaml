@@ -1,0 +1,56 @@
+# security/compose.yaml — REFERENCE ONLY (aibox does NOT execute this file).
+#
+# aibox creates boxes with `podman run` / `docker run`, not Compose, so the live
+# settings come from security/hardening.conf. This file documents the SAME
+# fingerprint-hardening in Compose form, for anyone who prefers to launch (or
+# adapt) a box with `podman compose` / `docker compose` instead of the CLI.
+#
+# Keep this in sync with security/hardening.conf if you change the masks.
+#
+# Engine note: the `security_opt: mask=` form below is Podman-only. Docker has no
+# mask flag — for Docker, delete the `security_opt:` block and use the `tmpfs:`
+# list plus the `/dev/null` binds shown in the commented-out sections.
+
+services:
+  aibox:
+    # aibox builds its base image inline (debian:bookworm-slim + sshd, git,
+    # python3, sudo). Build it once with the CLI, or point at your own image:
+    #   image must run sshd as PID 1 on port 22 (see the aibox script).
+    image: localhost/aibox-base:1
+
+    hostname: sandbox
+    pids_limit: 4096
+
+    # Loopback-only SSH — never exposed on the LAN, matching the CLI's behavior.
+    ports:
+      - "127.0.0.1::22"
+
+    # --- Tier 2: sandboxed runtime (gVisor). Off by default. ---
+    # Requires runsc installed AND registered with the engine on the host first.
+    # runtime: runsc
+
+    # --- Tier 1: mask host-revealing paths (PODMAN form) ---
+    security_opt:
+      - mask=/proc/cmdline:/proc/modules:/sys/class/dmi:/sys/devices/virtual/dmi:/sys/bus/pci:/sys/bus/usb:/sys/class/net:/sys/class/hwmon:/sys/class/thermal:/sys/class/drm:/sys/block:/sys/class/nvme:/sys/firmware
+
+    # --- Tier 1: DOCKER equivalent (use these INSTEAD of security_opt above) ---
+    # tmpfs:
+    #   - /sys/class/dmi
+    #   - /sys/devices/virtual/dmi
+    #   - /sys/bus/pci
+    #   - /sys/bus/usb
+    #   - /sys/class/net
+    #   - /sys/class/hwmon
+    #   - /sys/class/thermal
+    #   - /sys/class/drm
+    #   - /sys/block
+    #   - /sys/class/nvme
+    #   - /sys/firmware
+    # volumes:
+    #   - /dev/null:/proc/cmdline:ro
+    #   - /dev/null:/proc/modules:ro
+
+    # NOTE (matches hardening.conf): /proc/stat (host btime) and /proc/cpuinfo
+    # are intentionally NOT masked — doing so breaks top/htop and build tools,
+    # and the CPU is readable via the CPUID instruction regardless. See the
+    # README "What still can't be mitigated" section.

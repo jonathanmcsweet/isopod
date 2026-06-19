@@ -1,0 +1,90 @@
+# GitLab CI/CD for aibox.
+#
+# Designed to run IDENTICALLY under:
+#   * gitlab-ci-local  (run jobs on your machine: `gitlab-ci-local`)
+#   * GitLab.com shared runners and self-managed runners
+#
+# Three stages. The first two need no container engine and run anywhere,
+# unprivileged. The `live` stage needs a real podman/docker INSIDE the job,
+# which unprivileged shared runners cannot provide (creating user namespaces
+# is blocked in unprivileged CI containers), so it is `manual` and tagged —
+# it stays out of your way on GitLab.com and runs only where a capable runner
+# exists, or locally.
+#
+# Nothing here is fetched at runtime: bats and its helpers are vendored under
+# test/libs/, so jobs are hermetic and fast.
+
+stages: [lint, test, live]
+
+default:
+  image: debian:bookworm-slim
+
+variables:
+  DEBIAN_FRONTEND: "noninteractive"
+  GIT_SUBMODULE_STRATEGY: none
+
+# ---------------------------------------------------------------------------
+# Stage 1: lint — shellcheck + bash syntax. Pure static analysis.
+# ---------------------------------------------------------------------------
+shellcheck:
+  stage: lint
+  script:
+    - apt-get update -qq && apt-get install -y -qq shellcheck
+    - shellcheck -S warning aibox install.sh test/run.sh
+    - bash -n aibox install.sh
+    # lint the discrete python helpers under lib/
+    - apt-get install -y -qq python3 python3-pyflakes
+    - python3 -m py_compile lib/*.py
+    - python3 -m pyflakes lib/*.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+# ---------------------------------------------------------------------------
+# Stage 2: test — stubbed bats suite + interactive pexpect tests.
+# No container engine; podman/docker/ssh are stubbed by the suite itself.
+# ---------------------------------------------------------------------------
+unit-and-integration:
+  stage: test
+  script:
+    - apt-get update -qq
+    # Install core test deps first, on their own line, so they always land
+    # even if an optional package on another line is unavailable.
+    - apt-get install -y -qq bash openssh-client python3 python3-pexpect
+    - bash test/run.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+# ---------------------------------------------------------------------------
+# Stage 3: live — REAL containers, exercising the isolation guarantees.
+#
+# Requires a runner that can run podman inside the job. On GitLab.com this
+# means it WILL NOT run on the default shared runners (unprivileged); it is
+# manual so it never blocks the pipeline. Point `tags` at your own runner
+# that has podman available, or run it locally:
+#
+#   RUN_LIVE=1 test/run.sh
+#
+# If you operate a self-managed runner with podman (privileged or a
+# podman-in-podman setup), remove `when: manual` or add the runner's tag.
+# ---------------------------------------------------------------------------
+live-isolation:
+  stage: live
+  image: quay.io/podman/stable     # ships podman; needs a capable runner
+  variables:
+    RUN_LIVE: "1"
+    # vfs avoids needing overlay/fuse in constrained CI; slower but portable
+    STORAGE_DRIVER: "vfs"
+    AIBOX_TEST_IMAGE: "debian:bookworm-slim"
+  before_script:
+    - dnf install -y openssh-clients python3 >/dev/null 2>&1 || true
+  script:
+    - test/libs/bats-core/bin/bats test/live.bats
+  tags:
+    - podman          # <-- set this to match your podman-capable runner
+  when: manual
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
