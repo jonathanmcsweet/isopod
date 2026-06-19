@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# verify-host-isolation.sh — empirically confirm an aibox container cannot
+# verify-host-isolation.sh — empirically confirm an isopod container cannot
 # see host-machine information.
 #
 # It probes the box exactly the way an AI agent extension would: through the
@@ -8,8 +8,8 @@
 # what the box sees and flags anything that looks like it leaked from the host.
 #
 # Usage:
-#   ./verify-host-isolation.sh <box-ssh-host>      # e.g. aibox-myproject
-#   ./verify-host-isolation.sh aibox-myproject --strict
+#   ./verify-host-isolation.sh <box-ssh-host>      # e.g. isopod-myproject
+#   ./verify-host-isolation.sh isopod-myproject --strict
 #
 # Exit codes: 0 = no host leakage detected, 1 = potential leak, 2 = usage error.
 #
@@ -25,6 +25,12 @@ if [[ -z "$BOX" ]]; then
   exit 2
 fi
 
+# --strict: treat checks that could not actually be performed (e.g. no
+# extension-host process is running yet) as failures rather than skippable
+# notes, so a PASS means every probe really ran.
+strict=0
+[[ "$STRICT" == "--strict" ]] && strict=1
+
 # --- Gather host-side fingerprints we will look for inside the box ----------
 HOST_HOSTNAME="$(hostname 2>/dev/null || echo __nohost__)"
 HOST_USER="$(id -un 2>/dev/null || echo __nouser__)"
@@ -32,7 +38,6 @@ HOST_HOME="${HOME:-__nohome__}"
 HOST_KERNEL="$(uname -r 2>/dev/null || echo __nokernel__)"
 # A few host env values that should NEVER appear in the box:
 HOST_SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}"
-HOST_PWD="${PWD:-}"
 
 leak=0
 note() { printf '  %s\n' "$*"; }
@@ -43,7 +48,7 @@ run_in_box() {
   ssh -o BatchMode=yes -o ForwardAgent=no -o ForwardX11=no "$BOX" "$@" 2>/dev/null
 }
 
-echo "=== aibox host-isolation verification ==="
+echo "=== isopod host-isolation verification ==="
 echo "Box SSH host : $BOX"
 echo "Host machine : user=$HOST_USER host=$HOST_HOSTNAME kernel=$HOST_KERNEL"
 echo
@@ -87,7 +92,7 @@ fi
 # SSH_AUTH_SOCK present at all (even container-side) means forwarding is on.
 if grep -q '^SSH_AUTH_SOCK=' <<<"$BOX_ENV"; then
   flag "SSH_AUTH_SOCK is set in the box — SSH agent forwarding appears ENABLED."
-  note "    aibox expects ForwardAgent no. Check your ssh_config."
+  note "    isopod expects ForwardAgent no. Check your ssh_config."
 else
   note "SSH_AUTH_SOCK not set in box (agent forwarding off — good)."
 fi
@@ -97,14 +102,14 @@ echo
 echo "--- 3. Host filesystem probes ---"
 # These host paths should NOT be readable/visible from inside the box.
 for probe in "$HOST_HOME/.ssh/id_rsa" "$HOST_HOME/.aws/credentials" \
-             "$HOST_HOME/.config/aibox" "/etc/machine-id-host" ; do
+             "$HOST_HOME/.config/isopod" "/etc/machine-id-host" ; do
   if run_in_box test -e "$probe"; then
     flag "host path is visible inside the box: $probe"
   fi
 done
 note "checked common host secret paths — none visible unless flagged above"
 
-# Bind-mount detection: aibox should have NO host bind mounts.
+# Bind-mount detection: isopod should have NO host bind mounts.
 BOX_MOUNTS="$(run_in_box cat /proc/mounts)"
 if grep -Eq '/host|/mnt/host|host_mnt' <<<"$BOX_MOUNTS"; then
   flag "suspicious host-like bind mount detected in /proc/mounts:"
@@ -133,7 +138,11 @@ echo
 echo "--- 5. Remote extension-host process environment ---"
 EH_PIDS="$(run_in_box pgrep -f 'extensionHostProcess|server-main|vscode-server|codium-server' || true)"
 if [[ -z "$EH_PIDS" ]]; then
-  note "no extension-host process found (open a window to the box, then re-run for this check)"
+  if [[ "$strict" -eq 1 ]]; then
+    flag "no extension-host process found — cannot verify what an agent sees (--strict)"
+  else
+    note "no extension-host process found (open a window to the box, then re-run for this check)"
+  fi
 else
   for pid in $EH_PIDS; do
     EH_ENV="$(run_in_box cat "/proc/$pid/environ" 2>/dev/null | tr '\0' '\n')"

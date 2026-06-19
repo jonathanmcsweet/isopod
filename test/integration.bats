@@ -7,10 +7,10 @@
 setup() {
   load "$(dirname "$BATS_TEST_FILENAME")/helper.bash"
   load_libs
-  aibox_setup_env
+  isopod_setup_env
   install_engine_stubs
 }
-teardown() { aibox_teardown_env; }
+teardown() { isopod_teardown_env; }
 
 # A podman stub rich enough for create/list/info/rm to traverse their paths.
 install_engine_stubs() {
@@ -45,7 +45,7 @@ path=""; prev=""
 for a in "$@"; do [ "$prev" = "-f" ] && path="$a"; prev="$a"; done
 if [ -n "$path" ]; then
   echo "PRIVKEY" > "$path"
-  echo "ssh-ed25519 AAAAfake aibox" > "$path.pub"
+  echo "ssh-ed25519 AAAAfake isopod" > "$path.pub"
 fi
 exit 0
 EOF
@@ -67,32 +67,32 @@ EOF
 
 # ---- argument validation (no engine work should happen) ----------------------
 @test "create rejects an invalid box name" {
-  run "$AIBOX_ROOT/aibox" create "bad name"
+  run "$ISOPOD_ROOT/isopod" create "bad name"
   assert_failure
   assert_output --partial "invalid name"
 }
 
 @test "create refuses both --repo and --copy together" {
-  run "$AIBOX_ROOT/aibox" create demo --repo https://x/y --copy /tmp
+  run "$ISOPOD_ROOT/isopod" create demo --repo https://x/y --copy /tmp
   assert_failure
   assert_output --partial "either --repo or --copy"
 }
 
 @test "create rejects a --copy path that does not exist" {
-  run "$AIBOX_ROOT/aibox" create demo --copy /no/such/path
+  run "$ISOPOD_ROOT/isopod" create demo --copy /no/such/path
   assert_failure
   assert_output --partial "does not exist"
 }
 
 @test "create rejects an unknown color" {
-  run "$AIBOX_ROOT/aibox" create demo --color neon
+  run "$ISOPOD_ROOT/isopod" create demo --color neon
   assert_failure
   assert_output --partial "unknown color"
 }
 
 # ---- full create flow --------------------------------------------------------
 @test "create publishes SSH on loopback only" {
-  run "$AIBOX_ROOT/aibox" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   # the run command must bind to 127.0.0.1, never 0.0.0.0 or a bare port
   assert_stub_called 'podman run .*127\.0\.0\.1::22'
@@ -100,26 +100,26 @@ EOF
 }
 
 @test "create generates a dedicated keypair and writes meta" {
-  run "$AIBOX_ROOT/aibox" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
-  [ -f "$AIBOX_CONFIG_DIR/boxes/demo/id_ed25519" ]
-  [ -f "$AIBOX_CONFIG_DIR/boxes/demo/meta" ]
-  run grep '^color=#0f766e$' "$AIBOX_CONFIG_DIR/boxes/demo/meta"
+  [ -f "$ISOPOD_CONFIG_DIR/boxes/demo/id_ed25519" ]
+  [ -f "$ISOPOD_CONFIG_DIR/boxes/demo/meta" ]
+  run grep '^color=#0f766e$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
   assert_success
 }
 
 @test "create writes the box into the managed ssh config" {
-  "$AIBOX_ROOT/aibox" create demo --color teal
-  run cat "$AIBOX_CONFIG_DIR/ssh_config"
-  assert_output --partial "Host aibox-demo"
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run cat "$ISOPOD_CONFIG_DIR/ssh_config"
+  assert_output --partial "Host isopod-demo"
   assert_output --partial "ForwardAgent no"
 }
 
 @test "create with --copy issues a cp into the container, not a mount" {
   mkdir -p "$TEST_TMP/src"; echo hi > "$TEST_TMP/src/file.txt"
-  run "$AIBOX_ROOT/aibox" create demo --copy "$TEST_TMP/src" --color blue
+  run "$ISOPOD_ROOT/isopod" create demo --copy "$TEST_TMP/src" --color blue
   assert_success
-  assert_stub_called "podman cp $TEST_TMP/src aibox-demo:"
+  assert_stub_called "podman cp $TEST_TMP/src isopod-demo:"
   # crucially, no bind mount flag should ever appear in the run command
   refute_output --partial "-v "
   assert_stub_not_called 'podman run .*--volume'
@@ -127,74 +127,74 @@ EOF
 }
 
 @test "create applies Tier 1 fingerprint masks from the hardening profile" {
-  run "$AIBOX_ROOT/aibox" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   # podman gets a single --security-opt mask= list covering the leaky paths
   assert_stub_called 'podman run .*--security-opt mask=.*/sys/class/dmi'
   assert_stub_called 'podman run .*mask=.*/proc/cmdline'
 }
 
-@test "create injects a Tier 2 runtime when AIBOX_RUNTIME is set" {
-  AIBOX_RUNTIME=runsc run "$AIBOX_ROOT/aibox" create demo --color teal
+@test "create injects a Tier 2 runtime when ISOPOD_RUNTIME is set" {
+  ISOPOD_RUNTIME=runsc run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   assert_stub_called 'podman run .*--runtime runsc'
 }
 
 @test "fetch requires a box name" {
-  run "$AIBOX_ROOT/aibox" fetch
+  run "$ISOPOD_ROOT/isopod" fetch
   assert_failure
-  assert_output --partial "usage: aibox fetch"
+  assert_output --partial "usage: isopod fetch"
 }
 
 @test "fetch rejects unknown options" {
-  run "$AIBOX_ROOT/aibox" fetch demo --bogus
+  run "$ISOPOD_ROOT/isopod" fetch demo --bogus
   assert_failure
   assert_output --partial "unknown option for fetch"
 }
 
 @test "create with --repo clones inside the box" {
-  run "$AIBOX_ROOT/aibox" create demo --repo https://example.com/r.git --color blue
+  run "$ISOPOD_ROOT/isopod" create demo --repo https://example.com/r.git --color blue
   assert_success
   assert_stub_called "podman exec .*git clone"
 }
 
 @test "create refuses to clobber an existing box" {
-  "$AIBOX_ROOT/aibox" create demo --color teal
-  run "$AIBOX_ROOT/aibox" create demo --color teal
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_failure
   assert_output --partial "already exists"
 }
 
 @test "create with --no-sudo does not install a sudoers entry" {
-  run "$AIBOX_ROOT/aibox" create demo --no-sudo --color teal
+  run "$ISOPOD_ROOT/isopod" create demo --no-sudo --color teal
   assert_success
   assert_stub_not_called "sudoers"
 }
 
 @test "create defaults to giving passwordless sudo" {
-  run "$AIBOX_ROOT/aibox" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   assert_stub_called "sudoers"
 }
 
 # ---- list / info -------------------------------------------------------------
 @test "list shows a created box and its port" {
-  "$AIBOX_ROOT/aibox" create demo --color teal
-  run "$AIBOX_ROOT/aibox" list
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" list
   assert_success
   assert_output --partial "demo"
   assert_output --partial "45678"
 }
 
 @test "info errors on a nonexistent box" {
-  run "$AIBOX_ROOT/aibox" info ghost
+  run "$ISOPOD_ROOT/isopod" info ghost
   assert_failure
   assert_output --partial "no such sandbox"
 }
 
 # ---- code flow ---------------------------------------------------------------
 @test "code launches the IDE with a remote-ssh folder uri" {
-  "$AIBOX_ROOT/aibox" create demo --color teal
+  "$ISOPOD_ROOT/isopod" create demo --color teal
   # provide a codium stub that records its launch args
   cat > "$STUB_DIR/codium" <<'EOF'
 #!/usr/bin/env bash
@@ -202,46 +202,46 @@ echo "codium $*" >> "$STUB_LOG"
 exit 0
 EOF
   chmod +x "$STUB_DIR/codium"
-  run "$AIBOX_ROOT/aibox" code demo
+  run "$ISOPOD_ROOT/isopod" code demo
   assert_success
-  assert_stub_called "codium .*--folder-uri vscode-remote://ssh-remote\+aibox-demo/home/dev/workspace"
+  assert_stub_called "codium .*--folder-uri vscode-remote://ssh-remote\+isopod-demo/home/dev/workspace"
 }
 
 @test "code auto-installs the open-remote-ssh extension if absent" {
-  "$AIBOX_ROOT/aibox" create demo --color teal
+  "$ISOPOD_ROOT/isopod" create demo --color teal
   cat > "$STUB_DIR/codium" <<'EOF'
 #!/usr/bin/env bash
 echo "codium $*" >> "$STUB_LOG"
-# --list-extensions returns nothing, so aibox should install
+# --list-extensions returns nothing, so isopod should install
 [ "$1" = "--list-extensions" ] && exit 0
 exit 0
 EOF
   chmod +x "$STUB_DIR/codium"
-  run "$AIBOX_ROOT/aibox" code demo
+  run "$ISOPOD_ROOT/isopod" code demo
   assert_stub_called "codium --install-extension jeanp413.open-remote-ssh"
 }
 
 @test "code errors when the requested IDE is not installed" {
-  "$AIBOX_ROOT/aibox" create demo --color teal
-  run "$AIBOX_ROOT/aibox" code demo --app windsurf
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" code demo --app windsurf
   assert_failure
   assert_output --partial "could not find 'windsurf'"
 }
 
 # ---- rm ----------------------------------------------------------------------
 @test "rm --force removes the container, keys, and ssh config entry" {
-  "$AIBOX_ROOT/aibox" create demo --color teal
-  [ -d "$AIBOX_CONFIG_DIR/boxes/demo" ]
-  run "$AIBOX_ROOT/aibox" rm demo --force
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  [ -d "$ISOPOD_CONFIG_DIR/boxes/demo" ]
+  run "$ISOPOD_ROOT/isopod" rm demo --force
   assert_success
-  [ ! -d "$AIBOX_CONFIG_DIR/boxes/demo" ]
-  assert_stub_called "podman rm -f aibox-demo"
-  run cat "$AIBOX_CONFIG_DIR/ssh_config"
-  refute_output --partial "Host aibox-demo"
+  [ ! -d "$ISOPOD_CONFIG_DIR/boxes/demo" ]
+  assert_stub_called "podman rm -f isopod-demo"
+  run cat "$ISOPOD_CONFIG_DIR/ssh_config"
+  refute_output --partial "Host isopod-demo"
 }
 
 @test "rm errors on a nonexistent box" {
-  run "$AIBOX_ROOT/aibox" rm ghost --force
+  run "$ISOPOD_ROOT/isopod" rm ghost --force
   assert_failure
   assert_output --partial "no such sandbox"
 }

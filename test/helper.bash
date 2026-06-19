@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
-# Shared setup for all aibox bats tests.
+# Shared setup for all isopod bats tests.
 #
 # Strategy:
-#   * Source aibox with AIBOX_SOURCED=1 so main() does not run; we get all
+#   * Source isopod with ISOPOD_SOURCED=1 so main() does not run; we get all
 #     functions in scope and call them directly.
 #   * Put a stubs/ dir first on PATH so podman/docker/ssh/flatpak/etc. are
 #     replaced by recording fakes. This lets us test create/code/etc. with
 #     no real container engine.
-#   * Point AIBOX_CONFIG_DIR and HOME at a per-test tmp dir so nothing
+#   * Point ISOPOD_CONFIG_DIR and HOME at a per-test tmp dir so nothing
 #     touches the real machine and tests are hermetic.
 
-AIBOX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export AIBOX_ROOT
+ISOPOD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export ISOPOD_ROOT
 
 load_libs() {
-  load "$AIBOX_ROOT/test/libs/bats-support/load.bash"
-  load "$AIBOX_ROOT/test/libs/bats-assert/load.bash"
+  load "$ISOPOD_ROOT/test/libs/bats-support/load.bash"
+  load "$ISOPOD_ROOT/test/libs/bats-assert/load.bash"
 }
 
 # Create a sandboxed environment for a single test.
-aibox_setup_env() {
-  TEST_TMP="$(mktemp -d "${BATS_TMPDIR:-/tmp}/aibox-test.XXXXXX")"
+isopod_setup_env() {
+  TEST_TMP="$(mktemp -d "${BATS_TMPDIR:-/tmp}/isopod-test.XXXXXX")"
   export TEST_TMP
   export HOME="$TEST_TMP/home"
-  export AIBOX_CONFIG_DIR="$TEST_TMP/home/.config/aibox"
+  export ISOPOD_CONFIG_DIR="$TEST_TMP/home/.config/isopod"
   mkdir -p "$HOME/.ssh"
 
   # Stub directory takes precedence on PATH.
@@ -34,14 +34,14 @@ aibox_setup_env() {
   export PATH="$STUB_DIR:$PATH"
 }
 
-aibox_teardown_env() {
+isopod_teardown_env() {
   [ -n "${TEST_TMP:-}" ] && rm -rf "$TEST_TMP"
 }
 
-# Source the aibox script's functions without executing main.
-load_aibox() {
-  AIBOX_SOURCED=1
-  # aibox runs `set -euo pipefail` at the top; sourcing it would leak those
+# Source the isopod script's functions without executing main.
+load_isopod() {
+  ISOPOD_SOURCED=1
+  # isopod runs `set -euo pipefail` at the top; sourcing it would leak those
   # options into the bats test shell and change error semantics. Save and
   # restore the relevant shell options around the source.
   local _saved_e _saved_u _saved_pipefail
@@ -49,7 +49,7 @@ load_aibox() {
   [[ $- == *u* ]] && _saved_u=1 || _saved_u=0
   _saved_pipefail="$(set -o | awk '/pipefail/{print $2}')"
   # shellcheck disable=SC1090
-  source "$AIBOX_ROOT/aibox"
+  source "$ISOPOD_ROOT/isopod"
   [ "$_saved_e" = 1 ] || set +e
   [ "$_saved_u" = 1 ] || set +u
   [ "$_saved_pipefail" = on ] || set +o pipefail

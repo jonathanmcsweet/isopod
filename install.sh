@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# install.sh — install (or uninstall) aibox using each platform's conventions.
+# install.sh — install (or uninstall) isopod using each platform's conventions.
 #
-# aibox is multi-file: the `aibox` script needs its `lib/` folder beside it.
+# isopod is multi-file: the `isopod` script needs its `lib/` folder beside it.
 # This installer copies the whole project into one program directory and puts a
-# symlink to the `aibox` entry point on your PATH. aibox resolves its own
+# symlink to the `isopod` entry point on your PATH. isopod resolves its own
 # location through that symlink, so `lib/` is always found.
 #
 # Usage:
@@ -18,7 +18,7 @@
 # Honors $DESTDIR for packaging. Safe to re-run (idempotent).
 set -euo pipefail
 
-APP=aibox
+APP=isopod
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 c_grn=$'\033[32m'; c_red=$'\033[31m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
@@ -46,7 +46,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# --- sanity: are we sitting on a real aibox source tree? --------------------
+# --- sanity: are we sitting on a real isopod source tree? --------------------
 [ -f "$SELF_DIR/$APP" ] || die "can't find the '$APP' script next to this installer ($SELF_DIR)"
 [ -f "$SELF_DIR/lib/apply_color.py" ] || die "missing lib/apply_color.py — incomplete source tree"
 
@@ -66,7 +66,7 @@ if [ "$OS" = "Linux" ] && [ -r /etc/os-release ]; then
 fi
 
 # --- choose install locations ----------------------------------------------
-# Program files go in <libroot>/aibox; the entry point is symlinked into <bindir>.
+# Program files go in <libroot>/isopod; the entry point is symlinked into <bindir>.
 case "$SCOPE" in
   prefix)
     [ -n "$PREFIX" ] || die "--prefix requires a directory"
@@ -109,8 +109,8 @@ if [ "$MODE" = "uninstall" ]; then
   [ -L "$LINK" ] || [ -e "$LINK" ] && run rm -f "$LINK" || true
   [ -d "$PROGDIR" ] && run rm -rf "$PROGDIR" || true
   info "Removed program dir and symlink (if they existed)."
-  printf '%sNote:%s your sandboxes and keys under ~/.config/aibox were left intact.\n' "$c_dim" "$c_rst"
-  printf '      Run %saibox rm <name>%s for each box first if you want them gone.\n' "$c_dim" "$c_rst"
+  printf '%sNote:%s your sandboxes and keys under ~/.config/isopod were left intact.\n' "$c_dim" "$c_rst"
+  printf '      Run %sisopod rm <name>%s for each box first if you want them gone.\n' "$c_dim" "$c_rst"
   exit 0
 fi
 
@@ -157,11 +157,11 @@ fi
 
 # --- engine guidance --------------------------------------------------------
 if [ "$DRYRUN" -eq 0 ] && ! have podman && ! have docker; then
-  printf '\n%sNo container engine found.%s aibox needs podman (recommended) or docker:\n' "$c_yel" "$c_rst"
+  printf '\n%sNo container engine found.%s isopod needs podman (recommended) or docker:\n' "$c_yel" "$c_rst"
   if [ "$IS_IMMUTABLE" = 1 ]; then
     printf '   Immutable Fedora ships podman on the host already; if missing, layer it:\n'
     printf '       %srpm-ostree install podman%s   (then reboot)\n' "$c_dim" "$c_rst"
-    printf '   %sDo NOT install aibox inside a toolbox/distrobox%s — it must reach the\n' "$c_yel" "$c_rst"
+    printf '   %sDo NOT install isopod inside a toolbox/distrobox%s — it must reach the\n' "$c_yel" "$c_rst"
     printf '   host podman to manage your sandboxes. This installer put it on the host.\n'
   else
     case "$DISTRO" in
@@ -176,6 +176,6 @@ fi
 if [ "$DRYRUN" -eq 1 ]; then
   printf '\n%s(--check) no changes were made.%s\n' "$c_dim" "$c_rst"
 else
-  printf '\n%sDone.%s Verify with: %saibox doctor%s\n' "$c_grn" "$c_rst" "$c_dim" "$c_rst"
-  [ "$on_path" -eq 1 ] && printf 'Try: %saibox create demo --color teal%s\n' "$c_dim" "$c_rst"
+  printf '\n%sDone.%s Verify with: %sisopod doctor%s\n' "$c_grn" "$c_rst" "$c_dim" "$c_rst"
+  [ "$on_path" -eq 1 ] && printf 'Try: %sisopod create demo --color teal%s\n' "$c_dim" "$c_rst"
 fi

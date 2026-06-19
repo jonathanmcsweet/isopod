@@ -1,12 +1,12 @@
 # VSCodium Remote-SSH Host-Information Isolation Audit
 
-**Project:** aibox (disposable AI-coding sandboxes, VSCodium → Podman container over SSH)
+**Project:** isopod (disposable AI-coding sandboxes, VSCodium → Podman container over SSH)
 **Question:** Can an AI agent extension running in the container see information about the host machine?
-**Verdict:** No — under the aibox configuration, no host-derived information crosses into the container at runtime. The isolation is structural, not behavioral.
+**Verdict:** No — under the isopod configuration, no host-derived information crosses into the container at runtime. The isolation is structural, not behavioral.
 
 ## Scope
 
-Sources audited (all at the versions aibox tracks):
+Sources audited (all at the versions isopod tracks):
 
 | Component | Repo | Version |
 |---|---|---|
@@ -20,7 +20,7 @@ Sources audited (all at the versions aibox tracks):
 
 In the Remote-SSH model the editor splits in two: a thin **client** on your host that does UI and SSH transport, and a **server** (the "REH" — remote extension host) that runs *inside the container*. AI agent extensions (Cline, Continue, Roo, etc.), the integrated terminal, and all of their tool/shell execution run in the **server** process — inside the container — so the environment they observe is the container's, not the host's.
 
-The audit reduces to one question: **what data, if any, crosses from host → container?** There are only three candidate channels, and all three are clean under aibox.
+The audit reduces to one question: **what data, if any, crosses from host → container?** There are only three candidate channels, and all three are clean under isopod.
 
 ---
 
@@ -59,7 +59,7 @@ private _getEnvironment(): platform.IProcessEnvironment {
 
 This base env is merged with workspace config in `terminalEnvironment.ts` (`createTerminalEnvironment`, ~line 250+), but the root is always the container process. No host env is mixed in.
 
-## Finding 3 — The single host → container channel carries nothing host-identifying (and is empty under aibox)
+## Finding 3 — The single host → container channel carries nothing host-identifying (and is empty under isopod)
 
 The only way host data can reach the server is the resolver's `extensionHostEnv`, set by the Remote-SSH extension.
 
@@ -81,7 +81,7 @@ Key points:
 - Even then, the resolved value is a *container-side* socket path produced by the install script, not host data.
 - This object becomes `startParamsEnv` in Finding 1 — so when it's empty, the host contributes literally nothing to the extension host environment.
 
-**aibox relevance:** aibox disables agent forwarding (`ForwardAgent no`; agent + X11 forwarding are explicitly off in the design). With forwarding off, the `if (agentForward)` branch never runs, `extensionHostEnv` is `{}`, and the host → container env channel is closed entirely.
+**isopod relevance:** isopod disables agent forwarding (`ForwardAgent no`; agent + X11 forwarding are explicitly off in the design). With forwarding off, the `if (agentForward)` branch never runs, `extensionHostEnv` is `{}`, and the host → container env channel is closed entirely.
 
 ## Finding 4 — The connection handshake carries no host identifiers
 
@@ -125,7 +125,7 @@ These do not leak host info into the container's runtime, but they are where the
 
 ## Bottom line
 
-Under the aibox configuration (no agent forwarding, no bind mounts, files entering only via in-container `git clone`/explicit copy), an AI agent extension cannot see host environment variables, hostname, host filesystem, or host network identity. The protection comes from the architecture — the extension host is a process inside the container, and every environment-construction path roots in that container's own `process.env` — not from trusting the extension. The one thing the architecture does *not* constrain is what a compromised extension can transmit outward over the container's network; that is governed by your container egress policy.
+Under the isopod configuration (no agent forwarding, no bind mounts, files entering only via in-container `git clone`/explicit copy), an AI agent extension cannot see host environment variables, hostname, host filesystem, or host network identity. The protection comes from the architecture — the extension host is a process inside the container, and every environment-construction path roots in that container's own `process.env` — not from trusting the extension. The one thing the architecture does *not* constrain is what a compromised extension can transmit outward over the container's network; that is governed by your container egress policy.
 
 ## How to verify empirically
 

@@ -4,11 +4,11 @@
 setup() {
   load "$(dirname "$BATS_TEST_FILENAME")/helper.bash"
   load_libs
-  aibox_setup_env
-  load_aibox
+  isopod_setup_env
+  load_isopod
   # The color-merge logic is a discrete file we can exercise directly without
   # a container. (No more extracting it from a heredoc.)
-  MERGE_PY="$AIBOX_ROOT/lib/apply_color.py"
+  MERGE_PY="$ISOPOD_ROOT/lib/apply_color.py"
   [ -f "$MERGE_PY" ] || { echo "missing lib/apply_color.py"; return 1; }
   export MERGE_PY
   # Resolve python3 to an absolute path BEFORE any stub dir is prepended to
@@ -22,10 +22,10 @@ setup() {
   [ -n "$PYTHON3" ] || { echo "python3 not found"; return 1; }
   export PYTHON3
 }
-teardown() { aibox_teardown_env; }
+teardown() { isopod_teardown_env; }
 
 run_merge() { # run_merge <workspace> <hex> <name>
-  AIBOX_COLOR="$2" AIBOX_NAME="$3" AIBOX_WS="$1" "$PYTHON3" "$MERGE_PY"
+  ISOPOD_COLOR="$2" ISOPOD_NAME="$3" ISOPOD_WS="$1" "$PYTHON3" "$MERGE_PY"
 }
 
 @test "merge creates settings.json with color customizations on a clean workspace" {
@@ -71,7 +71,7 @@ JSONC
   printf 'this is not json at all {{{' > "$ws/.vscode/settings.json"
   run run_merge "$ws" "#15803d" demo
   assert_success
-  [ -f "$ws/.vscode/settings.json.aibox-backup" ]
+  [ -f "$ws/.vscode/settings.json.isopod-backup" ]
   # new file is valid json with our colors
   run "$PYTHON3" -c "import json;json.load(open('$ws/.vscode/settings.json'))"
   assert_success

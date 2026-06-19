@@ -6,8 +6,8 @@
 #   RUN_LIVE=1 test/libs/bats-core/bin/bats test/live.bats
 #
 # Optional env:
-#   AIBOX_TEST_IMAGE   base image to use (default: debian:bookworm-slim)
-#   AIBOX_BUILD_ARGS   passed through to the engine build (e.g. --network=host)
+#   ISOPOD_TEST_IMAGE   base image to use (default: debian:bookworm-slim)
+#   ISOPOD_BUILD_ARGS   passed through to the engine build (e.g. --network=host)
 
 setup_file() {
   if [ "${RUN_LIVE:-0}" != "1" ]; then
@@ -19,24 +19,24 @@ setup() {
   load "$(dirname "$BATS_TEST_FILENAME")/helper.bash"
   load_libs
   if [ "${RUN_LIVE:-0}" != "1" ]; then skip "live tests disabled"; fi
-  aibox_setup_env
+  isopod_setup_env
   # real engine, real ssh — only HOME/config are sandboxed
   BOX="livetest-$$-${BATS_TEST_NUMBER}"
   export BOX
-  export IMG="${AIBOX_TEST_IMAGE:-debian:bookworm-slim}"
+  export IMG="${ISOPOD_TEST_IMAGE:-debian:bookworm-slim}"
 }
 
 teardown() {
   [ "${RUN_LIVE:-0}" = "1" ] || return 0
-  "$AIBOX_ROOT/aibox" rm "$BOX" --force >/dev/null 2>&1 || true
-  aibox_teardown_env
+  "$ISOPOD_ROOT/isopod" rm "$BOX" --force >/dev/null 2>&1 || true
+  isopod_teardown_env
 }
 
 # Connect using the box's own key/port/known_hosts explicitly — mirrors the
 # script's internal box_ssh, and avoids depending on ~/.ssh/config resolution
 # (OpenSSH reads the real user's config, not $HOME's, so -F is what we use).
 bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
-  local cfg="$AIBOX_CONFIG_DIR/boxes/$BOX"
+  local cfg="$ISOPOD_CONFIG_DIR/boxes/$BOX"
   local port; port=$(sed -n 's/^port=//p' "$cfg/meta")
   local -a opts=() rcmd=()
   while [ $# -gt 0 ]; do
@@ -53,7 +53,7 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 }
 
 @test "live: a created box is reachable over ssh as the dev user" {
-  run "$AIBOX_ROOT/aibox" create "$BOX" --image "$IMG"
+  run "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   assert_success
   run bssh -- whoami
   assert_success
@@ -63,7 +63,7 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 @test "live: the box cannot see host files (no bind mounts)" {
   marker="$TEST_TMP/HOST_SECRET_$$"
   echo "secret" > "$marker"
-  "$AIBOX_ROOT/aibox" create "$BOX" --image "$IMG"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   # the marker path must not exist inside the container
   run bssh -- test -e "$marker"
   assert_failure
@@ -74,7 +74,7 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 
 @test "live: --copy ingests a folder as a copy, and deleting it in-box spares the host" {
   src="$TEST_TMP/proj"; mkdir -p "$src"; echo "original" > "$src/file.txt"
-  "$AIBOX_ROOT/aibox" create "$BOX" --image "$IMG" --copy "$src"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --copy "$src"
   # file is present in the box
   run bssh -- cat /home/dev/workspace/proj/file.txt
   assert_output "original"
@@ -86,7 +86,7 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 }
 
 @test "live: agent forwarding is refused by the box" {
-  "$AIBOX_ROOT/aibox" create "$BOX" --image "$IMG"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   # even if a client asks for agent forwarding, sshd config disallows it, so
   # no agent socket is set up in the box. printenv exits non-zero / empty when
   # the var is unset; we assert the box reports it as unset.
@@ -97,7 +97,7 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 }
 
 @test "live: color settings are written inside the box workspace" {
-  "$AIBOX_ROOT/aibox" create "$BOX" --image "$IMG" --color teal
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --color teal
   run bssh -- \
         cat /home/dev/workspace/.vscode/settings.json
   assert_success
@@ -105,16 +105,16 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 }
 
 @test "live: stop then start preserves the box and reconnects" {
-  "$AIBOX_ROOT/aibox" create "$BOX" --image "$IMG"
-  "$AIBOX_ROOT/aibox" stop "$BOX"
-  run "$AIBOX_ROOT/aibox" start "$BOX"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
+  "$ISOPOD_ROOT/isopod" stop "$BOX"
+  run "$ISOPOD_ROOT/isopod" start "$BOX"
   assert_success
   run bssh -o ConnectTimeout=10 -- true
   assert_success
 }
 
 @test "live: fetch pulls the box's git history into a host repo" {
-  "$AIBOX_ROOT/aibox" create "$BOX" --image "$IMG"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   # make a commit on a branch inside the box's workspace
   bssh -- sh -c '
     cd /home/dev/workspace &&
@@ -125,7 +125,7 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   # an empty host repo to receive the history
   host_repo="$TEST_TMP/host-repo"; mkdir -p "$host_repo"
   git -C "$host_repo" init -q
-  run "$AIBOX_ROOT/aibox" fetch "$BOX" "$host_repo"
+  run "$ISOPOD_ROOT/isopod" fetch "$BOX" "$host_repo"
   assert_success
   # the box branches now exist as <BOX>/* remote-tracking refs
   run git -C "$host_repo" branch -r --list "$BOX/*"
@@ -137,8 +137,8 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 }
 
 @test "live: rm destroys the container" {
-  "$AIBOX_ROOT/aibox" create "$BOX" --image "$IMG"
-  "$AIBOX_ROOT/aibox" rm "$BOX" --force
-  run bash -c "podman inspect aibox-$BOX >/dev/null 2>&1 || docker inspect aibox-$BOX >/dev/null 2>&1"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
+  "$ISOPOD_ROOT/isopod" rm "$BOX" --force
+  run bash -c "podman inspect isopod-$BOX >/dev/null 2>&1 || docker inspect isopod-$BOX >/dev/null 2>&1"
   assert_failure
 }

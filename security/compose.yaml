@@ -1,6 +1,6 @@
-# security/compose.yaml — REFERENCE ONLY (aibox does NOT execute this file).
+# security/compose.yaml — REFERENCE ONLY (isopod does NOT execute this file).
 #
-# aibox creates boxes with `podman run` / `docker run`, not Compose, so the live
+# isopod creates boxes with `podman run` / `docker run`, not Compose, so the live
 # settings come from security/hardening.conf. This file documents the SAME
 # fingerprint-hardening in Compose form, for anyone who prefers to launch (or
 # adapt) a box with `podman compose` / `docker compose` instead of the CLI.
@@ -12,11 +12,11 @@
 # list plus the `/dev/null` binds shown in the commented-out sections.
 
 services:
-  aibox:
-    # aibox builds its base image inline (debian:bookworm-slim + sshd, git,
+  isopod:
+    # isopod builds its base image inline (debian:bookworm-slim + sshd, git,
     # python3, sudo). Build it once with the CLI, or point at your own image:
-    #   image must run sshd as PID 1 on port 22 (see the aibox script).
-    image: localhost/aibox-base:1
+    #   image must run sshd as PID 1 on port 22 (see the isopod script).
+    image: localhost/isopod-base:1
 
     hostname: sandbox
     pids_limit: 4096

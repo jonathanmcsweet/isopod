@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Interactive (pty) tests for aibox — the "Playwright for terminals" layer.
+Interactive (pty) tests for isopod — the "Playwright for terminals" layer.
 
 bats with `run` captures exit code and output but cannot answer a live
-prompt. These tests drive aibox through a real pseudo-terminal with pexpect,
+prompt. These tests drive isopod through a real pseudo-terminal with pexpect,
 typing into prompts and asserting on what is rendered, then checking the
 resulting side effects on disk.
 
@@ -22,7 +22,7 @@ import tempfile
 import pexpect
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AIBOX = os.path.join(ROOT, "aibox")
+ISOPOD = os.path.join(ROOT, "isopod")
 
 PODMAN_STUB = r"""#!/usr/bin/env bash
 echo "podman $*" >> "$STUB_LOG"
@@ -69,9 +69,9 @@ class Env:
     """A hermetic environment with stubbed engine/ssh, like the bats helper."""
 
     def __init__(self):
-        self.tmp = tempfile.mkdtemp(prefix="aibox-itest.")
+        self.tmp = tempfile.mkdtemp(prefix="isopod-itest.")
         self.home = os.path.join(self.tmp, "home")
-        self.config = os.path.join(self.home, ".config", "aibox")
+        self.config = os.path.join(self.home, ".config", "isopod")
         self.stubs = os.path.join(self.tmp, "stubs")
         os.makedirs(os.path.join(self.home, ".ssh"))
         os.makedirs(self.stubs)
@@ -90,17 +90,17 @@ class Env:
     def osenv(self):
         e = os.environ.copy()
         e["HOME"] = self.home
-        e["AIBOX_CONFIG_DIR"] = self.config
+        e["ISOPOD_CONFIG_DIR"] = self.config
         e["STUB_LOG"] = self.stub_log
         e["PATH"] = self.stubs + os.pathsep + e["PATH"]
         return e
 
     def run(self, *args):
-        return subprocess.run([AIBOX, *args], env=self.osenv(),
+        return subprocess.run([ISOPOD, *args], env=self.osenv(),
                               capture_output=True, text=True)
 
     def spawn(self, *args):
-        return pexpect.spawn(AIBOX, list(args), env=self.osenv(),
+        return pexpect.spawn(ISOPOD, list(args), env=self.osenv(),
                              encoding="utf-8", timeout=15)
 
     def box_exists(self, name):

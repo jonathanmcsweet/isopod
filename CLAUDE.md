@@ -31,7 +31,7 @@ Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
 
 ## Repo structure rules (see MANIFEST.md)
 
-- `lib/` MUST sit beside the `aibox` script — it is streamed into the box.
+- `lib/` MUST sit beside the `isopod` script — it is streamed into the box.
 - Container hardening settings live in `security/hardening.conf` (declarative),
-  not inline in the `aibox` script. `security/compose.yaml` is reference-only and
+  not inline in the `isopod` script. `security/compose.yaml` is reference-only and
   is NOT executed by the CLI.

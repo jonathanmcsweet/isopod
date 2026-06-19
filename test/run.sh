@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run aibox's test suites locally — the same checks CI runs.
+# Run isopod's test suites locally — the same checks CI runs.
 #
 #   test/run.sh              lint + stubbed bats + interactive (no engine needed)
 #   RUN_LIVE=1 test/run.sh   also runs the live suite against real podman/docker
@@ -19,7 +19,7 @@ fail() { printf '%s%s%s\n' "$c_red" "$1" "$c_rst" >&2; exit 1; }
 # --- lint -------------------------------------------------------------------
 step "shellcheck"
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -S warning aibox install.sh test/run.sh
+  shellcheck -S warning isopod install.sh test/run.sh verify-host-isolation.sh
   printf '%sshellcheck clean%s\n' "$c_grn" "$c_rst"
 else
   printf '%sshellcheck not installed — skipping (install it for full coverage)%s\n' "$c_yel" "$c_rst"
@@ -27,7 +27,8 @@ fi
 
 # --- syntax -----------------------------------------------------------------
 step "bash syntax"
-bash -n aibox && printf '%saibox parses%s\n' "$c_grn" "$c_rst"
+bash -n isopod install.sh verify-host-isolation.sh \
+  && printf '%sshell scripts parse%s\n' "$c_grn" "$c_rst"
 
 # --- python lib syntax ------------------------------------------------------
 step "python lib"

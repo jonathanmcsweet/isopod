@@ -1,13 +1,13 @@
 #!/usr/bin/env bats
-# Unit tests for aibox's pure functions — no container engine needed.
+# Unit tests for isopod's pure functions — no container engine needed.
 
 setup() {
   load "$(dirname "$BATS_TEST_FILENAME")/helper.bash"
   load_libs
-  aibox_setup_env
-  load_aibox
+  isopod_setup_env
+  load_isopod
 }
-teardown() { aibox_teardown_env; }
+teardown() { isopod_teardown_env; }
 
 # ---- valid_name --------------------------------------------------------------
 @test "valid_name accepts simple names" {
@@ -66,19 +66,19 @@ teardown() { aibox_teardown_env; }
   b="$(image_tag_for ubuntu:24.04)"
   [ "$a" != "$b" ]
 }
-@test "image_tag_for uses the localhost/aibox-base prefix" {
+@test "image_tag_for uses the localhost/isopod-base prefix" {
   run image_tag_for debian:bookworm-slim
-  assert_output --partial "localhost/aibox-base:"
+  assert_output --partial "localhost/isopod-base:"
 }
 
 # ---- ctr_name / box_dir ------------------------------------------------------
-@test "ctr_name prefixes with aibox-" {
+@test "ctr_name prefixes with isopod-" {
   run ctr_name foo
-  assert_output "aibox-foo"
+  assert_output "isopod-foo"
 }
 @test "box_dir lives under the config dir" {
   run box_dir foo
-  assert_output "$AIBOX_CONFIG_DIR/boxes/foo"
+  assert_output "$ISOPOD_CONFIG_DIR/boxes/foo"
 }
 
 # ---- meta_get ----------------------------------------------------------------
@@ -100,8 +100,8 @@ teardown() { aibox_teardown_env; }
   mkdir -p "$(box_dir demo)"
   printf 'port=40000\n' > "$(box_dir demo)/meta"
   write_ssh_include
-  run cat "$AIBOX_CONFIG_DIR/ssh_config"
-  assert_output --partial "Host aibox-demo"
+  run cat "$ISOPOD_CONFIG_DIR/ssh_config"
+  assert_output --partial "Host isopod-demo"
   assert_output --partial "HostName 127.0.0.1"
   assert_output --partial "Port 40000"
   assert_output --partial "ForwardAgent no"
@@ -112,14 +112,14 @@ teardown() { aibox_teardown_env; }
   mkdir -p "$(box_dir noport)"
   printf 'engine=podman\n' > "$(box_dir noport)/meta"
   write_ssh_include
-  run cat "$AIBOX_CONFIG_DIR/ssh_config"
-  refute_output --partial "Host aibox-noport"
+  run cat "$ISOPOD_CONFIG_DIR/ssh_config"
+  refute_output --partial "Host isopod-noport"
 }
 
 # ---- ensure_ssh_include ------------------------------------------------------
 @test "ensure_ssh_include adds an Include line to ~/.ssh/config once" {
   ensure_ssh_include
   ensure_ssh_include   # idempotent
-  run grep -c "Include $AIBOX_CONFIG_DIR/ssh_config" "$HOME/.ssh/config"
+  run grep -c "Include $ISOPOD_CONFIG_DIR/ssh_config" "$HOME/.ssh/config"
   assert_output "1"
 }

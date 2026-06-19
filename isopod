@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# aibox — disposable, isolated AI-coding sandboxes for VSCodium (and friends)
+# isopod — disposable, isolated AI-coding sandboxes for VSCodium (and friends)
 #
 # Creates a rootless Podman (or Docker) container with an SSH server inside,
 # clones a git repo OR copies an explicit allowlist of host folders into it,
@@ -11,7 +11,7 @@
 #   * Files enter the box only via `git clone` (inside the box) or an
 #     explicit `--copy <path>` (a one-time copy, not a mount).
 #   * Files leave the box only via `git push` (from inside) or an explicit
-#     `aibox export`.
+#     `isopod export`.
 #   * The IDE's server component, terminals, and any AI agent extensions all
 #     execute INSIDE the container. The agent sees the container's hostname,
 #     filesystem, and network identity — not your host's.
@@ -23,10 +23,10 @@
 #
 set -euo pipefail
 
-AIBOX_VERSION="0.1.0"
+ISOPOD_VERSION="0.1.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
-# find bundled helper files under lib/ regardless of how aibox was invoked.
+# find bundled helper files under lib/ regardless of how isopod was invoked.
 _resolve_script_dir() {
   local src="${BASH_SOURCE[0]}" dir
   while [ -h "$src" ]; do
@@ -36,13 +36,13 @@ _resolve_script_dir() {
   done
   cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
 }
-AIBOX_DIR="$(_resolve_script_dir)"
-AIBOX_LIB="$AIBOX_DIR/lib"
+ISOPOD_DIR="$(_resolve_script_dir)"
+ISOPOD_LIB="$ISOPOD_DIR/lib"
 # Declarative container-hardening profile (anti-fingerprinting Tier 1 + Tier 2).
-# Settings live in this file, not inline here; override path with AIBOX_HARDENING_CONF.
-HARDENING_CONF="${AIBOX_HARDENING_CONF:-$AIBOX_DIR/security/hardening.conf}"
+# Settings live in this file, not inline here; override path with ISOPOD_HARDENING_CONF.
+HARDENING_CONF="${ISOPOD_HARDENING_CONF:-$ISOPOD_DIR/security/hardening.conf}"
 
-CONFIG_DIR="${AIBOX_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aibox}"
+CONFIG_DIR="${ISOPOD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/isopod}"
 BOXES_DIR="$CONFIG_DIR/boxes"
 SSH_INCLUDE_FILE="$CONFIG_DIR/ssh_config"
 USER_SSH_CONFIG="$HOME/.ssh/config"
@@ -62,22 +62,22 @@ have()  { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
   cat <<EOF
-aibox $AIBOX_VERSION — isolated AI-coding sandboxes for VSCodium & friends
+isopod $ISOPOD_VERSION — isolated AI-coding sandboxes for VSCodium & friends
 
 Usage:
-  aibox create <name> [options]      Create and start a new sandbox
-  aibox list                         List sandboxes and their status
-  aibox info <name>                  Show connection details for a sandbox
-  aibox code <name> [--app APP]      Open the sandbox in VSCodium (or APP)
-  aibox shell <name>                 Open a shell inside the sandbox
-  aibox start <name>                 Start a stopped sandbox
-  aibox stop <name>                  Stop a running sandbox
-  aibox export <name> [dest]         Copy the workspace OUT of the sandbox
-  aibox fetch <name> [target-dir]    Pull the box's git history into a host repo
-  aibox copy-in <name> <path>...     Copy more host folders INTO the sandbox
-  aibox rm <name> [--force]          Delete a sandbox (container + keys)
-  aibox doctor                       Check host prerequisites
-  aibox help                         Show this help
+  isopod create <name> [options]      Create and start a new sandbox
+  isopod list                         List sandboxes and their status
+  isopod info <name>                  Show connection details for a sandbox
+  isopod code <name> [--app APP]      Open the sandbox in VSCodium (or APP)
+  isopod shell <name>                 Open a shell inside the sandbox
+  isopod start <name>                 Start a stopped sandbox
+  isopod stop <name>                  Stop a running sandbox
+  isopod export <name> [dest]         Copy the workspace OUT of the sandbox
+  isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
+  isopod copy-in <name> <path>...     Copy more host folders INTO the sandbox
+  isopod rm <name> [--force]          Delete a sandbox (container + keys)
+  isopod doctor                       Check host prerequisites
+  isopod help                         Show this help
 
 Options for create:
   --repo <url>          Git repo to clone inside the box (https or ssh URL)
@@ -101,11 +101,11 @@ Options for create:
                         bound to 127.0.0.1 only)
 
 Examples:
-  aibox create myproj --repo https://github.com/me/proj --color teal
-  aibox create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
-  aibox code myproj
-  aibox export myproj ./myproj-out
-  aibox fetch myproj            # from inside your host clone, pulls box history
+  isopod create myproj --repo https://github.com/me/proj --color teal
+  isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
+  isopod code myproj
+  isopod export myproj ./myproj-out
+  isopod fetch myproj            # from inside your host clone, pulls box history
 EOF
 }
 
@@ -114,7 +114,7 @@ EOF
 # ---------------------------------------------------------------------------
 ENGINE=""
 detect_engine() {
-  local want="${1:-${AIBOX_ENGINE:-}}"
+  local want="${1:-${ISOPOD_ENGINE:-}}"
   if [ -n "$want" ]; then
     have "$want" || die "requested engine '$want' not found in PATH"
     ENGINE="$want"
@@ -134,11 +134,11 @@ detect_engine() {
   fi
 }
 
-ctr_name() { printf 'aibox-%s' "$1"; }
+ctr_name() { printf 'isopod-%s' "$1"; }
 box_dir()  { printf '%s/%s' "$BOXES_DIR" "$1"; }
 
 require_box() {
-  [ -d "$(box_dir "$1")" ] || die "no such sandbox: '$1' (see: aibox list)"
+  [ -d "$(box_dir "$1")" ] || die "no such sandbox: '$1' (see: isopod list)"
 }
 
 meta_get() { # meta_get <name> <key>
@@ -157,7 +157,7 @@ valid_name() {
 image_tag_for() { # image_tag_for <base-image>
   local hash
   hash=$(printf '%s|%s' "$1" "$IMAGE_LAYER_VERSION" | cksum | awk '{print $1}')
-  printf 'localhost/aibox-base:%s' "$hash"
+  printf 'localhost/isopod-base:%s' "$hash"
 }
 
 build_image() { # build_image <base-image> -> echoes tag
@@ -167,11 +167,11 @@ build_image() { # build_image <base-image> -> echoes tag
     printf '%s' "$tag"; return 0
   fi
   info "Building sandbox base image from $base (one-time)..." >&2
-  # AIBOX_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
+  # ISOPOD_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
   # --build-arg http_proxy=...) for proxied or unusual environments.
   local -a extra_build=()
   # shellcheck disable=SC2206
-  [ -n "${AIBOX_BUILD_ARGS:-}" ] && extra_build=($AIBOX_BUILD_ARGS)
+  [ -n "${ISOPOD_BUILD_ARGS:-}" ] && extra_build=($ISOPOD_BUILD_ARGS)
   "$ENGINE" build "${extra_build[@]}" -t "$tag" -f - . >&2 <<DOCKERFILE
 FROM $base
 ENV DEBIAN_FRONTEND=noninteractive
@@ -192,24 +192,24 @@ RUN printf '%s\\n' \\
       'X11Forwarding no' \\
       'AllowAgentForwarding no' \\
       'ClientAliveInterval 60' \\
-      > /etc/ssh/sshd_config.d/90-aibox.conf \\
+      > /etc/ssh/sshd_config.d/90-isopod.conf \\
  && grep -q 'Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config \\
       || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
 # Entrypoint: regenerate host keys on first boot so every box is unique,
 # then run sshd in the foreground as PID 1.
 RUN printf '%s\\n' \\
       '#!/bin/sh' \\
-      'if [ ! -f /etc/ssh/.aibox-host-keys ]; then' \\
+      'if [ ! -f /etc/ssh/.isopod-host-keys ]; then' \\
       '  rm -f /etc/ssh/ssh_host_*' \\
       '  ssh-keygen -A >/dev/null' \\
-      '  touch /etc/ssh/.aibox-host-keys' \\
+      '  touch /etc/ssh/.isopod-host-keys' \\
       'fi' \\
       'mkdir -p /run/sshd' \\
       'exec /usr/sbin/sshd -D -e' \\
-      > /usr/local/bin/aibox-entrypoint \\
- && chmod +x /usr/local/bin/aibox-entrypoint
+      > /usr/local/bin/isopod-entrypoint \\
+ && chmod +x /usr/local/bin/isopod-entrypoint
 EXPOSE 22
-CMD ["/usr/local/bin/aibox-entrypoint"]
+CMD ["/usr/local/bin/isopod-entrypoint"]
 DOCKERFILE
   printf '%s' "$tag"
 }
@@ -225,7 +225,7 @@ ensure_ssh_include() {
     # Include must appear before any Host block to apply globally; prepend.
     local tmp
     tmp=$(mktemp)
-    { printf '# aibox sandboxes\n%s\n\n' "$line"; cat "$USER_SSH_CONFIG"; } > "$tmp"
+    { printf '# isopod sandboxes\n%s\n\n' "$line"; cat "$USER_SSH_CONFIG"; } > "$tmp"
     cat "$tmp" > "$USER_SSH_CONFIG"
     rm -f "$tmp"
     info "Added '$line' to ~/.ssh/config"
@@ -238,7 +238,7 @@ write_ssh_include() {
   local tmp
   tmp=$(mktemp)
   {
-    printf '# Managed by aibox — do not edit (regenerated on every change)\n\n'
+    printf '# Managed by isopod — do not edit (regenerated on every change)\n\n'
     local d name port
     for d in "$BOXES_DIR"/*/; do
       [ -d "$d" ] || continue
@@ -372,10 +372,10 @@ auto_color() { # rotate presets based on how many boxes exist
 # The merge logic lives in lib/apply_color.py; we stream it into the box over
 # stdin so nothing is left behind on the container filesystem.
 apply_color() { # apply_color <name> <hexcolor>
-  local name="$1" hex="$2" script="$AIBOX_LIB/apply_color.py"
-  [ -f "$script" ] || die "missing helper: $script (is your aibox install complete?)"
+  local name="$1" hex="$2" script="$ISOPOD_LIB/apply_color.py"
+  [ -f "$script" ] || die "missing helper: $script (is your isopod install complete?)"
   "$ENGINE" exec -i -u "$CONTAINER_USER" \
-      -e "AIBOX_COLOR=$hex" -e "AIBOX_NAME=$name" -e "AIBOX_WS=$WORKSPACE" \
+      -e "ISOPOD_COLOR=$hex" -e "ISOPOD_NAME=$name" -e "ISOPOD_WS=$WORKSPACE" \
       "$(ctr_name "$name")" python3 - < "$script"
 }
 
@@ -410,7 +410,7 @@ hardening_run_args() { # hardening_run_args <engine>
   done < "$conf"
 
   # Tier 2: env var wins over the profile so it can be toggled per invocation.
-  runtime="${AIBOX_RUNTIME:-$runtime}"
+  runtime="${ISOPOD_RUNTIME:-$runtime}"
   [ -n "$runtime" ] && printf '%s\n' "--runtime" "$runtime"
 
   # Tier 1.
@@ -453,11 +453,11 @@ cmd_create() {
     esac
   done
 
-  [ -n "$name" ] || die "usage: aibox create <name> [options]"
+  [ -n "$name" ] || die "usage: isopod create <name> [options]"
   valid_name "$name" || die "invalid name '$name' (letters, digits, . _ - only)"
-  [ -d "$(box_dir "$name")" ] && die "sandbox '$name' already exists (aibox rm $name to delete)"
+  [ -d "$(box_dir "$name")" ] && die "sandbox '$name' already exists (isopod rm $name to delete)"
   if [ -n "$repo" ] && [ "${#copies[@]}" -gt 0 ]; then
-    die "use either --repo or --copy, not both (you can 'aibox copy-in' later)"
+    die "use either --repo or --copy, not both (you can 'isopod copy-in' later)"
   fi
 
   # validate copy paths up front
@@ -485,14 +485,14 @@ cmd_create() {
   tag=$(build_image "$base")
 
   info "Generating dedicated SSH keypair for this box..."
-  ssh-keygen -t ed25519 -N '' -C "aibox-$name" -f "$(box_dir "$name")/id_ed25519" -q
+  ssh-keygen -t ed25519 -N '' -C "isopod-$name" -f "$(box_dir "$name")/id_ed25519" -q
 
   # publish sshd on a loopback-only host port; random free port unless --port
   local publish="127.0.0.1::22"
   [ -n "$port" ] && publish="127.0.0.1:$port:22"
 
   local -a run_args=(run -d --name "$(ctr_name "$name")" --hostname "$name"
-                     --label "aibox=true" --label "aibox.name=$name"
+                     --label "isopod=true" --label "isopod.name=$name"
                      -p "$publish" --pids-limit 4096)
   [ -n "$memory" ] && run_args+=(--memory "$memory")
   [ -n "$cpus" ]   && run_args+=(--cpus "$cpus")
@@ -500,9 +500,9 @@ cmd_create() {
   local -a hard_args=()
   mapfile -t hard_args < <(hardening_run_args "$ENGINE")
   [ "${#hard_args[@]}" -gt 0 ] && run_args+=("${hard_args[@]}")
-  # AIBOX_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
+  # ISOPOD_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
   # shellcheck disable=SC2206
-  [ -n "${AIBOX_RUN_ARGS:-}" ] && run_args+=($AIBOX_RUN_ARGS)
+  [ -n "${ISOPOD_RUN_ARGS:-}" ] && run_args+=($ISOPOD_RUN_ARGS)
   run_args+=("$tag")
 
   info "Starting container ($ENGINE)..."
@@ -549,7 +549,7 @@ cmd_create() {
     clone+=("$repo" "$WORKSPACE")
     "$ENGINE" exec -u "$CONTAINER_USER" -w "/home/$CONTAINER_USER" "$ctr" "${clone[@]}" \
       || warn "git clone failed inside the box — the sandbox was still created.
-         Fix and retry from inside:  aibox shell $name   then: git clone ... $WORKSPACE
+         Fix and retry from inside:  isopod shell $name   then: git clone ... $WORKSPACE
          (private repo? use an https token URL, or copy a deploy key in with copy-in)"
   elif [ "${#copies[@]}" -gt 0 ]; then
     do_copy_in "$name" "${copies[@]}"
@@ -568,13 +568,13 @@ ${c_grn}Sandbox '$name' is ready.${c_rst}
   Window color    : $hex
 
 Open it:
-  aibox code $name                 ${c_dim}# VSCodium via Open Remote - SSH${c_rst}
-  aibox code $name --app cursor    ${c_dim}# Cursor${c_rst}
-  aibox shell $name                ${c_dim}# plain terminal${c_rst}
+  isopod code $name                 ${c_dim}# VSCodium via Open Remote - SSH${c_rst}
+  isopod code $name --app cursor    ${c_dim}# Cursor${c_rst}
+  isopod shell $name                ${c_dim}# plain terminal${c_rst}
   JetBrains: Gateway -> SSH -> host '$(ctr_name "$name")' -> project $WORKSPACE
 
 Get files out later:
-  aibox export $name ./out         ${c_dim}# or git push from inside the box${c_rst}
+  isopod export $name ./out         ${c_dim}# or git push from inside the box${c_rst}
 EOF
 }
 
@@ -594,7 +594,7 @@ do_copy_in() { # do_copy_in <name> <path>...
 
 cmd_copy_in() {
   local name="${1:-}"; shift || true
-  [ -n "$name" ] && [ $# -gt 0 ] || die "usage: aibox copy-in <name> <path>..."
+  [ -n "$name" ] && [ $# -gt 0 ] || die "usage: isopod copy-in <name> <path>..."
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
   do_copy_in "$name" "$@"
@@ -602,10 +602,10 @@ cmd_copy_in() {
 
 cmd_export() {
   local name="${1:-}" dest="${2:-}"
-  [ -n "$name" ] || die "usage: aibox export <name> [dest-dir]"
+  [ -n "$name" ] || die "usage: isopod export <name> [dest-dir]"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
-  dest="${dest:-./aibox-$name-export}"
+  dest="${dest:-./isopod-$name-export}"
   [ -e "$dest" ] && die "destination already exists: $dest"
   info "Copying $WORKSPACE out of the box to $dest ..."
   "$ENGINE" cp "$(ctr_name "$name"):$WORKSPACE" "$dest"
@@ -615,7 +615,7 @@ cmd_export() {
 # Pull the box's git history into a host repo WITHOUT copying the working tree:
 # bundle the repo inside the box, copy the single bundle file out, and `git fetch`
 # it into the target repo as remote-tracking branches named <name>/*. This is the
-# git-native counterpart to `aibox export` — clean history, no file merges.
+# git-native counterpart to `isopod export` — clean history, no file merges.
 cmd_fetch() {
   local name="" target="" inbox_path=""
   while [ $# -gt 0 ]; do
@@ -628,9 +628,9 @@ cmd_fetch() {
          else die "unexpected argument: $1"; fi; shift ;;
     esac
   done
-  [ -n "$name" ] || die "usage: aibox fetch <name> [target-repo-dir] [--path <in-box-repo>]"
+  [ -n "$name" ] || die "usage: isopod fetch <name> [target-repo-dir] [--path <in-box-repo>]"
   require_box "$name"
-  have git || die "git is required on the host for 'aibox fetch'"
+  have git || die "git is required on the host for 'isopod fetch'"
   detect_engine "$(meta_get "$name" engine || true)"
   target="${target:-.}"
   local ctr; ctr=$(ctr_name "$name")
@@ -652,7 +652,7 @@ cmd_fetch() {
       || die "no git repo found in the box under $WORKSPACE — pass --path <in-box-repo>"
   fi
 
-  local bundle_box="/tmp/aibox-$name.bundle"
+  local bundle_box="/tmp/isopod-$name.bundle"
   info "Bundling $repo inside the box..."
   "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null \
     || die "git bundle failed in the box (does $repo have any commits?)"
@@ -660,7 +660,7 @@ cmd_fetch() {
   if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     # Target is a git repo: fetch the box's branches in as <name>/* tracking refs.
     local top tmp; top=$(git -C "$target" rev-parse --show-toplevel)
-    tmp=$(mktemp "${TMPDIR:-/tmp}/aibox-${name}-XXXXXX")
+    tmp=$(mktemp "${TMPDIR:-/tmp}/isopod-${name}-XXXXXX")
     "$ENGINE" cp "$ctr:$bundle_box" "$tmp"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "Fetching history into $top as '$name/*'..."
@@ -674,8 +674,8 @@ cmd_fetch() {
   else
     # Target is not a git repo: drop the bundle file for manual use.
     local out="$target"
-    [ "$out" = "." ] && out="./aibox-$name.bundle"
-    [ -d "$out" ] && out="${out%/}/aibox-$name.bundle"
+    [ "$out" = "." ] && out="./isopod-$name.bundle"
+    [ -d "$out" ] && out="${out%/}/isopod-$name.bundle"
     [ -e "$out" ] && die "destination already exists: $out (remove it or pick another path)"
     "$ENGINE" cp "$ctr:$bundle_box" "$out"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
@@ -699,7 +699,7 @@ cmd_list() {
 }
 
 cmd_info() {
-  local name="${1:-}"; [ -n "$name" ] || die "usage: aibox info <name>"
+  local name="${1:-}"; [ -n "$name" ] || die "usage: isopod info <name>"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
   refresh_port "$name"
@@ -717,7 +717,7 @@ EOF
 }
 
 cmd_start() {
-  local name="${1:-}"; [ -n "$name" ] || die "usage: aibox start <name>"
+  local name="${1:-}"; [ -n "$name" ] || die "usage: isopod start <name>"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
   "$ENGINE" start "$(ctr_name "$name")" >/dev/null
@@ -727,7 +727,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-  local name="${1:-}"; [ -n "$name" ] || die "usage: aibox stop <name>"
+  local name="${1:-}"; [ -n "$name" ] || die "usage: isopod stop <name>"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
   "$ENGINE" stop "$(ctr_name "$name")" >/dev/null
@@ -735,7 +735,7 @@ cmd_stop() {
 }
 
 cmd_shell() {
-  local name="${1:-}"; [ -n "$name" ] || die "usage: aibox shell <name>"
+  local name="${1:-}"; [ -n "$name" ] || die "usage: isopod shell <name>"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
   exec "$ENGINE" exec -it -u "$CONTAINER_USER" -w "$WORKSPACE" "$(ctr_name "$name")" bash
@@ -781,7 +781,7 @@ find_ide_bin() { # find_ide_bin <app> -> sets IDE_CMD, returns 0/1
 }
 
 # Flatpak IDEs run in their own sandbox on the HOST side. The Remote-SSH
-# extension (running inside that flatpak) must be able to read aibox's SSH
+# extension (running inside that flatpak) must be able to read isopod's SSH
 # config and keys, or every connection will fail with cryptic errors.
 flatpak_access_hint() { # flatpak_access_hint <app-id>
   local id="$1" perms
@@ -790,7 +790,7 @@ flatpak_access_hint() { # flatpak_access_hint <app-id>
     return 0  # broad access already granted; nothing to do
   fi
   warn "the '$id' Flatpak does not appear to have access to your home dir.
-         The Remote-SSH extension needs to read ~/.ssh/config and aibox's keys.
+         The Remote-SSH extension needs to read ~/.ssh/config and isopod's keys.
          Grant read access with:
            flatpak override --user --filesystem=\$HOME/.ssh:ro \\
              --filesystem=$CONFIG_DIR:ro $id
@@ -806,7 +806,7 @@ cmd_code() {
       *)     name="$1"; shift ;;
     esac
   done
-  [ -n "$name" ] || die "usage: aibox code <name> [--app codium|cursor|windsurf|code]"
+  [ -n "$name" ] || die "usage: isopod code <name> [--app codium|cursor|windsurf|code]"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
 
@@ -854,7 +854,7 @@ cmd_rm() {
       *)  name="$1"; shift ;;
     esac
   done
-  [ -n "$name" ] || die "usage: aibox rm <name> [--force]"
+  [ -n "$name" ] || die "usage: isopod rm <name> [--force]"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
   if [ "$force" -ne 1 ]; then
@@ -869,7 +869,7 @@ cmd_rm() {
 }
 
 cmd_doctor() {
-  printf 'aibox %s\n\n' "$AIBOX_VERSION"
+  printf 'isopod %s\n\n' "$ISOPOD_VERSION"
   local ok=1
   for t in ssh ssh-keygen ssh-keyscan; do
     if have "$t"; then printf '  [ok]      %s\n' "$t"; else printf '  [MISSING] %s\n' "$t"; ok=0; fi
@@ -888,7 +888,7 @@ cmd_doctor() {
   # Anti-fingerprinting profile (Tier 1 masks + optional Tier 2 runtime).
   if [ -f "$HARDENING_CONF" ]; then
     printf '  [ok]      hardening profile (%s)\n' "$HARDENING_CONF"
-    local rt; rt="${AIBOX_RUNTIME:-$(awk '$1=="runtime"{print $2}' "$HARDENING_CONF" 2>/dev/null | tail -1)}"
+    local rt; rt="${ISOPOD_RUNTIME:-$(awk '$1=="runtime"{print $2}' "$HARDENING_CONF" 2>/dev/null | tail -1)}"
     if [ -n "$rt" ]; then
       if have "$rt" || { have podman && podman info 2>/dev/null | grep -q "$rt"; }; then
         printf '  [ok]      Tier 2 runtime: %s\n' "$rt"
@@ -924,14 +924,14 @@ main() {
     copy-in)       cmd_copy_in "$@" ;;
     rm|remove|delete) cmd_rm "$@" ;;
     doctor)        cmd_doctor "$@" ;;
-    version|--version|-v) printf 'aibox %s\n' "$AIBOX_VERSION" ;;
+    version|--version|-v) printf 'isopod %s\n' "$ISOPOD_VERSION" ;;
     help|--help|-h) usage ;;
-    *) die "unknown command: $cmd (try: aibox help)" ;;
+    *) die "unknown command: $cmd (try: isopod help)" ;;
   esac
 }
 
 # Only run main when executed directly, not when sourced (e.g. by tests).
-# Tests set AIBOX_SOURCED=1 to load functions without side effects.
-if [ -z "${AIBOX_SOURCED:-}" ]; then
+# Tests set ISOPOD_SOURCED=1 to load functions without side effects.
+if [ -z "${ISOPOD_SOURCED:-}" ]; then
   main "$@"
 fi
