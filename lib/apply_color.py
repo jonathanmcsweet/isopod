@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Merge isopod window-color customizations into a workspace settings.json.
+"""Merge isopod window color customizations into a workspace settings.json.
 
 Runs INSIDE an isopod container (fed over stdin by `apply_color` in the isopod
 script). Reads three environment variables and rewrites
 ``$ISOPOD_WS/.vscode/settings.json`` so every IDE window attached to this box is
-tinted, without clobbering settings the repo already ships.
+tinted.
 
 Environment:
     ISOPOD_COLOR  hex color, with or without leading '#', e.g. '#0f766e'
@@ -18,8 +18,7 @@ Behavior:
     * If the existing file cannot be parsed, backs it up to
       ``settings.json.isopod-backup`` instead of destroying it.
 
-Kept dependency-free (standard library only) so it runs on the stock Python 3
-already present in the container image.
+Runs on the stock Python 3 already present in the container image.
 """
 from __future__ import annotations
 

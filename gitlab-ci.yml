@@ -1,4 +1,4 @@
-# GitLab CI/CD for aibox.
+# GitLab CI/CD for isopod.
 #
 # Designed to run IDENTICALLY under:
 #   * gitlab-ci-local  (run jobs on your machine: `gitlab-ci-local`)
@@ -30,8 +30,8 @@ shellcheck:
   stage: lint
   script:
     - apt-get update -qq && apt-get install -y -qq shellcheck
-    - shellcheck -S warning aibox install.sh test/run.sh
-    - bash -n aibox install.sh
+    - shellcheck -S warning isopod install.sh test/run.sh
+    - bash -n isopod install.sh
     # lint the discrete python helpers under lib/
     - apt-get install -y -qq python3 python3-pyflakes
     - python3 -m py_compile lib/*.py
@@ -76,7 +76,7 @@ live-isolation:
     RUN_LIVE: "1"
     # vfs avoids needing overlay/fuse in constrained CI; slower but portable
     STORAGE_DRIVER: "vfs"
-    AIBOX_TEST_IMAGE: "debian:bookworm-slim"
+    ISOPOD_TEST_IMAGE: "debian:bookworm-slim"
   before_script:
     - dnf install -y openssh-clients python3 >/dev/null 2>&1 || true
   script:
