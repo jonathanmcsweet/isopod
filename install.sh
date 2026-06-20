@@ -13,6 +13,7 @@
 #   ./install.sh --prefix DIR     # install program dir under DIR/lib, link in DIR/bin
 #   ./install.sh --uninstall      # remove a previous install
 #   ./install.sh --check          # print what it would do, make no changes
+#   ./install.sh --no-extension   # skip installing the editor's Remote-SSH extension
 #   ./install.sh --help
 #
 # Honors $DESTDIR for packaging. Safe to re-run (idempotent).
@@ -31,14 +32,19 @@ MODE=install
 SCOPE=user
 PREFIX=""
 DRYRUN=0
+WANT_EXT=1
+
+# Editor extension isopod pairs with (lives on Open VSX).
+EXT_ID="jeanp413.open-remote-ssh"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --system)     SCOPE=system; shift ;;
-    --user)       SCOPE=user; shift ;;
-    --prefix)     PREFIX="$2"; SCOPE=prefix; shift 2 ;;
-    --uninstall)  MODE=uninstall; shift ;;
-    --check)      DRYRUN=1; shift ;;
+    --system)       SCOPE=system; shift ;;
+    --user)         SCOPE=user; shift ;;
+    --prefix)       PREFIX="$2"; SCOPE=prefix; shift 2 ;;
+    --uninstall)    MODE=uninstall; shift ;;
+    --check)        DRYRUN=1; shift ;;
+    --no-extension) WANT_EXT=0; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; /^set -euo/d'
       exit 0 ;;
@@ -103,6 +109,55 @@ need_sudo_hint() {
   fi
 }
 
+# --- editor extension -------------------------------------------------------
+# isopod is normally driven from VSCodium / VS Code via the Remote-SSH
+# extension. Find a usable editor CLI on THIS machine (the one running the
+# editor) and install the extension from Open VSX if it isn't already there.
+# This is best-effort: a failure here never fails the isopod install.
+
+# Print a command that invokes an available editor CLI, or nothing if none.
+find_editor_cli() {
+  local c
+  for c in codium vscodium code-oss code cursor; do
+    if have "$c"; then printf '%s' "$c"; return 0; fi
+  done
+  # Flatpak VSCodium (e.g. immutable Fedora) exposes no bare `codium` on PATH.
+  if have flatpak && flatpak info com.vscodium.codium >/dev/null 2>&1; then
+    printf 'flatpak run com.vscodium.codium'; return 0
+  fi
+  if have flatpak && flatpak info com.visualstudio.code >/dev/null 2>&1; then
+    printf 'flatpak run com.visualstudio.code'; return 0
+  fi
+  return 1
+}
+
+install_extension() {
+  [ "$WANT_EXT" -eq 1 ] || { info "Skipping editor extension (--no-extension)."; return 0; }
+
+  local cli
+  if ! cli="$(find_editor_cli)"; then
+    warn "No VSCodium/VS Code CLI found on this machine — skipping the $EXT_ID extension."
+    printf '   Install it later from your editor, or with:\n'
+    printf '       %s<editor> --install-extension %s%s\n' "$c_dim" "$EXT_ID" "$c_rst"
+    return 0
+  fi
+
+  info "Editor extension"
+  printf '   editor CLI      : %s\n' "$cli"
+  printf '   extension       : %s\n' "$EXT_ID"
+
+  # Already installed? Keep it idempotent like the rest of the installer.
+  if [ "$DRYRUN" -eq 0 ] && $cli --list-extensions 2>/dev/null | grep -qix "$EXT_ID"; then
+    printf '   %salready installed — nothing to do%s\n' "$c_dim" "$c_rst"
+    return 0
+  fi
+
+  # $cli may be a multi-word command ("flatpak run ..."), so don't quote it.
+  # shellcheck disable=SC2086
+  run $cli --install-extension "$EXT_ID" --force || \
+    warn "couldn't install $EXT_ID automatically — add it from your editor's Extensions view."
+}
+
 # --- uninstall --------------------------------------------------------------
 if [ "$MODE" = "uninstall" ]; then
   info "Uninstalling $APP"
@@ -154,6 +209,9 @@ if [ "$on_path" -eq 0 ] && [ "$DRYRUN" -eq 0 ]; then
   printf '   Add this line to %s and restart your shell:\n' "$rc"
   printf '       %sexport PATH="%s:$PATH"%s\n' "$c_dim" "$BINDIR" "$c_rst"
 fi
+
+# --- editor extension -------------------------------------------------------
+install_extension
 
 # --- engine guidance --------------------------------------------------------
 if [ "$DRYRUN" -eq 0 ] && ! have podman && ! have docker; then
