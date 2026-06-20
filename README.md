@@ -6,20 +6,12 @@ Disposable, isolated sandboxes to keep AI coding agents from touching or analyzi
 
 ## Install
 
-The fastest path on any platform is the bundled installer, which detects your
-system (including immutable Fedora) and uses the right convention automatically:
-
 ```sh
 ./install.sh            # per-user install, no sudo
 ./install.sh --system   # system-wide (/usr/local), needs sudo
 ./install.sh --check     # show what the installer will do
 ./install.sh --uninstall # remove a previous install
 ```
-
-It copies the project into a single program directory and symlinks the `isopod`
-entry point onto your `PATH`, then tells you if anything (PATH, a container
-engine) still needs attention. The manual steps below explain what it does and
-cover cases where you'd rather place files yourself.
 
 ## Quick start
 
