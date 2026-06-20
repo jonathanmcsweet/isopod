@@ -1,6 +1,6 @@
 # Isopod
 
-Disposable, isolated sandboxes to keep AI coding agents from touching or analyzing your local machine.
+Disposable, isolated IDE containers to keep AI coding agents from touching or analyzing your local machine.
 
 `isopod` is a single bash script that creates a Podman (or Docker) container with an SSH server inside, puts your code in it, and turns VSCodium (or Cursor, Windsurf, JetBrains) into a GUI for that container. The IDE's server component, your terminals, and any AI agent extensions all execute *inside* the container. Each sandbox gets its own window color to discern between environments.
 
