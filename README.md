@@ -96,7 +96,7 @@ Isopod can run boxes under a syscall-virtualizing runtime — **gVisor (`runsc`)
 - **Docker:** add it to `/etc/docker/daemon.json` (`"runtimes": {"runsc": {"path": "/usr/local/bin/runsc"}}`) and restart the daemon.
 - `isopod doctor` warns if a configured runtime isn't found on the host.
 
-Caveats: gVisor is Linux-only (under `podman machine` / Docker Desktop on macOS it runs inside that VM); some syscall-heavy or low-level workloads run slower or are unsupported under it. **Tier 1 only** is the safe default for most users.
+Caveats: gVisor is Linux-only (under `podman machine` / Docker Desktop on macOS it runs inside that VM); some syscall-heavy or low-level workloads run slower or are unsupported under it.
 
 ### What still can't be mitigated
 
