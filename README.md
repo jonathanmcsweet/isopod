@@ -4,6 +4,44 @@ Disposable, isolated sandboxes to keep AI coding agents from touching or analyzi
 
 `isopod` is a single bash script that creates a Podman (or Docker) container with an SSH server inside, puts your code in it, and turns VSCodium (or Cursor, Windsurf, JetBrains) into a GUI for that container. The IDE's server component, your terminals, and any AI agent extensions all execute *inside* the container. Each sandbox gets its own window color to discern between environments.
 
+## Install
+
+The fastest path on any platform is the bundled installer, which detects your
+system (including immutable Fedora) and uses the right convention automatically:
+
+```sh
+./install.sh            # per-user install, no sudo
+./install.sh --system   # system-wide (/usr/local), needs sudo
+./install.sh --check     # show what the installer will do
+./install.sh --uninstall # remove a previous install
+```
+
+It copies the project into a single program directory and symlinks the `isopod`
+entry point onto your `PATH`, then tells you if anything (PATH, a container
+engine) still needs attention. The manual steps below explain what it does and
+cover cases where you'd rather place files yourself.
+
+## Quick start
+
+```sh
+# Sandbox around a git repo, teal-tinted windows
+isopod create myproj --repo https://github.com/me/myproj --color teal
+isopod code myproj          # opens VSCodium connected to the box
+
+# Sandbox from an explicit allowlist of host folders to copy
+isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
+isopod code scratch --app cursor
+
+# Day-to-day
+isopod list
+isopod shell myproj                 # terminal inside the box
+isopod copy-in myproj ~/datasets/x  # add more host folders later (still a copy)
+isopod export myproj ./out          # pull the whole workspace back out (files)
+isopod fetch myproj                 # pull the box's git history into a host clone
+isopod stop myproj
+isopod rm myproj                    # destroy box + its keys + ssh config entry
+```
+
 ## The isolation model
 
 The container cannot see the host filesystem at all. Files cross the boundary in five ways:
@@ -90,22 +128,6 @@ Rule of thumb: if your threat model is "a sophisticated, actively malicious agen
 
 Run `isopod doctor` to check your setup.
 
-## Install
-
-The fastest path on any platform is the bundled installer, which detects your
-system (including immutable Fedora) and uses the right convention automatically:
-
-```sh
-./install.sh            # per-user install, no sudo
-./install.sh --system   # system-wide (/usr/local), needs sudo
-./install.sh --check     # show what the installer will do
-./install.sh --uninstall # remove a previous install
-```
-
-It copies the project into a single program directory and symlinks the `isopod`
-entry point onto your `PATH`, then tells you if anything (PATH, a container
-engine) still needs attention. The manual steps below explain what it does and
-cover cases where you'd rather place files yourself.
 
 ### Manual Installation
 
@@ -217,26 +239,6 @@ Run isopod **inside WSL2** — it's a bash tool and Podman/Docker live in the Li
 
 `isopod doctor` checks for podman/docker, the SSH client tools, and any installed IDEs. To update later, replace the program directory (e.g. `~/.local/share/isopod`) with the new version — the symlink keeps working untouched. To uninstall, remove that directory and the symlink; your boxes' state under `~/.config/isopod` is separate and can be cleaned up with `isopod rm` first.
 
-## Quick start
-
-```sh
-# Sandbox around a git repo, teal-tinted windows
-isopod create myproj --repo https://github.com/me/myproj --color teal
-isopod code myproj          # opens VSCodium connected to the box
-
-# Sandbox from an explicit allowlist of host folders (copied, never mounted)
-isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
-isopod code scratch --app cursor
-
-# Day-to-day
-isopod list
-isopod shell myproj                 # terminal inside the box
-isopod copy-in myproj ~/datasets/x  # add more host folders later (still a copy)
-isopod export myproj ./out          # pull the whole workspace back out (files)
-isopod fetch myproj                 # pull the box's git history into a host clone
-isopod stop myproj
-isopod rm myproj                    # destroy box + its keys + ssh config entry
-```
 
 Every box also becomes a plain SSH host: `ssh isopod-myproj` works from any terminal, and any SSH-aware tool can use it.
 

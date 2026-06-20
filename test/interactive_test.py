@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Interactive (pty) tests for isopod — the "Playwright for terminals" layer.
+Interactive (pty) tests for Isopod
 
 bats with `run` captures exit code and output but cannot answer a live
 prompt. These tests drive isopod through a real pseudo-terminal with pexpect,
