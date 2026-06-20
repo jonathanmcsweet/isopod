@@ -1,4 +1,4 @@
-# isopod
+# Isopod
 
 Disposable, isolated sandboxes to keep AI coding agents from touching or analyzing your local machine.
 
