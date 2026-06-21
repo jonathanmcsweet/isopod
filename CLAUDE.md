@@ -29,6 +29,20 @@ Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
   `RUN_LIVE=1 bash test/run.sh` also runs real-container tests.
 - Never commit `__pycache__/` or `*.pyc` (see `.gitignore`).
 
+## No inline foreign-language code — extract to its own file
+
+- NEVER embed another language (Python, etc.) inline in the `isopod` bash script
+  via heredocs (`<<'PY' … PY`) or `-c "…"` snippets. Put it in its own file under
+  `lib/` and invoke that file.
+- Mirror the existing pattern: reference the helper as `"$ISOPOD_LIB/<name>.py"`,
+  guard it (`[ -f "$script" ] || die "missing helper: $script …"`), then run it
+  (`python3 "$script"`, or `python3 - < "$script"` to stream it into a box).
+  See `lib/apply_color.py` (runs in the box) and
+  `lib/remap_identity_filter.py` (runs on the host) for the two cases.
+- Give each helper a module docstring and keep it independently runnable/lintable.
+  `install.sh` ships everything in `lib/`, so new helpers are picked up
+  automatically.
+
 ## Repo structure rules (see MANIFEST.md)
 
 - `lib/` MUST sit beside the `isopod` script — it is streamed into the box.

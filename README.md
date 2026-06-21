@@ -30,6 +30,7 @@ isopod shell myproj                 # terminal inside the box
 isopod copy-in myproj ~/datasets/x  # add more host folders later (still a copy)
 isopod export myproj ./out          # pull the whole workspace back out (files)
 isopod fetch myproj                 # pull the box's git history into a host clone
+isopod remap myproj --name "Me" --email me@x.com  # fix box commit identity after fetch
 isopod stop myproj
 isopod rm myproj                    # destroy box + its keys + ssh config entry
 ```
@@ -253,6 +254,15 @@ Two ways out, for two situations:
   ```
 
   `isopod fetch` finds the repo at the box's workspace automatically (or the single git subfolder inside it); pass `--path <in-box-repo>` if your layout is unusual. If the target isn't a git repo, it instead drops a `<name>.bundle` file and prints how to use it. Like `export`, it needs no network and no git remote.
+
+
+  `isopod remap <name> [target-repo]` Pods don't set a git identity, so commits made inside one carry whatever was configured there (often a throwaway `dev@<box>`); this maps them to your real name/email while preserving commit messages and author/committer **dates**:
+
+  ```sh
+  isopod remap myproj --name "Ada Lovelace" --email ada@example.com
+  ```
+
+  Only commits matching the old identity are touched — pass `--old-email <e>` (and optionally `--old-name <n>`) to set it explicitly, or let it auto-detect from the still-running box. The rewrite is scoped to the box's `<name>/*` refs, so **your own branches are never touched**, and the originals are snapshotted under `refs/remap-backup/` so you can undo. It uses [`git-filter-repo`](https://github.com/newren/git-filter-repo) when installed, otherwise a built-in `git fast-export`→`fast-import` rewrite that needs only **core git plus `python3`.
 
 ## Connecting each IDE
 

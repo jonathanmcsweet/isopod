@@ -74,6 +74,7 @@ Usage:
   isopod stop <name>                  Stop a running sandbox
   isopod export <name> [dest]         Copy the workspace OUT of the sandbox
   isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
+  isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
   isopod copy-in <name> <path>...     Copy more host folders INTO the sandbox
   isopod rm <name> [--force]          Delete a sandbox (container + keys)
   isopod doctor                       Check host prerequisites
@@ -100,12 +101,22 @@ Options for create:
   --port <n>            Fixed host port for SSH (default: random free port,
                         bound to 127.0.0.1 only)
 
+Options for remap (run after 'isopod fetch'):
+  --name <new name>     New author/committer name to write   (required)
+  --email <new email>   New author/committer email to write  (required)
+  --old-email <e>       Identity to rewrite FROM; only commits with this
+                        email are touched. Auto-detected from the box if
+                        omitted (requires the box to still exist).
+  --old-name <n>        Also require this name to match before rewriting.
+  --force, -f           Skip the confirmation prompt.
+
 Examples:
   isopod create myproj --repo https://github.com/me/proj --color teal
   isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
   isopod code myproj
   isopod export myproj ./myproj-out
   isopod fetch myproj            # from inside your host clone, pulls box history
+  isopod remap myproj --name "Real Name" --email me@real.com   # fix box commits
 EOF
 }
 
@@ -654,9 +665,7 @@ cmd_fetch() {
 
   local bundle_box="/tmp/isopod-$name.bundle"
   info "Bundling $repo inside the box..."
-  # Include HEAD so that `git clone <bundle>` checks out the box's current
-  # branch instead of guessing master/main (or refusing to check anything out).
-  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" HEAD --branches --tags >/dev/null \
+  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null \
     || die "git bundle failed in the box (does $repo have any commits?)"
 
   if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -666,21 +675,13 @@ cmd_fetch() {
     "$ENGINE" cp "$ctr:$bundle_box" "$tmp"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "Fetching history into $top as '$name/*'..."
-    # Force-update the box's own tracking refs (leading '+'), exactly like a
-    # normal remote's refspec. The box is the source of truth for <name>/*, and
-    # its branches can legitimately diverge from a previous fetch (rebase, amend,
-    # identity remap) — without '+' those land as non-fast-forward and abort the
-    # whole fetch. Your local branches live elsewhere and are never touched.
-    if ! git -C "$target" fetch --no-tags "$tmp" "+refs/heads/*:refs/remotes/$name/*"; then
+    if ! git -C "$target" fetch --no-tags "$tmp" "refs/heads/*:refs/remotes/$name/*"; then
       rm -f "$tmp"; die "git fetch from the bundle failed"
     fi
     rm -f "$tmp"
     info "Done. Box branches are now available as:"
     git -C "$target" branch -r --list "$name/*" | sed 's/^/    /'
-    # These land under refs/remotes/<name>/* but <name> is not a configured
-    # remote, so a bare `git checkout <branch>` will NOT auto-create a local
-    # branch — the explicit two-arg form is required.
-    printf '\nCheck one out with (bare `git checkout <branch>` will not work):\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
+    printf '\nCheck one out with:\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
   else
     # Target is not a git repo: drop the bundle file for manual use.
     local out="$target"
@@ -690,12 +691,117 @@ cmd_fetch() {
     "$ENGINE" cp "$ctr:$bundle_box" "$out"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "'$target' is not a git repo — wrote a bundle instead: $out"
-    # Cloning is the friendliest path: it configures 'origin', so a bare
-    # `git checkout <branch>` works for every branch. Fetching into an existing
-    # repo lands branches under a pseudo-remote and needs `git switch -c`; the
-    # leading '+' force-updates those tracking refs so a diverged re-fetch works.
-    printf '\nCreate a fresh repo from it (checks out the box'\''s current branch):\n  git clone %s my-%s\n\nor fetch it into an existing clone (then use the two-arg form to check out):\n  git -C /path/to/clone fetch %s "+refs/heads/*:refs/remotes/%s/*"\n  git -C /path/to/clone switch -c <branch> %s/<branch>\n' "$out" "$name" "$out" "$name" "$name"
+    printf '\nUse it from any clone:\n  git -C /path/to/clone fetch %s "refs/heads/*:refs/remotes/%s/*"\nor create a fresh repo from it:\n  git clone %s my-%s\n' "$out" "$name" "$out" "$name"
   fi
+}
+
+# Rewrite the author/committer identity on the commits a box contributed, AFTER
+# `isopod fetch` has imported them as refs/remotes/<name>/* tracking refs. Only
+# commits whose existing identity matches --old-email (optionally --old-name)
+# are touched; commit messages and author/committer DATES are preserved. The
+# rewrite is scoped to the box's refs, so the host's own branches are untouched.
+# Prefers `git filter-repo`; falls back to the built-in `git filter-branch`.
+cmd_remap() {
+  local name="" target="" new_name="" new_email="" old_email="" old_name="" force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name)      new_name="$2"; shift 2 ;;
+      --email)     new_email="$2"; shift 2 ;;
+      --old-email) old_email="$2"; shift 2 ;;
+      --old-name)  old_name="$2"; shift 2 ;;
+      --force|-f)  force=1; shift ;;
+      -h|--help)   usage; exit 0 ;;
+      -*)          die "unknown option for remap: $1" ;;
+      *) if [ -z "$name" ]; then name="$1"
+         elif [ -z "$target" ]; then target="$1"
+         else die "unexpected argument: $1"; fi; shift ;;
+    esac
+  done
+
+  [ -n "$name" ] || die "usage: isopod remap <name> [target-repo-dir] --name <new> --email <new> [--old-email <e>] [--old-name <n>]"
+  have git || die "git is required on the host for 'isopod remap'"
+  [ -n "$new_name" ]  || die "--name <new author name> is required"
+  [ -n "$new_email" ] || die "--email <new author email> is required"
+  target="${target:-.}"
+  git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || die "'$target' is not a git repo — run this in (or point it at) the repo you fetched into"
+  local top; top=$(git -C "$target" rev-parse --show-toplevel)
+
+  # The box's commits live under refs/remotes/<name>/* after `isopod fetch`.
+  local -a boxrefs=()
+  local r
+  while IFS= read -r r; do [ -n "$r" ] && boxrefs+=("$r"); done < <(
+    git -C "$top" for-each-ref --format='%(refname)' "refs/remotes/$name/")
+  [ "${#boxrefs[@]}" -gt 0 ] \
+    || die "no refs found under refs/remotes/$name/* — run 'isopod fetch $name $top' first"
+
+  # If --old-email was omitted, try to learn the box's git identity from the box
+  # itself (best effort — the box may already be gone, in which case ask for it).
+  if [ -z "$old_email" ]; then
+    if [ -d "$(box_dir "$name")" ]; then
+      detect_engine "$(meta_get "$name" engine || true)"
+      old_email=$("$ENGINE" exec -u "$CONTAINER_USER" "$(ctr_name "$name")" \
+        git -C "$WORKSPACE" config --get user.email 2>/dev/null | tr -d '\r') || true
+      [ -n "$old_email" ] && info "Detected box identity from '$name': <$old_email>"
+    fi
+    [ -n "$old_email" ] || die "could not detect the box's email — pass --old-email <e> (the identity to rewrite FROM)"
+  fi
+
+  info "Rewriting commits by <$old_email>${old_name:+ / \"$old_name\"} on:"
+  printf '    %s\n' "${boxrefs[@]}"
+  info "            to: \"$new_name\" <$new_email>  (in $top)"
+  if [ "$force" -ne 1 ]; then
+    printf 'This rewrites history on those refs (new commit SHAs). Proceed? [y/N] '
+    local reply; read -r reply
+    case "$reply" in y|Y|yes|YES) ;; *) die "aborted" ;; esac
+  fi
+
+  # Safety net: snapshot the box refs so the user can undo (git update-ref -d
+  # refs/remap-backup/... to discard, or reset a ref back to its backup).
+  for r in "${boxrefs[@]}"; do
+    git -C "$top" update-ref "refs/remap-backup/${r#refs/}" "$r"
+  done
+  info "Backed up original refs under refs/remap-backup/ (delete when satisfied)."
+
+  if have git-filter-repo || git -C "$top" filter-repo -h >/dev/null 2>&1; then
+    # Preferred path: filter-repo with a mailmap matching the old identity.
+    local mm; mm=$(mktemp "${TMPDIR:-/tmp}/isopod-remap-XXXXXX")
+    if [ -n "$old_name" ]; then
+      printf '%s <%s> %s <%s>\n' "$new_name" "$new_email" "$old_name" "$old_email" > "$mm"
+    else
+      printf '%s <%s> <%s>\n' "$new_name" "$new_email" "$old_email" > "$mm"
+    fi
+    # --refs scopes the rewrite (implies --partial: other refs/origin are kept).
+    if ! git -C "$top" filter-repo --force --partial --mailmap "$mm" --refs "${boxrefs[@]}"; then
+      rm -f "$mm"; die "git filter-repo failed"
+    fi
+    rm -f "$mm"
+  elif have python3; then
+    # Fallback using ONLY core git: stream the box refs through fast-export,
+    # rewrite the matching author/committer/tagger identities, and fast-import
+    # them back. This needs no extra tooling (filter-branch is deprecated and
+    # often absent), never touches the working tree, and keeps dates verbatim.
+    # The rewrite logic lives in lib/remap_identity_filter.py (data-block aware,
+    # so identity-looking lines inside a commit message are left untouched).
+    local flt="$ISOPOD_LIB/remap_identity_filter.py"
+    [ -f "$flt" ] || die "missing helper: $flt (is your isopod install complete?)"
+    if ! git -C "$top" fast-export --no-data --reference-excluded-parents "${boxrefs[@]}" \
+       | OLD_EMAIL="$old_email" OLD_NAME="$old_name" \
+         NEW_NAME="$new_name" NEW_EMAIL="$new_email" python3 "$flt" \
+       | git -C "$top" fast-import --force --quiet; then
+      die "the fast-export/fast-import rewrite failed"
+    fi
+  else
+    die "need 'git filter-repo' or python3 to rewrite history — install one:
+    Debian/Ubuntu : sudo apt install git-filter-repo   (or: apt install python3)
+    macOS (brew)  : brew install git-filter-repo
+    any OS (pip)  : pip install git-filter-repo"
+  fi
+
+  info "Done. Rewritten box branches:"
+  git -C "$top" for-each-ref \
+    --format='    %(refname:short)  %(authorname) <%(authoremail:trim)>' "${boxrefs[@]}"
+  printf '\nCheck the result, then drop the backups when happy:\n  git -C %s for-each-ref refs/remap-backup/\n  git -C %s update-ref -d <each backup ref>\n' "$top" "$top"
 }
 
 cmd_list() {
@@ -935,6 +1041,7 @@ main() {
     stop)          cmd_stop "$@" ;;
     export)        cmd_export "$@" ;;
     fetch)         cmd_fetch "$@" ;;
+    remap)         cmd_remap "$@" ;;
     copy-in)       cmd_copy_in "$@" ;;
     rm|remove|delete) cmd_rm "$@" ;;
     doctor)        cmd_doctor "$@" ;;
