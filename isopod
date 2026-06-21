@@ -654,7 +654,9 @@ cmd_fetch() {
 
   local bundle_box="/tmp/isopod-$name.bundle"
   info "Bundling $repo inside the box..."
-  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null \
+  # Include HEAD so that `git clone <bundle>` checks out the box's current
+  # branch instead of guessing master/main (or refusing to check anything out).
+  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" HEAD --branches --tags >/dev/null \
     || die "git bundle failed in the box (does $repo have any commits?)"
 
   if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -664,13 +666,21 @@ cmd_fetch() {
     "$ENGINE" cp "$ctr:$bundle_box" "$tmp"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "Fetching history into $top as '$name/*'..."
-    if ! git -C "$target" fetch --no-tags "$tmp" "refs/heads/*:refs/remotes/$name/*"; then
+    # Force-update the box's own tracking refs (leading '+'), exactly like a
+    # normal remote's refspec. The box is the source of truth for <name>/*, and
+    # its branches can legitimately diverge from a previous fetch (rebase, amend,
+    # identity remap) — without '+' those land as non-fast-forward and abort the
+    # whole fetch. Your local branches live elsewhere and are never touched.
+    if ! git -C "$target" fetch --no-tags "$tmp" "+refs/heads/*:refs/remotes/$name/*"; then
       rm -f "$tmp"; die "git fetch from the bundle failed"
     fi
     rm -f "$tmp"
     info "Done. Box branches are now available as:"
     git -C "$target" branch -r --list "$name/*" | sed 's/^/    /'
-    printf '\nCheck one out with:\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
+    # These land under refs/remotes/<name>/* but <name> is not a configured
+    # remote, so a bare `git checkout <branch>` will NOT auto-create a local
+    # branch — the explicit two-arg form is required.
+    printf '\nCheck one out with (bare `git checkout <branch>` will not work):\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
   else
     # Target is not a git repo: drop the bundle file for manual use.
     local out="$target"
@@ -680,7 +690,11 @@ cmd_fetch() {
     "$ENGINE" cp "$ctr:$bundle_box" "$out"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "'$target' is not a git repo — wrote a bundle instead: $out"
-    printf '\nUse it from any clone:\n  git -C /path/to/clone fetch %s "refs/heads/*:refs/remotes/%s/*"\nor create a fresh repo from it:\n  git clone %s my-%s\n' "$out" "$name" "$out" "$name"
+    # Cloning is the friendliest path: it configures 'origin', so a bare
+    # `git checkout <branch>` works for every branch. Fetching into an existing
+    # repo lands branches under a pseudo-remote and needs `git switch -c`; the
+    # leading '+' force-updates those tracking refs so a diverged re-fetch works.
+    printf '\nCreate a fresh repo from it (checks out the box'\''s current branch):\n  git clone %s my-%s\n\nor fetch it into an existing clone (then use the two-arg form to check out):\n  git -C /path/to/clone fetch %s "+refs/heads/*:refs/remotes/%s/*"\n  git -C /path/to/clone switch -c <branch> %s/<branch>\n' "$out" "$name" "$out" "$name" "$name"
   fi
 }
 
