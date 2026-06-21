@@ -136,6 +136,31 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   assert_output --partial "feat: more"
 }
 
+@test "live: fetch to a non-repo writes a bundle a clone checks out on the box's branch" {
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
+  # commit on main, then leave the box checked out on a feature branch
+  bssh -- sh -c '
+    cd /home/dev/workspace &&
+    git init -q -b main &&
+    git config user.email t@t && git config user.name t &&
+    echo hi > f.txt && git add f.txt && git commit -qm "feat: seed" &&
+    git switch -q -c feature/x && echo more >> f.txt && git commit -qam "feat: more"'
+  # target is NOT a git repo, so fetch should drop a .bundle file
+  out_dir="$TEST_TMP/plain"; mkdir -p "$out_dir"
+  run "$ISOPOD_ROOT/isopod" fetch "$BOX" "$out_dir"
+  assert_success
+  bundle="$out_dir/isopod-$BOX.bundle"
+  [ -f "$bundle" ]
+  # cloning the bundle must check out the box's CURRENT branch (feature/x),
+  # not guess main — this is what including HEAD in the bundle guarantees
+  git clone -q "$bundle" "$TEST_TMP/cloned"
+  run git -C "$TEST_TMP/cloned" rev-parse --abbrev-ref HEAD
+  assert_output "feature/x"
+  # and other branches remain checkoutable by bare name (origin is configured)
+  run git -C "$TEST_TMP/cloned" checkout main
+  assert_success
+}
+
 @test "live: rm destroys the container" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   "$ISOPOD_ROOT/isopod" rm "$BOX" --force
