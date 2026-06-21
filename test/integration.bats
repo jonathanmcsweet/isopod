@@ -152,6 +152,65 @@ EOF
   assert_output --partial "unknown option for fetch"
 }
 
+# ---- remap (operates purely on host git; no container needed) -----------------
+# Build a host repo with the box's commits imported under refs/remotes/<name>/*,
+# exactly as `isopod fetch` would leave them. The "box" commits use a distinct
+# identity so we can prove only those get rewritten.
+_seed_remapped_host() { # _seed_remapped_host <host-dir>
+  local host="$1" box="$TEST_TMP/box"
+  git init -q "$box"
+  git -C "$box" config user.email dev@mybox.local; git -C "$box" config user.name dev
+  echo a > "$box/a"; git -C "$box" add a
+  # the body contains a line that LOOKS like an author header — the rewriter
+  # must leave it byte-for-byte intact (only the real identity may change).
+  printf 'box: work 1\n\nauthor Faker <dev@mybox.local> 0 +0000\n' | git -C "$box" commit -qF -
+  git -C "$box" -c user.email=mate@corp -c user.name=Mate commit -q --allow-empty -m "mate: review"
+  git init -q "$host"
+  git -C "$host" config user.email me@home; git -C "$host" config user.name Me
+  echo h > "$host/h"; git -C "$host" add h; git -C "$host" commit -qm "host: mine"
+  git -C "$host" fetch --no-tags "$box" "refs/heads/*:refs/remotes/mybox/*" >/dev/null 2>&1
+}
+
+@test "remap requires new --name and --email" {
+  _seed_remapped_host "$TEST_TMP/host"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --old-email dev@mybox.local --name X
+  assert_failure
+  assert_output --partial "--email"
+}
+
+@test "remap errors when the box has no fetched refs" {
+  git init -q "$TEST_TMP/plain"
+  run "$ISOPOD_ROOT/isopod" remap ghost "$TEST_TMP/plain" \
+    --old-email a@b --name X --email y@z --force
+  assert_failure
+  assert_output --partial "no refs found under refs/remotes/ghost/"
+}
+
+@test "remap rewrites only the box identity and leaves host commits intact" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  local host_sha; host_sha=$(git -C "$host" rev-parse master)
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" \
+    --old-email dev@mybox.local --name "Real Name" --email real@me.com --force
+  assert_success
+  # the box-identity commit is rewritten...
+  run git -C "$host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "Real Name <real@me.com>"
+  # ...the teammate commit on the same branch is NOT...
+  assert_output --partial "Mate <mate@corp>"
+  refute_output --partial "dev@mybox.local"
+  # ...the host's own branch is byte-for-byte unchanged...
+  run git -C "$host" rev-parse master
+  assert_output "$host_sha"
+  # ...the author-looking line in the commit BODY survives verbatim (proving
+  # the rewrite is data-block aware, not a blind line replacement)...
+  run git -C "$host" log --format='%B' refs/remotes/mybox/master
+  assert_output --partial "author Faker <dev@mybox.local> 0 +0000"
+  # ...and a restore point was left behind.
+  run git -C "$host" for-each-ref refs/remap-backup/
+  assert_output --partial "mybox/master"
+}
+
 @test "create with --repo clones inside the box" {
   run "$ISOPOD_ROOT/isopod" create demo --repo https://example.com/r.git --color blue
   assert_success
