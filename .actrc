@@ -1,0 +1,7 @@
+# Default runner image for `act` (https://github.com/nektos/act).
+#
+# The medium image ships the tooling the lint/test jobs expect (git, python3,
+# apt, node for actions/checkout) without pulling the multi-GB "full" image.
+# isopod's jobs install their remaining deps (shellcheck, pexpect, …) at runtime
+# via apt, so this just needs to be a real Ubuntu base with a package manager.
+-P ubuntu-latest=catthehacker/ubuntu:act-latest

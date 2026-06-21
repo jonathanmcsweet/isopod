@@ -1,0 +1,92 @@
+# GitHub Actions for isopod.
+#
+# Kept in lockstep with .gitlab-ci.yml — the SAME three jobs:
+#   * lint            shellcheck + bash syntax + python (no engine, runs anywhere)
+#   * test            stubbed bats suite + interactive pexpect (no engine)
+#   * live-isolation  REAL containers; needs podman-in-container, so manual only
+#
+# Designed to run locally under `act` (https://github.com/nektos/act):
+#   act -j lint
+#   act -j test
+#   act              # runs lint + test (the push/pull_request jobs)
+#
+# The live-isolation job needs user namespaces / container-in-container that
+# `act` and GitHub's shared runners cannot provide, so it is gated to manual
+# dispatch. Run it the native way instead:  RUN_LIVE=1 test/run.sh
+#
+# Nothing is fetched at runtime: bats and its helpers are vendored under
+# test/libs/, so jobs are hermetic and fast.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Stage 1: lint — shellcheck + bash syntax. Pure static analysis.
+  # -------------------------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck + bash syntax + python lib
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq shellcheck
+          shellcheck -S warning isopod install.sh test/run.sh verify-host-isolation.sh
+          bash -n isopod install.sh verify-host-isolation.sh
+          # lint the discrete python helpers under lib/
+          apt-get install -y -qq python3 python3-pyflakes
+          python3 -m py_compile lib/*.py
+          python3 -m pyflakes lib/*.py
+
+  # -------------------------------------------------------------------------
+  # Stage 2: test — stubbed bats suite + interactive pexpect tests.
+  # No container engine; podman/docker/ssh are stubbed by the suite itself.
+  # -------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: stubbed bats + interactive
+        run: |
+          apt-get update -qq
+          # Install core test deps first, on their own line, so they always
+          # land even if an optional package on another line is unavailable.
+          apt-get install -y -qq bash openssh-client python3 python3-pexpect
+          bash test/run.sh
+
+  # -------------------------------------------------------------------------
+  # Stage 3: live — REAL containers, exercising the isolation guarantees.
+  #
+  # Needs a runner that can run podman inside the job. GitHub's shared runners
+  # and `act` are unprivileged and cannot create the user namespaces this
+  # requires, so it never runs automatically — trigger it by hand from the
+  # Actions tab (workflow_dispatch), point it at a podman-capable self-hosted
+  # runner, or just run it locally:
+  #
+  #   RUN_LIVE=1 test/run.sh
+  # -------------------------------------------------------------------------
+  live-isolation:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: quay.io/podman/stable     # ships podman; needs a capable runner
+    env:
+      RUN_LIVE: "1"
+      # vfs avoids needing overlay/fuse in constrained CI; slower but portable
+      STORAGE_DRIVER: "vfs"
+      ISOPOD_TEST_IMAGE: "debian:bookworm-slim"
+    steps:
+      - uses: actions/checkout@v4
+      - name: live end-to-end (real podman)
+        run: |
+          dnf install -y openssh-clients python3 >/dev/null 2>&1 || true
+          test/libs/bats-core/bin/bats test/live.bats
