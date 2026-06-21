@@ -189,7 +189,7 @@ else
   run rm -rf "$PROGDIR/.git" "$PROGDIR/lib/__pycache__" "$PROGDIR/test"
 fi
 run chmod +x "$PROGDIR/$APP"
-[ -f "$PROGDIR/lib/apply_color.py" ] && run chmod +x "$PROGDIR/lib/apply_color.py" || true
+for _py in "$PROGDIR"/lib/*.py; do [ -f "$_py" ] && run chmod +x "$_py"; done
 run ln -sf "$PROGDIR/$APP" "$LINK"
 
 # --- PATH guidance ----------------------------------------------------------

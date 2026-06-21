@@ -1,0 +1,6 @@
+# Python bytecode caches (helpers under lib/ are run with python3)
+__pycache__/
+*.py[cod]
+
+# Editor / IDE local settings
+.vscode/
