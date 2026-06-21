@@ -126,6 +126,13 @@ EOF
   assert_stub_not_called 'podman run .* -v '
 }
 
+@test "create accepts --copy=path the same as --copy path" {
+  mkdir -p "$TEST_TMP/src"; echo hi > "$TEST_TMP/src/file.txt"
+  run "$ISOPOD_ROOT/isopod" create demo --copy="$TEST_TMP/src" --color blue
+  assert_success
+  assert_stub_called "podman cp $TEST_TMP/src isopod-demo:"
+}
+
 @test "create applies Tier 1 fingerprint masks from the hardening profile" {
   run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
