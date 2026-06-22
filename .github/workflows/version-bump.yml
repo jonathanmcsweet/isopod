@@ -1,0 +1,50 @@
+# Gate: every PR must bump ISOPOD_VERSION (the single source of truth in `isopod`)
+# to a strictly higher SemVer than the base branch. Mark the `version-bump` job as
+# a required status check in branch protection to block merges that forget it.
+
+name: version-bump
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0          # need history to read the base branch's version
+
+      - name: Require ISOPOD_VERSION to increase
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          ver() { sed -n 's/^ISOPOD_VERSION="\(.*\)"/\1/p' "$1" | head -1; }
+
+          head_ver="$(ver isopod)"
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          base_ver="$(git show FETCH_HEAD:isopod | sed -n 's/^ISOPOD_VERSION="\(.*\)"/\1/p' | head -1)"
+
+          echo "base ($BASE_REF): ${base_ver:-<none>}"
+          echo "head (this PR):  ${head_ver:-<none>}"
+
+          if [ -z "$head_ver" ]; then
+            echo "::error file=isopod::could not read ISOPOD_VERSION from ./isopod"
+            exit 1
+          fi
+          if [ "$head_ver" = "$base_ver" ]; then
+            echo "::error file=isopod::ISOPOD_VERSION is still $base_ver — bump it before merging (edit ISOPOD_VERSION in ./isopod; see RELEASING.md)."
+            exit 1
+          fi
+          # Reject a version that is lower than the base (sort -V = version sort).
+          highest="$(printf '%s\n%s\n' "$base_ver" "$head_ver" | sort -V | tail -1)"
+          if [ "$highest" != "$head_ver" ]; then
+            echo "::error file=isopod::ISOPOD_VERSION ($head_ver) is lower than the base ($base_ver) — bump it forward."
+            exit 1
+          fi
+
+          echo "Version bump OK: $base_ver -> $head_ver"
