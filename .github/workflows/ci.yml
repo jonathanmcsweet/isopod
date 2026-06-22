@@ -65,7 +65,7 @@ jobs:
       STORAGE_DRIVER: "vfs"
       ISOPOD_TEST_IMAGE: "debian:bookworm-slim"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: live end-to-end (real podman)
         run: |
           dnf install -y openssh-clients python3 >/dev/null 2>&1 || true
