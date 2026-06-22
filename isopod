@@ -23,7 +23,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="0.1.0"
+ISOPOD_VERSION="0.2.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -679,7 +679,12 @@ cmd_fetch() {
     "$ENGINE" cp "$ctr:$bundle_box" "$tmp"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "Fetching history into $top as '$name/*'..."
-    if ! git -C "$target" fetch --no-tags "$tmp" "refs/heads/*:refs/remotes/$name/*"; then
+    # Force-update the box's tracking refs (leading '+'), exactly as a normal
+    # remote's '+refs/heads/*:refs/remotes/origin/*' does. Without it, a re-fetch
+    # after the box's history was rewritten — e.g. by 'isopod remap', which gives
+    # commits new SHAs — is rejected as non-fast-forward. These refs are a mirror
+    # namespace isopod owns; the host's own branches (refs/heads/*) are untouched.
+    if ! git -C "$target" fetch --no-tags "$tmp" "+refs/heads/*:refs/remotes/$name/*"; then
       rm -f "$tmp"; die "git fetch from the bundle failed"
     fi
     rm -f "$tmp"
