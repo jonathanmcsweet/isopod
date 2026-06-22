@@ -6,26 +6,26 @@ and is what `isopod version` prints.
 
 ## Cut a release
 
-1. **Bump the version.** Edit `ISOPOD_VERSION` in `isopod` (e.g. `0.2.0`) and land
-   it on `master`. Use a Conventional Commit, e.g. `chore(release): 0.2.0`.
+1. **Bump the version.** Edit `ISOPOD_VERSION` in `isopod` (e.g. `0.3.0`) and land
+   it on `master`. Use a Conventional Commit, e.g. `chore(release): 0.3.0`.
 
 2. **Tag and push.** The tag must be `v<version>` so the Homebrew `url` resolves:
 
    ```sh
-   git tag -a v0.2.0 -m "isopod 0.2.0"
-   git push origin v0.2.0
+   git tag -a v0.3.0 -m "isopod 0.3.0"
+   git push origin v0.3.0
    ```
 
    GitHub auto-generates a source tarball at:
 
    ```
-   https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v0.2.0.tar.gz
+   https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v0.3.0.tar.gz
    ```
 
 3. **Compute the tarball SHA-256** and put it in `Formula/isopod.rb`:
 
    ```sh
-   curl -fsSL https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v0.2.0.tar.gz \
+   curl -fsSL https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v0.3.0.tar.gz \
      | shasum -a 256
    # (Linux: sha256sum)
    ```
@@ -37,7 +37,7 @@ and is what `isopod version` prints.
    ```
 
    Replace both `url` (the version) and `sha256` in `Formula/isopod.rb`, commit as
-   `chore(brew): isopod 0.2.0`.
+   `chore(brew): isopod 0.3.0`.
 
 4. **Smoke-test the formula** locally before announcing:
 
@@ -50,7 +50,7 @@ and is what `isopod version` prints.
 
 ## Before the first tagged release
 
-Until `v0.2.0` is tagged and the `sha256` is filled in, the stable formula won't
+Until `v0.3.0` is tagged and the `sha256` is filled in, the stable formula won't
 install — use the HEAD spec, which tracks `master` directly:
 
 ```sh
