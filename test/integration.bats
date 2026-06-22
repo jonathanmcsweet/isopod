@@ -311,3 +311,37 @@ EOF
   assert_failure
   assert_output --partial "no such sandbox"
 }
+
+# ---- create rollback ---------------------------------------------------------
+@test "a failed create rolls back the partial sandbox" {
+  # Engine stub that builds fine but fails when starting the container, so the
+  # box dir + keys already exist on disk when create dies. The EXIT trap must
+  # then remove them and attempt to delete the container.
+  cat > "$STUB_DIR/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "podman $*" >> "$STUB_LOG"
+cmd="$1"; shift || true
+case "$cmd" in
+  info)  exit 0 ;;
+  image) exit 1 ;;                       # image missing -> triggers build
+  build) exit 0 ;;
+  run)   echo "boom: cannot start container" >&2; exit 1 ;;
+  rm)    exit 0 ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/podman"
+
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_failure
+  assert_output --partial "rolling back"
+  # nothing left behind on disk
+  [ ! -d "$ISOPOD_CONFIG_DIR/boxes/demo" ]
+  # container cleanup was attempted
+  assert_stub_called "podman rm -f isopod-demo"
+  # and the box never made it into the managed ssh config
+  if [ -f "$ISOPOD_CONFIG_DIR/ssh_config" ]; then
+    run cat "$ISOPOD_CONFIG_DIR/ssh_config"
+    refute_output --partial "Host isopod-demo"
+  fi
+}
