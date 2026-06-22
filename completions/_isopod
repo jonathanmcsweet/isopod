@@ -1,0 +1,88 @@
+#compdef isopod
+# zsh completion for isopod.
+#
+# Installed by Homebrew (zsh_completion.install). For a manual install, drop this
+# file into a directory on $fpath (e.g. add `fpath+=(/path/to/dir)` before
+# `compinit` in ~/.zshrc) and restart zsh.
+
+_isopod_boxes() {
+  local boxes_dir="${ISOPOD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/isopod}/boxes"
+  local -a names
+  [[ -d $boxes_dir ]] || return 0
+  names=("$boxes_dir"/*(/N:t))   # subdirectory basenames, no error if none
+  _describe -t boxes 'sandbox' names
+}
+
+_isopod() {
+  local context state state_descr line
+  typeset -A opt_args
+
+  local -a cmds
+  cmds=(
+    'create:Create and start a new sandbox'
+    'list:List sandboxes and their status'
+    'info:Show connection details for a sandbox'
+    'code:Open the sandbox in VSCodium (or another IDE)'
+    'shell:Open a shell inside the sandbox'
+    'start:Start a stopped sandbox'
+    'stop:Stop a running sandbox'
+    'export:Copy the workspace out of the sandbox'
+    'fetch:Pull the box git history into a host repo'
+    'remap:Rewrite a box commit identity after fetch'
+    'copy-in:Copy more host folders into the sandbox'
+    'rm:Delete a sandbox (container + keys)'
+    'doctor:Check host prerequisites'
+    'help:Show help'
+    'version:Show version'
+  )
+
+  _arguments -C '1: :->cmd' '*:: :->args'
+
+  case $state in
+    cmd)
+      _describe -t commands 'isopod command' cmds
+      ;;
+    args)
+      case $words[1] in
+        create)
+          _arguments \
+            '--repo[git repo to clone inside the box]:url:' \
+            '--branch[branch to clone]:branch:' \
+            '*--copy[host folder/file to copy in]:path:_files' \
+            '--color[window tint preset or #rrggbb]:color:(red orange amber green teal blue purple magenta gray)' \
+            '--image[base image]:image:' \
+            '--engine[container engine]:engine:(podman docker)' \
+            '--memory[memory limit, e.g. 4g]:memory:' \
+            '--cpus[cpu limit]:cpus:' \
+            '--port[fixed host SSH port]:port:' \
+            '--no-sudo[do not grant in-box passwordless sudo]'
+          ;;
+        code)
+          _arguments \
+            '--app[IDE to launch]:app:(codium vscodium cursor windsurf code)' \
+            '1:sandbox:_isopod_boxes'
+          ;;
+        rm)
+          _arguments '(--force -f)'{--force,-f}'[skip confirmation]' '1:sandbox:_isopod_boxes'
+          ;;
+        remap)
+          _arguments \
+            '--name[new author/committer name]:name:' \
+            '--email[new author/committer email]:email:' \
+            '--old-email[identity to rewrite from]:email:' \
+            '--old-name[also require this name to match]:name:' \
+            '(--force -f)'{--force,-f}'[skip confirmation]' \
+            '1:sandbox:_isopod_boxes'
+          ;;
+        fetch)
+          _arguments '--path[in-box repo path]:path:' '1:sandbox:_isopod_boxes'
+          ;;
+        info|shell|start|stop|export|copy-in)
+          _arguments '1:sandbox:_isopod_boxes'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_isopod "$@"
