@@ -60,6 +60,8 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 - **Network exfiltration of what's inside the box.** AI agents need network access (APIs, package installs), so the box has it unless youv'e created an offline container. Anything you copy into the box could be sent out by a misbehaving agent. Only put code/data in the box that you could tolerate leaking, and use narrowly-scoped credentials. 
 
+- **A misbehaving agent *inside* the box.** By default the in-box user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. That blast radius is the box itself — your host is still protected by the isolation model above — but anything inside the box (including data you copied in) is fully exposed to it. If you don't need in-box package installs, create the box with **`--no-sudo`** to drop that privilege. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
+
 - **Container escape.** Containers share the host kernel. Rootless Podman makes escapes very hard, but a container is not a VM. For "agent might be actively malicious and sophisticated," use a full VM. For "agent might do dumb destructive things or over-collect data" this is the right tool.
 
 - **Docker's daemon model.** With Docker (non-rootless), the daemon runs as root; a compromise of the daemon is a compromise of the host. Enable Docker rootless mode to avoid this.

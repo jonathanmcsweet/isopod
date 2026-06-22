@@ -43,7 +43,7 @@ Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
   `install.sh` ships everything in `lib/`, so new helpers are picked up
   automatically.
 
-## Repo structure rules (see MANIFEST.md)
+## Repo structure rules
 
 - `lib/` MUST sit beside the `isopod` script — it is streamed into the box.
 - Container hardening settings live in `security/hardening.conf` (declarative),
