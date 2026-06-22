@@ -14,13 +14,12 @@
 class Isopod < Formula
   desc "Disposable, isolated IDE containers that keep AI agents off your host"
   homepage "https://github.com/jonathanmcsweet/isopod"
-  url "https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v0.2.0.tar.gz"
-  # Placeholder until v0.2.0 is tagged & pushed — replace with the real digest
+  url "https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v0.3.0.tar.gz"
+  # Placeholder until v0.3.0 is tagged & pushed — replace with the real digest
   # (see RELEASING.md). Until then, install with `--HEAD`.
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  license "Apache-2.0"
   head "https://github.com/jonathanmcsweet/isopod.git", branch: "master"
-  # Add `license "<SPDX-id>"` once the repo ships a LICENSE file. Homebrew core
-  # requires one; a personal tap does not, so it is intentionally omitted here.
 
   depends_on "bash"     # isopod uses bash 4+ features; macOS ships bash 3.2
   depends_on "openssh"  # ssh, ssh-keygen, ssh-keyscan
