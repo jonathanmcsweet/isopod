@@ -8,12 +8,29 @@ Disposable, isolated IDE containers to keep AI coding agents from touching or an
 
 ## Install
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew install --build-from-source ./Formula/isopod.rb   # from a checkout
+brew install --HEAD ./Formula/isopod.rb                # track the latest commit
+```
+
+The formula installs `bash`/`zsh` shell completions and prints a reminder that you
+still need a container engine (`brew install podman`). Once a release is tagged it
+can also be served from a tap — see [RELEASING.md](RELEASING.md).
+
+### install.sh (any Linux/macOS, no Homebrew)
+
 ```sh
 ./install.sh            # per-user install, no sudo
 ./install.sh --system   # system-wide (/usr/local), needs sudo
 ./install.sh --check     # show what the installer will do
 ./install.sh --uninstall # remove a previous install
 ```
+
+`install.sh` also drops in shell completions (best-effort) and points your editor
+at the `Open Remote – SSH` extension. Tab-completion covers subcommands, options,
+and your existing box names.
 
 ## Quick start
 
