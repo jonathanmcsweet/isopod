@@ -120,6 +120,50 @@ teardown() { isopod_teardown_env; }
 @test "ensure_ssh_include adds an Include line to ~/.ssh/config once" {
   ensure_ssh_include
   ensure_ssh_include   # idempotent
-  run grep -c "Include $ISOPOD_CONFIG_DIR/ssh_config" "$HOME/.ssh/config"
+  # The path is written quoted (to tolerate spaces); match the bare path so the
+  # count is robust to quoting and confirms the include appears exactly once.
+  run grep -cF "$ISOPOD_CONFIG_DIR/ssh_config" "$HOME/.ssh/config"
   assert_output "1"
+}
+
+@test "ensure_ssh_include quotes the include path" {
+  ensure_ssh_include
+  run grep -F "Include \"$ISOPOD_CONFIG_DIR/ssh_config\"" "$HOME/.ssh/config"
+  assert_success
+}
+
+# ---- ssh config quoting ------------------------------------------------------
+@test "write_ssh_include quotes IdentityFile and UserKnownHostsFile paths" {
+  mkdir -p "$(box_dir spacebox)"
+  printf 'engine=podman\nport=12345\n' > "$(box_dir spacebox)/meta"
+  write_ssh_include
+  run cat "$ISOPOD_CONFIG_DIR/ssh_config"
+  assert_output --partial "IdentityFile \"$ISOPOD_CONFIG_DIR/boxes/spacebox/id_ed25519\""
+  assert_output --partial "UserKnownHostsFile \"$ISOPOD_CONFIG_DIR/boxes/spacebox/known_hosts\""
+}
+
+# ---- locking -----------------------------------------------------------------
+@test "acquire_lock creates a lock dir and release_lock removes it" {
+  acquire_lock
+  [ -d "$ISOPOD_CONFIG_DIR/.lock" ]
+  [ -n "$LOCK_DIR" ]
+  release_lock
+  [ ! -d "$ISOPOD_CONFIG_DIR/.lock" ]
+  [ -z "$LOCK_DIR" ]
+}
+
+@test "acquire_lock is idempotent within one process (no self-deadlock)" {
+  acquire_lock
+  first="$LOCK_DIR"
+  acquire_lock            # second call must be a no-op, not block
+  [ "$LOCK_DIR" = "$first" ]
+  release_lock
+}
+
+@test "acquire_lock reclaims a stale lock whose owner is gone" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/.lock"
+  echo 2147483647 > "$ISOPOD_CONFIG_DIR/.lock/pid"   # a pid that is not running
+  acquire_lock                                        # must reclaim, not hang
+  [ "$LOCK_DIR" = "$ISOPOD_CONFIG_DIR/.lock" ]
+  release_lock
 }
