@@ -1,0 +1,52 @@
+# .github/workflows/release.yml
+#
+# Runs after anything lands on master (i.e. a merged PR). The version-bump check
+# guarantees ISOPOD_VERSION changed, so: tag v<version>, cut a release, and bump
+# the Homebrew tap — all in one job, since a GITHUB_TOKEN tag push won't trigger
+# a separate workflow.
+name: release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write          # push the tag + create the Release
+
+concurrency: release       # never overlap two releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+
+      - id: v
+        run: echo "version=$(sed -n 's/^ISOPOD_VERSION="\(.*\)"/\1/p' isopod)" >> "$GITHUB_OUTPUT"
+
+      - id: tag
+        env: { V: "${{ steps.v.outputs.version }}" }
+        run: |
+          [ -n "$V" ] || { echo "::error::no ISOPOD_VERSION"; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/v$V" >/dev/null 2>&1; then
+            echo "v$V already exists — nothing to release"; echo "new=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git tag -a "v$V" -m "isopod $V"
+          git push origin "v$V"
+          echo "new=true" >> "$GITHUB_OUTPUT"
+
+      - if: steps.tag.outputs.new == 'true'
+        env: { GH_TOKEN: "${{ github.token }}", V: "${{ steps.v.outputs.version }}" }
+        run: gh release create "v$V" --title "isopod $V" --generate-notes
+
+      - if: steps.tag.outputs.new == 'true'
+        uses: mislav/bump-homebrew-formula-action@v3
+        with:
+          formula-name: isopod
+          formula-path: Formula/isopod.rb
+          homebrew-tap: jonathanmcsweet/homebrew-isopod
+          tag-name: v${{ steps.v.outputs.version }}
+          download-url: https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v${{ steps.v.outputs.version }}.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
