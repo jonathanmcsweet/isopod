@@ -161,6 +161,36 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   assert_success
 }
 
+@test "live: re-fetch after the box rewrites history force-updates tracking refs" {
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
+  bssh -- sh -c '
+    cd /home/dev/workspace &&
+    git init -q -b main &&
+    git config user.email t@t && git config user.name t &&
+    echo hi > f.txt && git add f.txt && git commit -qm "feat: seed"'
+  host_repo="$TEST_TMP/host-repo"; mkdir -p "$host_repo"
+  git -C "$host_repo" init -q
+
+  run "$ISOPOD_ROOT/isopod" fetch "$BOX" "$host_repo"
+  assert_success
+  orig="$(git -C "$host_repo" rev-parse "$BOX/main")"
+
+  # Rewrite main in the box so its tip is no longer a descendant of what we
+  # already fetched — mirrors what 'isopod remap' does (new commit SHAs).
+  bssh -- sh -c '
+    cd /home/dev/workspace &&
+    git commit -q --amend --no-edit --reset-author -m "feat: seed (rewritten)"'
+
+  # The second fetch must force-update isopod/main, not reject it.
+  run "$ISOPOD_ROOT/isopod" fetch "$BOX" "$host_repo"
+  assert_success
+  refute_output --partial "non-fast-forward"
+  new="$(git -C "$host_repo" rev-parse "$BOX/main")"
+  [ "$new" != "$orig" ]
+  run git -C "$host_repo" log --oneline "$BOX/main"
+  assert_output --partial "rewritten"
+}
+
 @test "live: rm destroys the container" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   "$ISOPOD_ROOT/isopod" rm "$BOX" --force
