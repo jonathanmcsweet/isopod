@@ -38,7 +38,7 @@ and your existing box names.
 ```sh
 # Sandbox around a git repo, teal-tinted windows
 isopod create myproj --repo https://github.com/me/myproj --color teal
-isopod code myproj          # opens VSCodium connected to the box
+isopod code myproj          # opens VSCodium connected to the container
 
 # Sandbox from an explicit allowlist of host folders to copy
 isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
@@ -76,11 +76,9 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 ### What it does NOT protect against
 
-- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless youv'e created an offline container. Anything you copy into the box could be sent out by a misbehaving agent. Only put code/data in the box that you could tolerate leaking, and use narrowly-scoped credentials. 
+- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless youv'e created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. 
 
 - **A misbehaving agent inside the container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above — but anything inside the container (including data you copied in) is fully exposed to it. If you don't need in-container package installs, create the container with **`--no-sudo`** to drop that privilege. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
-
-- **A misbehaving agent *inside* the box.** By default the in-box user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. That blast radius is the box itself — your host is still protected by the isolation model above — but anything inside the box (including data you copied in) is fully exposed to it. If you don't need in-box package installs, create the box with **`--no-sudo`** to drop that privilege. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
 
 - **Container escape.** Containers share the host kernel. Rootless Podman makes escapes very hard, but a container is not a VM. For "agent might be actively malicious and sophisticated," use a full VM. For "agent might do dumb destructive things or over-collect data" this is the right tool.
 
@@ -254,7 +252,7 @@ Run isopod **inside WSL2** — it's a bash tool and Podman/Docker live in the Li
 
 ### Verifying and updating
 
-`isopod doctor` checks for podman/docker, the SSH client tools, and any installed IDEs. To update later, replace the program directory (e.g. `~/.local/share/isopod`) with the new version — the symlink keeps working untouched. To uninstall, remove that directory and the symlink; your boxes' state under `~/.config/isopod` is separate and can be cleaned up with `isopod rm` first.
+`isopod doctor` checks for podman/docker, the SSH client tools, and any installed IDEs. To update later, replace the program directory (e.g. `~/.local/share/isopod`) with the new version — the symlink keeps working untouched. To uninstall, remove that directory and the symlink; your containers' state under `~/.config/isopod` is separate and can be cleaned up with `isopod rm` first.
 
 
 Every container also becomes a plain SSH host: `ssh isopod-myproj` works from any terminal, and any SSH-aware tool can use it.
