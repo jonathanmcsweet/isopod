@@ -14,8 +14,9 @@ in this repo. That's deliberate:
   (`.github/workflows/version-bump.yml`). A formula-only sha bump would otherwise
   be forced to invent a version. The tap has no such rule.
 
-A seed copy of the formula lives at [`packaging/homebrew/isopod.rb`](packaging/homebrew/isopod.rb);
-use it to create the tap once (see [`packaging/homebrew/README.md`](packaging/homebrew/README.md)).
+This repo keeps **no copy** of the formula — the tap is the single source of truth.
+If you ever need a starting point to bootstrap a fresh tap, the last in-repo version
+is preserved in git history (`git log --all --full-history -- packaging/homebrew/isopod.rb`).
 
 > **Tagging is not publishing.** A git tag just makes GitHub generate a source
 > tarball; nobody installs the stable formula until the tap is bumped. So the tag
@@ -29,7 +30,10 @@ makes `brew tap jonathanmcsweet/isopod` resolve), and seed it:
 ```sh
 git clone https://github.com/jonathanmcsweet/homebrew-isopod
 cd homebrew-isopod && mkdir -p Formula
-cp /path/to/isopod/packaging/homebrew/isopod.rb Formula/isopod.rb
+# Author Formula/isopod.rb. Need a starting point? Recover the last in-repo copy
+# from the main repo's history:
+#   git -C /path/to/isopod log --all --full-history -- packaging/homebrew/isopod.rb
+#   git -C /path/to/isopod show <that-commit>:packaging/homebrew/isopod.rb > Formula/isopod.rb
 git add Formula/isopod.rb && git commit -m "isopod formula" && git push
 ```
 
@@ -80,9 +84,10 @@ first release below.
    isopod doctor
    ```
 
-## Keeping the seed in sync
+## Updating the formula's install logic
 
-You normally edit the tap formula directly. Only re-sync
-[`packaging/homebrew/isopod.rb`](packaging/homebrew/isopod.rb) → the tap when the
-*install logic itself* changes (deps, completions, caveats) — not for routine
-`url`/`sha256` bumps.
+Routine `url`/`sha256` bumps happen entirely in the tap. The one time you also
+touch the formula's `install`/`depends_on`/`caveats` blocks is when *this repo's
+layout* changes — the formula installs `completions/`, `lib/`, and `security/` and
+declares the runtime deps, so a rename or new artifact here means a matching edit
+to the formula in the tap.
