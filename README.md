@@ -28,20 +28,20 @@ isopod code scratch --app cursor
 
 # Day-to-day
 isopod list
-isopod shell myproj                 # terminal inside the box
+isopod shell myproj                 # terminal inside the container
 isopod copy-in myproj ~/datasets/x  # add more host folders later (still a copy)
 isopod export myproj ./out          # pull the whole workspace back out (files)
-isopod fetch myproj                 # pull the box's git history into a host clone
-isopod remap myproj --name "Me" --email me@x.com  # fix box commit identity after fetch
+isopod fetch myproj                 # pull the container's git history into a host clone
+isopod remap myproj --name "Me" --email me@x.com  # fix container commit identity after fetch
 isopod stop myproj
-isopod rm myproj                    # destroy box + its keys + ssh config entry
+isopod rm myproj                    # destroy container + its keys + ssh config entry
 ```
 
 ## The isolation model
 
 The container cannot see the host filesystem at all. Files cross the boundary in five ways:
 
-1. `--repo <url>` — a `git clone` executed *inside* the box.
+1. `--repo <url>` — a `git clone` executed *inside* the container.
 2. `--copy <path>` / `isopod copy-in` — a one-time **copy** of folders you name.
 3. `isopod export` to copy changes back to the host machine
 4. `isopod fetch` git history copied back to your local machine
@@ -49,8 +49,8 @@ The container cannot see the host filesystem at all. Files cross the boundary in
 
 We have some mitigations for a snooping AI agent fingerprinting your host machine from the container. It sees the container's hostname, a generic Linux environment, and the container's network identity — and isopod masks the host-revealing `/proc`/`/sys` paths it would otherwise read (drive serials, board model, MACs, boot UUIDs — see [Fingerprint hardening](#fingerprint-hardening)). Additional details:
 
-- SSH is bound to `127.0.0.1` only and uses a dedicated per-box ed25519 keypair with the box's host key pinned. Password auth and root login are disabled in the box's sshd.
-- **SSH agent forwarding and X11 forwarding are explicitly disabled** in the generated config, so an agent inside the box cannot borrow your SSH agent to authenticate as you elsewhere.
+- SSH is bound to `127.0.0.1` only and uses a dedicated per-container ed25519 keypair with the container's host key pinned. Password auth and root login are disabled in the container's sshd.
+- **SSH agent forwarding and X11 forwarding are explicitly disabled** in the generated config, so an agent inside the container cannot borrow your SSH agent to authenticate as you elsewhere.
 - With rootless Podman (the recommended engine), even "root" inside the container is just your unprivileged user on the host, remapped.
 
 **To create an offline container** `ISOPOD_RUN_ARGS="--network=none" isopod create ...`
@@ -58,7 +58,9 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 ### What it does NOT protect against
 
-- **Network exfiltration of what's inside the box.** AI agents need network access (APIs, package installs), so the box has it unless youv'e created an offline container. Anything you copy into the box could be sent out by a misbehaving agent. Only put code/data in the box that you could tolerate leaking, and use narrowly-scoped credentials. 
+- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless youv'e created an offline container. Anything you copy into the box could be sent out by a misbehaving agent. Only put code/data in the box that you could tolerate leaking, and use narrowly-scoped credentials. 
+
+- **A misbehaving agent inside the container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above — but anything inside the container (including data you copied in) is fully exposed to it. If you don't need in-container package installs, create the container with **`--no-sudo`** to drop that privilege. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
 
 - **Container escape.** Containers share the host kernel. Rootless Podman makes escapes very hard, but a container is not a VM. For "agent might be actively malicious and sophisticated," use a full VM. For "agent might do dumb destructive things or over-collect data" this is the right tool.
 
@@ -70,7 +72,7 @@ A container shares the host's kernel and hardware, so by default a process insid
 
 ### What's implemented
 
-Every box hides the host-revealing paths below. Podman gets a single `--security-opt mask=…`; Docker (which has no mask flag) gets an empty `tmpfs` per directory and a `/dev/null` bind per file.
+Every container hides the host-revealing paths below. Podman gets a single `--security-opt mask=…`; Docker (which has no mask flag) gets an empty `tmpfs` per directory and a `/dev/null` bind per file.
 
 | Masked path | Data it obfuscates |
 |---|---|
@@ -83,15 +85,15 @@ Every box hides the host-revealing paths below. Podman gets a single `--security
 | `/sys/block`, `/sys/class/nvme` | disk models and **factory drive serial numbers** |
 | `/sys/class/hwmon`, `/sys/class/thermal`, `/sys/class/drm` | sensor/thermal/GPU identity (a board signature) |
 
-Verify from inside a box: after hardening, `cat /proc/cmdline` and `lsblk -o NAME,SERIAL` come back empty/blank.
+Verify from inside a container: after hardening, `cat /proc/cmdline` and `lsblk -o NAME,SERIAL` come back empty/blank.
 
-> isopod launches boxes with `podman run`/`docker run`, not Compose, so the profile above is the live source of truth. If you prefer Compose, [`security/compose.yaml`](security/compose.yaml) expresses the same masks in `podman compose`/`docker compose` form as a reference — it is not executed by the CLI.
+> isopod launches containers with `podman run`/`docker run`, not Compose, so the profile above is the live source of truth. If you prefer Compose, [`security/compose.yaml`](security/compose.yaml) expresses the same masks in `podman compose`/`docker compose` form as a reference — it is not executed by the CLI.
 
-> isopod deliberately does **not** add `--cap-drop=ALL`, `--read-only`, or `--security-opt no-new-privileges` here: the box runs `sshd` and gives agents passwordless `sudo apt install` for toolchains, all of which those flags would break. The isolation guarantees in [The isolation model](#the-isolation-model) (no mounts, loopback-only SSH, rootless userns) remain the primary boundary; the masks above are defense-in-depth against *fingerprinting* specifically.
+> isopod deliberately does **not** add `--cap-drop=ALL`, `--read-only`, or `--security-opt no-new-privileges` here: the container runs `sshd` and gives agents passwordless `sudo apt install` for toolchains, all of which those flags would break. The isolation guarantees in [The isolation model](#the-isolation-model) (no mounts, loopback-only SSH, rootless userns) remain the primary boundary; the masks above are defense-in-depth against *fingerprinting* specifically.
 
 ### Opt-in Security Features
 
-Isopod can run boxes under a syscall-virtualizing runtime — **gVisor (`runsc`)** — which presents a synthetic `/proc`, `/sys`, `uname`, and CPU to the container instead of the host's. It's **off by default** because it requires host-side setup. Enable it by uncommenting `runtime runsc` in `security/hardening.conf`, or per-box with `ISOPOD_RUNTIME=runsc isopod create …`.
+Isopod can run containers under a syscall-virtualizing runtime — **gVisor (`runsc`)** — which presents a synthetic `/proc`, `/sys`, `uname`, and CPU to the container instead of the host's. It's **off by default** because it requires host-side setup. Enable it by uncommenting `runtime runsc` in `security/hardening.conf`, or per-container with `ISOPOD_RUNTIME=runsc isopod create …`.
 
 **What you must do on the host to use these features**:
 
@@ -235,13 +237,13 @@ Run isopod **inside WSL2** — it's a bash tool and Podman/Docker live in the Li
 `isopod doctor` checks for podman/docker, the SSH client tools, and any installed IDEs. To update later, replace the program directory (e.g. `~/.local/share/isopod`) with the new version — the symlink keeps working untouched. To uninstall, remove that directory and the symlink; your boxes' state under `~/.config/isopod` is separate and can be cleaned up with `isopod rm` first.
 
 
-Every box also becomes a plain SSH host: `ssh isopod-myproj` works from any terminal, and any SSH-aware tool can use it.
+Every container also becomes a plain SSH host: `ssh isopod-myproj` works from any terminal, and any SSH-aware tool can use it.
 
 ### Getting work back out: `export` vs `fetch`
 
 Two ways out, for two situations:
 
-- **`isopod export <name> [dest]`** copies the box's whole working tree (including its `.git`) to a fresh host directory. It will not write into an existing path so the export shape stays predictable.
+- **`isopod export <name> [dest]`** copies the container's whole working tree (including its `.git`) to a fresh host directory. It will not write into an existing path so the export shape stays predictable.
 - **`isopod fetch <name> [target-repo]`** brings only **committed git history** across, the clean way — no file merges, no clobbering your working tree:
 
   ```sh
@@ -249,22 +251,22 @@ Two ways out, for two situations:
   isopod fetch myproj        # target defaults to the current directory
   ```
 
-  Under the hood it `git bundle`s the box's repo, copies that single file out, and `git fetch`es it in — so the box's branches appear as **remote-tracking refs named `<name>/*`** without touching your local branches. Check one out with:
+  Under the hood it `git bundle`s the container's repo, copies that single file out, and `git fetch`es it in — so the container's branches appear as **remote-tracking refs named `<name>/*`** without touching your local branches. Check one out with:
 
   ```sh
   git switch -c fingerprint-hardening myproj/fingerprint-hardening
   ```
 
-  `isopod fetch` finds the repo at the box's workspace automatically (or the single git subfolder inside it); pass `--path <in-box-repo>` if your layout is unusual. If the target isn't a git repo, it instead drops a `<name>.bundle` file and prints how to use it. Like `export`, it needs no network and no git remote.
+  `isopod fetch` finds the repo at the container's workspace automatically (or the single git subfolder inside it); pass `--path <in-container-repo>` if your layout is unusual. If the target isn't a git repo, it instead drops a `<name>.bundle` file and prints how to use it. Like `export`, it needs no network and no git remote.
 
 
-  `isopod remap <name> [target-repo]` Pods don't set a git identity, so commits made inside one carry whatever was configured there (often a throwaway `dev@<box>`); this maps them to your real name/email while preserving commit messages and author/committer **dates**:
+  `isopod remap <name> [target-repo]` Pods don't set a git identity, so commits made inside one carry whatever was configured there (often a throwaway `dev@<container>`); this maps them to your real name/email while preserving commit messages and author/committer **dates**:
 
   ```sh
   isopod remap myproj --name "Ada Lovelace" --email ada@example.com
   ```
 
-  Only commits matching the old identity are touched — pass `--old-email <e>` (and optionally `--old-name <n>`) to set it explicitly, or let it auto-detect from the still-running box. The rewrite is scoped to the box's `<name>/*` refs, so **your own branches are never touched**, and the originals are snapshotted under `refs/remap-backup/` so you can undo. It uses [`git-filter-repo`](https://github.com/newren/git-filter-repo) when installed, otherwise a built-in `git fast-export`→`fast-import` rewrite that needs only **core git plus `python3`.
+  Only commits matching the old identity are touched — pass `--old-email <e>` (and optionally `--old-name <n>`) to set it explicitly, or let it auto-detect from the still-running container. The rewrite is scoped to the container's `<name>/*` refs, so **your own branches are never touched**, and the originals are snapshotted under `refs/remap-backup/` so you can undo. It uses [`git-filter-repo`](https://github.com/newren/git-filter-repo) when installed, otherwise a built-in `git fast-export`→`fast-import` rewrite that needs only **core git plus `python3`.
 
 ## Connecting each IDE
 
@@ -276,11 +278,11 @@ Two ways out, for two situations:
 
 ## Window colors
 
-`--color` accepts a preset (`red orange amber green teal blue purple magenta gray`) or any `#rrggbb` hex. Without it, colors auto-rotate so consecutive boxes differ. The script writes `workbench.colorCustomizations` (title bar, status bar, activity bar, plus a `[boxname]` window title) into `.vscode/settings.json` *inside the box's workspace*. Because the setting lives in the container, every IDE window attached to that box is tinted, and your local windows are untouched.
+`--color` accepts a preset (`red orange amber green teal blue purple magenta gray`) or any `#rrggbb` hex. Without it, colors auto-rotate so consecutive containers differ. The script writes `workbench.colorCustomizations` (title bar, status bar, activity bar, plus a `[containername]` window title) into `.vscode/settings.json` *inside the container's workspace*. Because the setting lives in the container, every IDE window attached to that container is tinted, and your local windows are untouched.
 
 ## Platform notes
 
-**Linux.** Works out of the box with rootless Podman. This is the best-supported and most-isolated configuration.
+**Linux.** Works out of the container with rootless Podman. This is the best-supported and most-isolated configuration.
 
 **Flatpak VSCodium.** Detected automatically — `isopod code` launches it via `flatpak run com.vscodium.codium` when no native `codium` is on PATH (a native binary wins if both exist). One Flatpak-specific requirement: the Remote-SSH extension runs *inside the Flatpak's own sandbox* on the host, so it must be allowed to read your SSH config and isopod's keys. The Flathub build ships with home access, but if you've tightened it (Flatseal, overrides), isopod will detect the missing permission and print the fix:
 
@@ -309,7 +311,7 @@ The isopod install itself is laid out as:
 
 ```
 isopod                       # the CLI (bash)
-lib/apply_color.py          # window-color merge, run inside the box
+lib/apply_color.py          # window-color merge, run inside the container
 security/hardening.conf     # fingerprint-hardening profile (read at create time)
 test/                       # bats + pexpect test suite
 ```
@@ -319,25 +321,25 @@ Runtime state lives separately under `~/.config/isopod`:
 ```
 ~/.config/isopod/
 ├── ssh_config              # generated; Include'd from ~/.ssh/config
-└── boxes/<name>/
-    ├── id_ed25519(.pub)    # this box's dedicated client keypair
-    ├── known_hosts         # this box's pinned host key
+└── containers/<name>/
+    ├── id_ed25519(.pub)    # this container's dedicated client keypair
+    ├── known_hosts         # this container's pinned host key
     └── meta                # engine, image, port, color, created
 ```
 
-Deleting a box removes its container, its keys, and its SSH config entry. The base image (`localhost/isopod-base:*`) is shared across boxes and rebuilt automatically when the embedded Dockerfile layer changes.
+Deleting a container removes its container, its keys, and its SSH config entry. The base image (`localhost/isopod-base:*`) is shared across containers and rebuilt automatically when the embedded Dockerfile layer changes.
 
-## Customizing the box
+## Customizing the container
 
-The default image is `debian:bookworm-slim` plus sshd, git, curl, python3, and sudo (the in-box user has passwordless sudo by default — lets agents `apt install` toolchains; pass `--no-sudo` to disable). Use `--image ubuntu:24.04` or any Debian/Ubuntu-based image to change the base. Install language toolchains either interactively (`isopod shell`) or bake your own base image and pass it with `--image`.
+The default image is `debian:bookworm-slim` plus sshd, git, curl, python3, and sudo (the in-container user has passwordless sudo by default — lets agents `apt install` toolchains; pass `--no-sudo` to disable). Use `--image ubuntu:24.04` or any Debian/Ubuntu-based image to change the base. Install language toolchains either interactively (`isopod shell`) or bake your own base image and pass it with `--image`.
 
 ## FAQ
 
-**Why SSH instead of the Dev Containers extension?** The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source `Open Remote – SSH` extension is mature, and the same box works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
+**Why SSH instead of the Dev Containers extension?** The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source `Open Remote – SSH` extension is mature, and the same container works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
 
-**Is my code safe from the AI vendor?** Whatever code is in the box is visible to agents you run in it, and they may transmit it to their APIs — that's how they work. Isopod limits the blast radius to the box's contents; it does not change what an agent does with those contents.
+**Is my code safe from the AI vendor?** Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs — that's how they work. Isopod limits the blast radius to the container's contents; it does not change what an agent does with those contents.
 
-**Can two IDEs attach to the same box?** Yes — it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
+**Can two IDEs attach to the same container?** Yes — it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
 
 ## Testing
 

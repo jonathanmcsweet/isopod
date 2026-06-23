@@ -23,7 +23,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="0.2.0"
+ISOPOD_VERSION="0.2.1"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -60,6 +60,57 @@ warn()  { printf '%s\n' "${c_yel}warning:${c_rst} $*" >&2; }
 die()   { printf '%s\n' "${c_red}error:${c_rst} $*" >&2; exit 1; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
+# ---------------------------------------------------------------------------
+# portable locking + exit cleanup
+# ---------------------------------------------------------------------------
+# A single advisory lock serializes the commands that rewrite shared state (the
+# generated ssh_config and per-box meta files), so two concurrent invocations
+# can't corrupt them or pick colliding ports/colors. We use an atomic `mkdir`
+# rather than flock(1) because mkdir is atomic on every platform isopod runs on
+# (Linux, macOS, Windows/WSL) whereas flock(1) is Linux-only. A lock left behind
+# by a crashed process is reclaimed via a POSIX `kill -0` liveness check.
+LOCK_DIR=""
+acquire_lock() {
+  [ -n "$LOCK_DIR" ] && return 0          # already held by this process
+  mkdir -p "$CONFIG_DIR"
+  local lock="$CONFIG_DIR/.lock" tries=0 owner
+  while ! mkdir "$lock" 2>/dev/null; do
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$lock"; continue            # previous owner is gone — reclaim it
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -ge 100 ] && die "another isopod command holds the lock ($lock).
+    If no isopod is running it is stale; remove it:  rm -rf '$lock'"
+    sleep 0.1
+  done
+  LOCK_DIR="$lock"
+  printf '%s\n' "$$" > "$lock/pid" 2>/dev/null || true
+}
+release_lock() {
+  [ -n "$LOCK_DIR" ] || return 0
+  rm -rf "$LOCK_DIR"
+  LOCK_DIR=""
+}
+
+# One exit handler for the whole script: roll back a half-built box (only while
+# CREATE_ROLLBACK_NAME is set by cmd_create mid-create) and always release the
+# lock. Installed by main(), so sourcing the script for tests stays side-free.
+CREATE_ROLLBACK_NAME=""
+on_exit() {
+  local rc=$?
+  if [ -n "$CREATE_ROLLBACK_NAME" ]; then
+    warn "create failed — rolling back partial sandbox '$CREATE_ROLLBACK_NAME'"
+    if [ -n "${ENGINE:-}" ]; then
+      "$ENGINE" rm -f "$(ctr_name "$CREATE_ROLLBACK_NAME")" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$(box_dir "$CREATE_ROLLBACK_NAME")"
+    write_ssh_include 2>/dev/null || true
+  fi
+  release_lock
+  return "$rc"
+}
+
 usage() {
   cat <<EOF
 isopod $ISOPOD_VERSION — isolated AI-coding sandboxes for VSCodium & friends
@@ -92,9 +143,8 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         or any hex like '#7e22ce'. Default: auto (rotates).
   --engine <podman|docker>   Container engine (default: podman, else docker)
   --image <ref>         Base image (default: $DEFAULT_BASE_IMAGE).
-                        Must be Debian/Ubuntu-based (apt) for the built-in
-                        layer; anything with sshd preinstalled also works
-                        with --raw-image.
+                        Must be Debian/Ubuntu-based (apt): isopod layers
+                        sshd, git, and the in-box user on top of it.
   --memory <size>       Memory limit, e.g. 4g
   --cpus <n>            CPU limit, e.g. 2
   --no-sudo             Do not give the in-box user passwordless sudo
@@ -165,25 +215,13 @@ valid_name() {
 # ---------------------------------------------------------------------------
 # image build (embedded Dockerfile)
 # ---------------------------------------------------------------------------
-image_tag_for() { # image_tag_for <base-image>
-  local hash
-  hash=$(printf '%s|%s' "$1" "$IMAGE_LAYER_VERSION" | cksum | awk '{print $1}')
-  printf 'localhost/isopod-base:%s' "$hash"
-}
-
-build_image() { # build_image <base-image> -> echoes tag
-  local base="$1" tag
-  tag=$(image_tag_for "$base")
-  if "$ENGINE" image exists "$tag" 2>/dev/null || "$ENGINE" image inspect "$tag" >/dev/null 2>&1; then
-    printf '%s' "$tag"; return 0
-  fi
-  info "Building sandbox base image from $base (one-time)..." >&2
-  # ISOPOD_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
-  # --build-arg http_proxy=...) for proxied or unusual environments.
-  local -a extra_build=()
-  # shellcheck disable=SC2206
-  [ -n "${ISOPOD_BUILD_ARGS:-}" ] && extra_build=($ISOPOD_BUILD_ARGS)
-  "$ENGINE" build "${extra_build[@]}" -t "$tag" -f - . >&2 <<DOCKERFILE
+# Render the Dockerfile for a base image to stdout. This is the single source of
+# truth for the image: both the build and the cache-key hash derive from it, so
+# any edit here automatically invalidates the cached image (no manual version
+# bump needed — IMAGE_LAYER_VERSION remains only as a force-rebuild override).
+render_dockerfile() { # render_dockerfile <base-image>
+  local base="$1"
+  cat <<DOCKERFILE
 FROM $base
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \\
@@ -222,6 +260,37 @@ RUN printf '%s\\n' \\
 EXPOSE 22
 CMD ["/usr/local/bin/isopod-entrypoint"]
 DOCKERFILE
+}
+
+image_tag_for() { # image_tag_for <base-image>
+  # Tag tracks the actual Dockerfile content (+ the manual override knob), so an
+  # edit to render_dockerfile yields a new tag and forces a one-time rebuild.
+  local hash
+  hash=$( { render_dockerfile "$1"; printf '%s' "$IMAGE_LAYER_VERSION"; } | cksum | awk '{print $1}')
+  printf 'localhost/isopod-base:%s' "$hash"
+}
+
+build_image() { # build_image <base-image> -> echoes tag
+  local base="$1" tag
+  tag=$(image_tag_for "$base")
+  if "$ENGINE" image exists "$tag" 2>/dev/null || "$ENGINE" image inspect "$tag" >/dev/null 2>&1; then
+    printf '%s' "$tag"; return 0
+  fi
+  info "Building sandbox base image from $base (one-time)..." >&2
+  # ISOPOD_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
+  # --build-arg http_proxy=...) for proxied or unusual environments.
+  local -a extra_build=()
+  # shellcheck disable=SC2206
+  [ -n "${ISOPOD_BUILD_ARGS:-}" ] && extra_build=($ISOPOD_BUILD_ARGS)
+  # Write the Dockerfile to a temp file rather than piping it in: a piped
+  # heredoc breaks under `set -o pipefail` if the engine exits early (SIGPIPE).
+  local dockerfile
+  dockerfile=$(mktemp "${TMPDIR:-/tmp}/isopod-dockerfile-XXXXXX")
+  render_dockerfile "$base" > "$dockerfile"
+  if ! "$ENGINE" build "${extra_build[@]}" -t "$tag" -f "$dockerfile" . >&2; then
+    rm -f "$dockerfile"; die "image build failed (see output above)"
+  fi
+  rm -f "$dockerfile"
   printf '%s' "$tag"
 }
 
@@ -231,8 +300,11 @@ DOCKERFILE
 ensure_ssh_include() {
   mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
   touch "$USER_SSH_CONFIG" && chmod 600 "$USER_SSH_CONFIG"
-  local line="Include $SSH_INCLUDE_FILE"
-  if ! grep -qsF "$line" "$USER_SSH_CONFIG"; then
+  # Quote the path so an include under a directory with spaces still parses.
+  # Detect an existing include by the bare path, so we match whether a prior
+  # version wrote it quoted or unquoted (and never add it twice).
+  local line="Include \"$SSH_INCLUDE_FILE\""
+  if ! grep -qsF "$SSH_INCLUDE_FILE" "$USER_SSH_CONFIG"; then
     # Include must appear before any Host block to apply globally; prepend.
     local tmp
     tmp=$(mktemp)
@@ -261,9 +333,9 @@ Host $(ctr_name "$name")
   HostName 127.0.0.1
   Port $port
   User $CONTAINER_USER
-  IdentityFile $(box_dir "$name")/id_ed25519
+  IdentityFile "$(box_dir "$name")/id_ed25519"
   IdentitiesOnly yes
-  UserKnownHostsFile $(box_dir "$name")/known_hosts
+  UserKnownHostsFile "$(box_dir "$name")/known_hosts"
   StrictHostKeyChecking yes
   ForwardAgent no
   ForwardX11 no
@@ -470,6 +542,9 @@ cmd_create() {
 
   [ -n "$name" ] || die "usage: isopod create <name> [options]"
   valid_name "$name" || die "invalid name '$name' (letters, digits, . _ - only)"
+  # Serialize from here on: the existence check, color rotation, and ssh_config
+  # rewrite below all read/write shared state and must not race another create.
+  acquire_lock
   [ -d "$(box_dir "$name")" ] && die "sandbox '$name' already exists (isopod rm $name to delete)"
   if [ -n "$repo" ] && [ "${#copies[@]}" -gt 0 ]; then
     die "use either --repo or --copy, not both (you can 'isopod copy-in' later)"
@@ -494,6 +569,9 @@ cmd_create() {
 
   detect_engine "$engine_opt"
   mkdir -p "$(box_dir "$name")"
+  # From here a partial box exists on disk; arm rollback so any failure below
+  # (image build, sshd never coming up, clone error) leaves nothing behind.
+  CREATE_ROLLBACK_NAME="$name"
   chmod 700 "$CONFIG_DIR" "$BOXES_DIR" "$(box_dir "$name")" 2>/dev/null || true
 
   local tag
@@ -570,8 +648,12 @@ cmd_create() {
     do_copy_in "$name" "${copies[@]}"
   fi
 
+  # The box is functional now (container up, SSH authenticating, workspace
+  # populated). Disarm rollback so the remaining cosmetic step can't undo it.
+  CREATE_ROLLBACK_NAME=""
+
   info "Applying window color $hex (this box only)..."
-  apply_color "$name" "$hex"
+  apply_color "$name" "$hex" || warn "could not apply window color (the sandbox is fine without it)"
 
   cat <<EOF
 
@@ -839,6 +921,7 @@ cmd_info() {
   local name="${1:-}"; [ -n "$name" ] || die "usage: isopod info <name>"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
+  acquire_lock   # refresh_port may rewrite the shared ssh_config
   refresh_port "$name"
   cat <<EOF
 name      : $name
@@ -857,6 +940,7 @@ cmd_start() {
   local name="${1:-}"; [ -n "$name" ] || die "usage: isopod start <name>"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
+  acquire_lock   # refresh_port may rewrite the shared ssh_config
   "$ENGINE" start "$(ctr_name "$name")" >/dev/null
   refresh_port "$name"
   scan_host_key "$name" >/dev/null 2>&1 || true
@@ -950,6 +1034,7 @@ cmd_code() {
   [ -n "$name" ] || die "usage: isopod code <name> [--app codium|cursor|windsurf|code]"
   require_box "$name"
   detect_engine "$(meta_get "$name" engine || true)"
+  acquire_lock   # may start the box and refresh the shared ssh_config
 
   local status
   status=$("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || true)
@@ -1007,6 +1092,7 @@ cmd_rm() {
     read -r ans
     case "$ans" in y|Y|yes|YES) ;; *) die "aborted" ;; esac
   fi
+  acquire_lock   # serialize the box-dir removal + ssh_config rewrite
   "$ENGINE" rm -f "$(ctr_name "$name")" >/dev/null 2>&1 || true
   rm -rf "$(box_dir "$name")"
   write_ssh_include
@@ -1055,6 +1141,10 @@ cmd_doctor() {
 # ---------------------------------------------------------------------------
 main() {
   mkdir -p "$BOXES_DIR"
+  # Release the lock and unwind a half-finished create no matter how we exit.
+  trap on_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   local cmd="${1:-help}"; shift || true
   case "$cmd" in
     create)        cmd_create "$@" ;;
