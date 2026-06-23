@@ -42,6 +42,20 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}", V: "${{ steps.v.outputs.version }}" }
         run: gh release create "v$V" --title "isopod $V" --generate-notes
 
+      # Compute the archive digest ourselves and hand it to the tap-bump action.
+      # GitHub generates source archives lazily, so a brand-new tag's tarball can
+      # transiently 303-redirect; bump-homebrew-formula-action's own checksum step
+      # only accepts a 302 and dies on the 303. curl -L follows any redirect (and
+      # retries), and passing download-sha256 makes the action skip that step.
+      - id: sha
+        if: steps.tag.outputs.new == 'true'
+        env: { V: "${{ steps.v.outputs.version }}" }
+        run: |
+          url="https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v$V.tar.gz"
+          sha=$(curl -fsSL --retry 5 --retry-all-errors "$url" | sha256sum | cut -d' ' -f1)
+          [ -n "$sha" ] || { echo "::error::failed to compute sha256 for v$V"; exit 1; }
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
       - if: steps.tag.outputs.new == 'true'
         uses: mislav/bump-homebrew-formula-action@v3
         with:
@@ -50,5 +64,6 @@ jobs:
           homebrew-tap: jonathanmcsweet/homebrew-isopod
           tag-name: v${{ steps.v.outputs.version }}
           download-url: https://github.com/jonathanmcsweet/isopod/archive/refs/tags/v${{ steps.v.outputs.version }}.tar.gz
+          download-sha256: ${{ steps.sha.outputs.sha256 }}
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
