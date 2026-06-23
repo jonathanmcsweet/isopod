@@ -8,7 +8,7 @@ The Homebrew formula lives in a separate `homebrew-isopod` tap repository.
 
 ## Releasing is automatic
 
-Releases are cut by [`.github/workflows/release.yml`](.github/workflows/release.yml),
+Releases are cut by [`.github/workflows/release.yml`](../.github/workflows/release.yml),
 which runs on every push to `master`. Because the `version-bump` check
 (`.github/workflows/version-bump.yml`) requires every PR to raise `ISOPOD_VERSION`,
 each merge to `master` carries a new version — so the workflow can derive the whole
