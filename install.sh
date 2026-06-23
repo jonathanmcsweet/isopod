@@ -158,12 +158,57 @@ install_extension() {
     warn "couldn't install $EXT_ID automatically — add it from your editor's Extensions view."
 }
 
+# --- shell completions ------------------------------------------------------
+# Best-effort: drop bash/zsh completions into XDG (user) or /usr/share (system)
+# locations, honoring $DESTDIR. Never fails the install.
+
+# Echo the bash and zsh target dirs, tab-separated, for the current scope.
+completion_targets() {
+  local base bashc zshc
+  if [ "$SCOPE" = "system" ]; then
+    bashc="$DEST/usr/share/bash-completion/completions"
+    zshc="$DEST/usr/share/zsh/site-functions"
+  else
+    base="$DEST${XDG_DATA_HOME:-$HOME/.local/share}"
+    bashc="$base/bash-completion/completions"
+    zshc="$base/zsh/site-functions"
+  fi
+  printf '%s\t%s\n' "$bashc" "$zshc"
+}
+
+install_completions() {
+  local src="$PROGDIR/completions"
+  [ -d "$src" ] || src="$SELF_DIR/completions"
+  [ -d "$src" ] || return 0
+  local bashc zshc
+  IFS=$'\t' read -r bashc zshc < <(completion_targets)
+  info "Shell completions"
+  if [ -f "$src/isopod.bash" ]; then
+    run mkdir -p "$bashc"
+    run cp "$src/isopod.bash" "$bashc/$APP"
+    printf '   bash            : %s/%s\n' "$bashc" "$APP"
+  fi
+  if [ -f "$src/_isopod" ]; then
+    run mkdir -p "$zshc"
+    run cp "$src/_isopod" "$zshc/_isopod"
+    printf '   zsh             : %s/_isopod %s(dir must be on your $fpath)%s\n' "$zshc" "$c_dim" "$c_rst"
+  fi
+}
+
+remove_completions() {
+  local bashc zshc
+  IFS=$'\t' read -r bashc zshc < <(completion_targets)
+  [ -f "$bashc/$APP" ] && run rm -f "$bashc/$APP" || true
+  [ -f "$zshc/_isopod" ] && run rm -f "$zshc/_isopod" || true
+}
+
 # --- uninstall --------------------------------------------------------------
 if [ "$MODE" = "uninstall" ]; then
   info "Uninstalling $APP"
   [ -L "$LINK" ] || [ -e "$LINK" ] && run rm -f "$LINK" || true
   [ -d "$PROGDIR" ] && run rm -rf "$PROGDIR" || true
-  info "Removed program dir and symlink (if they existed)."
+  remove_completions
+  info "Removed program dir, symlink, and completions (if they existed)."
   printf '%sNote:%s your sandboxes and keys under ~/.config/isopod were left intact.\n' "$c_dim" "$c_rst"
   printf '      Run %sisopod rm <name>%s for each box first if you want them gone.\n' "$c_dim" "$c_rst"
   exit 0
@@ -209,6 +254,9 @@ if [ "$on_path" -eq 0 ] && [ "$DRYRUN" -eq 0 ]; then
   printf '   Add this line to %s and restart your shell:\n' "$rc"
   printf '       %sexport PATH="%s:$PATH"%s\n' "$c_dim" "$BINDIR" "$c_rst"
 fi
+
+# --- shell completions ------------------------------------------------------
+install_completions
 
 # --- editor extension -------------------------------------------------------
 install_extension

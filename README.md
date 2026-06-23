@@ -8,12 +8,29 @@ Disposable, isolated IDE containers to keep AI coding agents from touching or an
 
 ## Install
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew install --build-from-source ./Formula/isopod.rb   # from a checkout
+brew install --HEAD ./Formula/isopod.rb                # track the latest commit
+```
+
+The formula installs `bash`/`zsh` shell completions and prints a reminder that you
+still need a container engine (`brew install podman`). Once a release is tagged it
+can also be served from a tap — see [RELEASING.md](RELEASING.md).
+
+### install.sh (any Linux/macOS, no Homebrew)
+
 ```sh
 ./install.sh            # per-user install, no sudo
 ./install.sh --system   # system-wide (/usr/local), needs sudo
 ./install.sh --check     # show what the installer will do
 ./install.sh --uninstall # remove a previous install
 ```
+
+`install.sh` also drops in shell completions (best-effort) and points your editor
+at the `Open Remote – SSH` extension. Tab-completion covers subcommands, options,
+and your existing box names.
 
 ## Quick start
 
@@ -355,3 +372,7 @@ CI runs on both GitLab and GitHub, kept in lockstep with the same three jobs —
 - **GitLab CI/CD** (`.gitlab-ci.yml`) — should run identically under [`gitlab-ci-local`](https://github.com/firecow/gitlab-ci-local) for debugging pipelines on your own machine before pushing.
 
 - **GitHub Actions** (`.github/workflows/ci.yml`) — run it locally with [`act`](https://github.com/nektos/act): `act -j lint`, `act -j test`, or just `act` for both. The `live-isolation` job needs container-in-container and is gated to manual dispatch, so run it the native way instead: `RUN_LIVE=1 test/run.sh`. (An `.actrc` pins a runner image with the tooling the jobs expect.)
+
+## License
+
+isopod is licensed under the [Apache License 2.0](LICENSE).
