@@ -4,9 +4,7 @@ isopod is versioned with [Semantic Versioning](https://semver.org/). The version
 string lives in one place — `ISOPOD_VERSION` near the top of the `isopod` script —
 and is what `isopod version` prints.
 
-The Homebrew formula lives in a **separate `homebrew-isopod` tap repository**, not
-in this repo. This repo is the sole source for the *code*; the tap is the sole
-source for the *formula*.
+The Homebrew formula lives in a separate `homebrew-isopod` tap repository.
 
 ## Releasing is automatic
 
@@ -25,6 +23,7 @@ release with no human input. On each push it:
 **So the entire release process is: merge a version-bumping PR. Done.** This
 includes a docs-only typo fix, because the version gate forces a bump on every PR
 — the two policies are coupled by design.
+
 
 The workflow is idempotent: it fires on every push to `master`, but the
 `git ls-remote` tag check means a push that doesn't change the version (or a
@@ -112,6 +111,7 @@ isopod doctor
 
 Routine `url`/`sha256` bumps happen entirely in the tap (and are automated). The
 one time you also touch the formula's `install`/`depends_on`/`caveats` blocks is
-when *this repo's layout* changes — the formula installs `completions/`, `lib/`,
+when this repo's layout changes — the formula installs `completions/`, `lib/`,
 and `security/` and declares the runtime deps, so a rename or new artifact here
 means a matching edit to the formula in the tap.
+
