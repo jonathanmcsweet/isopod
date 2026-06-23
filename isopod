@@ -101,7 +101,7 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
   --port <n>            Fixed host port for SSH (default: random free port,
                         bound to 127.0.0.1 only)
 
-Options for remap (run after 'isopod fetch'):
+Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--opt=value'):
   --name <new name>     New author/committer name to write   (required)
   --email <new email>   New author/committer email to write  (required)
   --old-email <e>       Identity to rewrite FROM; only commits with this
@@ -634,6 +634,10 @@ cmd_export() {
 cmd_fetch() {
   local name="" target="" inbox_path=""
   while [ $# -gt 0 ]; do
+    # accept --opt=value as an alias for --opt value
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
     case "$1" in
       --path)    inbox_path="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
@@ -713,6 +717,10 @@ cmd_fetch() {
 cmd_remap() {
   local name="" target="" new_name="" new_email="" old_email="" old_name="" force=0
   while [ $# -gt 0 ]; do
+    # accept --opt=value as an alias for --opt value (e.g. --name="John Doe")
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
     case "$1" in
       --name)      new_name="$2"; shift 2 ;;
       --email)     new_email="$2"; shift 2 ;;
@@ -929,6 +937,10 @@ flatpak_access_hint() { # flatpak_access_hint <app-id>
 cmd_code() {
   local name="" app="codium"
   while [ $# -gt 0 ]; do
+    # accept --opt=value as an alias for --opt value (e.g. --app=cursor)
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
     case "$1" in
       --app) app="$2"; shift 2 ;;
       -*)    die "unknown option: $1" ;;
@@ -977,6 +989,10 @@ EOF
 cmd_rm() {
   local name="" force=0
   while [ $# -gt 0 ]; do
+    # accept --opt=value as an alias for --opt value
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
     case "$1" in
       --force|-f) force=1; shift ;;
       -*) die "unknown option: $1" ;;
