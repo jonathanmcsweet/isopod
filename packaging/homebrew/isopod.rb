@@ -1,16 +1,16 @@
 # Homebrew formula for isopod.
 #
-# Install from this repo without a tap:
-#   brew install --build-from-source ./Formula/isopod.rb
-#   # or track the latest commit:
-#   brew install --HEAD ./Formula/isopod.rb
+# This file is the SEED for the isopod tap; it is not consumed from this repo.
+# The live formula lives in a separate `homebrew-isopod` tap repository so the
+# main repo's per-PR version-bump check never blocks formula/sha maintenance.
+# Copy it into the tap once, then maintain it there (see ../../RELEASING.md):
 #
-# Or publish it as a tap (repo named `homebrew-isopod`) and:
 #   brew tap jonathanmcsweet/isopod
-#   brew install isopod
+#   brew install isopod            # stable (once a release is tagged + sha set)
+#   brew install --HEAD isopod     # track the latest commit on master
 #
-# Cutting a stable release: tag v<x.y.z>, push, then fill in the sha256 below.
-# See RELEASING.md for the exact commands.
+# Cutting a stable release: merge, then tag v<x.y.z> on master, then update the
+# url + sha256 below IN THE TAP. See RELEASING.md for the exact commands.
 class Isopod < Formula
   desc "Disposable, isolated IDE containers that keep AI agents off your host"
   homepage "https://github.com/jonathanmcsweet/isopod"

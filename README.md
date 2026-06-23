@@ -11,13 +11,14 @@ Disposable, isolated IDE containers to keep AI coding agents from touching or an
 ### Homebrew (macOS / Linux)
 
 ```sh
-brew install --build-from-source ./Formula/isopod.rb   # from a checkout
-brew install --HEAD ./Formula/isopod.rb                # track the latest commit
+brew tap jonathanmcsweet/isopod
+brew install isopod          # or: brew install --HEAD isopod  (latest master)
 ```
 
-The formula installs `bash`/`zsh` shell completions and prints a reminder that you
-still need a container engine (`brew install podman`). Once a release is tagged it
-can also be served from a tap — see [RELEASING.md](RELEASING.md).
+The formula lives in the separate [`homebrew-isopod`](https://github.com/jonathanmcsweet/homebrew-isopod)
+tap and installs `bash`/`zsh` shell completions. You still need a container engine
+(`brew install podman`). See [RELEASING.md](RELEASING.md) for how the tap is created
+and maintained.
 
 ### install.sh (any Linux/macOS, no Homebrew)
 
