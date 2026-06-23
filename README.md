@@ -111,11 +111,7 @@ Verify from inside a container: after hardening, `cat /proc/cmdline` and `lsblk 
 
 ### Opt-in Security Features
 
-Isopod can also run containers under a syscall-virtualizing runtime — **gVisor
-(`runsc`)** — which presents a synthetic `/proc`, `/sys`, `uname`, and CPU to the
-container instead of the host's. It's **off by default** because it requires
-host-side setup. See **[docs/opt-in-security.md](docs/opt-in-security.md)** for how
-to enable and configure it.
+See **[docs/opt-in-security.md](docs/opt-in-security.md)** for how to enable and configure them.
 
 ### What still can't be mitigated
 
@@ -126,10 +122,7 @@ Even with every mask on, a **plain shared-kernel container cannot hide these** �
 - **Host boot epoch / boot id** — `/proc/stat`'s `btime` and `/proc/sys/kernel/random/boot_id` are a single value per host boot, identical in every container on that host. (`btime` is left unmasked because masking `/proc/stat` breaks `top`/`htop` and most monitoring.)
 - **Timing side channels** — `RDTSC` and clock-skew fingerprints.
 
-**gVisor hides the first three** by virtualizing the syscall layer. Only a true VM boundary closes the timing channels too — use Kata Containers / a microVM, or run isopod on macOS/Windows where Podman already runs inside a VM. 
-
-Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a VM; isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things," which is the stated goal.
-
+Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a VM; isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
 ## Requirements
 
 - Linux (primary), macOS (via `podman machine` or Docker Desktop), or Windows (via WSL2 — see [docs/installation-and-platform.md](docs/installation-and-platform.md#windows))
