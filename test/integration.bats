@@ -218,6 +218,18 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   assert_output --partial "mybox/master"
 }
 
+@test "remap accepts --opt=value, including a name with spaces" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  # the exact form that used to fail: --name="John Doe" plus other =value opts
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" \
+    --old-email=dev@mybox.local --name="Real Name" --email=real@me.com --force
+  assert_success
+  refute_output --partial "unknown option"
+  run git -C "$host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "Real Name <real@me.com>"
+}
+
 @test "create with --repo clones inside the box" {
   run "$ISOPOD_ROOT/isopod" create demo --repo https://example.com/r.git --color blue
   assert_success
