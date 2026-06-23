@@ -55,7 +55,6 @@ jobs:
           sha=$(curl -fsSL --retry 5 --retry-all-errors "$url" | sha256sum | cut -d' ' -f1)
           [ -n "$sha" ] || { echo "::error::failed to compute sha256 for v$V"; exit 1; }
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
-
       - if: steps.tag.outputs.new == 'true'
         uses: mislav/bump-homebrew-formula-action@v3
         with:
