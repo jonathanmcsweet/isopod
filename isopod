@@ -23,7 +23,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="0.2.0"
+ISOPOD_VERSION="0.2.1"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
