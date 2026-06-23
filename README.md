@@ -11,13 +11,14 @@ Disposable, isolated IDE containers to keep AI coding agents from touching or an
 ### Homebrew (macOS / Linux)
 
 ```sh
-brew install --build-from-source ./Formula/isopod.rb   # from a checkout
-brew install --HEAD ./Formula/isopod.rb                # track the latest commit
+brew tap jonathanmcsweet/isopod
+brew install isopod          # or: brew install --HEAD isopod  (latest master)
 ```
 
-The formula installs `bash`/`zsh` shell completions and prints a reminder that you
-still need a container engine (`brew install podman`). Once a release is tagged it
-can also be served from a tap — see [RELEASING.md](RELEASING.md).
+The formula lives in the separate [`homebrew-isopod`](https://github.com/jonathanmcsweet/homebrew-isopod)
+tap and installs `bash`/`zsh` shell completions. You still need a container engine
+(`brew install podman`). See [RELEASING.md](RELEASING.md) for how the tap is created
+and maintained.
 
 ### install.sh (any Linux/macOS, no Homebrew)
 
@@ -37,7 +38,7 @@ and your existing box names.
 ```sh
 # Sandbox around a git repo, teal-tinted windows
 isopod create myproj --repo https://github.com/me/myproj --color teal
-isopod code myproj          # opens VSCodium connected to the box
+isopod code myproj          # opens VSCodium connected to the container
 
 # Sandbox from an explicit allowlist of host folders to copy
 isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
@@ -75,7 +76,7 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 ### What it does NOT protect against
 
-- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless youv'e created an offline container. Anything you copy into the box could be sent out by a misbehaving agent. Only put code/data in the box that you could tolerate leaking, and use narrowly-scoped credentials. 
+- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless youv'e created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. 
 
 - **A misbehaving agent inside the container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above — but anything inside the container (including data you copied in) is fully exposed to it. If you don't need in-container package installs, create the container with **`--no-sudo`** to drop that privilege. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
 
@@ -251,7 +252,7 @@ Run isopod **inside WSL2** — it's a bash tool and Podman/Docker live in the Li
 
 ### Verifying and updating
 
-`isopod doctor` checks for podman/docker, the SSH client tools, and any installed IDEs. To update later, replace the program directory (e.g. `~/.local/share/isopod`) with the new version — the symlink keeps working untouched. To uninstall, remove that directory and the symlink; your boxes' state under `~/.config/isopod` is separate and can be cleaned up with `isopod rm` first.
+`isopod doctor` checks for podman/docker, the SSH client tools, and any installed IDEs. To update later, replace the program directory (e.g. `~/.local/share/isopod`) with the new version — the symlink keeps working untouched. To uninstall, remove that directory and the symlink; your containers' state under `~/.config/isopod` is separate and can be cleaned up with `isopod rm` first.
 
 
 Every container also becomes a plain SSH host: `ssh isopod-myproj` works from any terminal, and any SSH-aware tool can use it.
