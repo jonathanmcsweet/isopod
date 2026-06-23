@@ -37,7 +37,7 @@ jobs:
             exit 1
           fi
           if [ "$head_ver" = "$base_ver" ]; then
-            echo "::error file=isopod::ISOPOD_VERSION is still $base_ver — bump it before merging (edit ISOPOD_VERSION in ./isopod; see RELEASING.md)."
+            echo "::error file=isopod::ISOPOD_VERSION is still $base_ver — bump it before merging (edit ISOPOD_VERSION in ./isopod; see docs/RELEASING.md)."
             exit 1
           fi
           # Reject a version that is lower than the base (sort -V = version sort).
