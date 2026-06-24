@@ -1,5 +1,8 @@
 # CLAUDE.md — guidance for AI agents working in this repo
 
+## Documentation
+Keep text descriptions short without excessive details unless necessary to prevent confusion
+
 ## Commit messages — use Conventional Commits
 
 Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
@@ -27,13 +30,12 @@ Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
 
 - Run `bash test/run.sh` (lint + stubbed + interactive suites) and keep it green.
   `RUN_LIVE=1 bash test/run.sh` also runs real-container tests.
-- Never commit `__pycache__/` or `*.pyc` (see `.gitignore`).
+- Never commit items in `.gitignore`.
 
 ## No inline foreign-language code — extract to its own file
 
 - NEVER embed another language (Python, etc.) inline in the `isopod` bash script
-  via heredocs (`<<'PY' … PY`) or `-c "…"` snippets. Put it in its own file under
-  `lib/` and invoke that file.
+  Put it in its own file under  `lib/` and invoke that file.
 - Mirror the existing pattern: reference the helper as `"$ISOPOD_LIB/<name>.py"`,
   guard it (`[ -f "$script" ] || die "missing helper: $script …"`), then run it
   (`python3 "$script"`, or `python3 - < "$script"` to stream it into a box).
