@@ -6,7 +6,6 @@
 # leaves every templated command failing with "missing template: .../share/...".
 # This catches that class of regression without needing a container engine.
 #
-# Three checks, fast and hermetic:
 #   1. every `render_tmpl <file>` in isopod has a backing share/<file>
 #   2. the release tarball (git archive) actually contains share/
 #   3. a symlink-style install (install.sh) renders a template THROUGH the bin
