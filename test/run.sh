@@ -19,7 +19,7 @@ fail() { printf '%s%s%s\n' "$c_red" "$1" "$c_rst" >&2; exit 1; }
 # --- lint -------------------------------------------------------------------
 step "shellcheck"
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -S warning isopod install.sh test/run.sh verify-host-isolation.sh
+  shellcheck -S warning isopod install.sh test/run.sh test/packaging.sh verify-host-isolation.sh
   printf '%sshellcheck clean%s\n' "$c_grn" "$c_rst"
 else
   printf '%sshellcheck not installed — skipping (install it for full coverage)%s\n' "$c_yel" "$c_rst"
@@ -44,6 +44,10 @@ if command -v python3 >/dev/null 2>&1; then
 else
   printf '%spython3 not installed — skipping lib check%s\n' "$c_yel" "$c_rst"
 fi
+
+# --- packaging --------------------------------------------------------------
+step "packaging: share/ ships and templates render"
+bash test/packaging.sh
 
 # --- stubbed bats suite -----------------------------------------------------
 step "bats: unit + theming + integration (stubbed, no engine)"
