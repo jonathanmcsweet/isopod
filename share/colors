@@ -1,0 +1,11 @@
+# isopod color palette — preset name -> hex tint for IDE bars.
+# Read by preset_color(); the rotation order for auto-tint lives in auto_color().
+red     #b3261e
+orange  #c2410c
+amber   #b45309
+green   #15803d
+teal    #0f766e
+blue    #1d4ed8
+purple  #7e22ce
+magenta #be185d
+gray    #374151

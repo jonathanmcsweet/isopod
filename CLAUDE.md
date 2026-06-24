@@ -1,5 +1,8 @@
 # CLAUDE.md — guidance for AI agents working in this repo
 
+## Documentation
+Keep text descriptions short without excessive details unless necessary to prevent confusion
+
 ## Commit messages — use Conventional Commits
 
 Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
@@ -27,13 +30,12 @@ Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
 
 - Run `bash test/run.sh` (lint + stubbed + interactive suites) and keep it green.
   `RUN_LIVE=1 bash test/run.sh` also runs real-container tests.
-- Never commit `__pycache__/` or `*.pyc` (see `.gitignore`).
+- Never commit items in `.gitignore`.
 
 ## No inline foreign-language code — extract to its own file
 
 - NEVER embed another language (Python, etc.) inline in the `isopod` bash script
-  via heredocs (`<<'PY' … PY`) or `-c "…"` snippets. Put it in its own file under
-  `lib/` and invoke that file.
+  Put it in its own file under  `lib/` and invoke that file.
 - Mirror the existing pattern: reference the helper as `"$ISOPOD_LIB/<name>.py"`,
   guard it (`[ -f "$script" ] || die "missing helper: $script …"`), then run it
   (`python3 "$script"`, or `python3 - < "$script"` to stream it into a box).
@@ -49,3 +51,14 @@ Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
 - Container hardening settings live in `security/hardening.conf` (declarative),
   not inline in the `isopod` script. `security/compose.yaml` is reference-only and
   is NOT executed by the CLI.
+- Long strings and constant lists/lookup tables MUST live as files under
+  `share/`, NOT inline in the `isopod` script. This covers multi-line
+  user-facing text (usage, the create/info/code messages, the ssh_config entry)
+  AND data tables (e.g. the color palette in `share/colors`). When you add a new
+  large string or constant list in the future, put it in `share/` — do not embed
+  it as an inline heredoc or a hardcoded `case`/array.
+- Render text templates with `render_tmpl <file>` — the file body is evaluated
+  as a heredoc, so `$vars` and `$(...)` inside it still expand against the
+  caller's scope. Keep `$var` references in templates in sync with the
+  locals/globals available where `render_tmpl` is called. Read plain data tables
+  with a `while read` loop (see `preset_color`).

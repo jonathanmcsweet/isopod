@@ -110,7 +110,6 @@ Verify from inside a container: after hardening, `cat /proc/cmdline` and `lsblk 
 > isopod deliberately does **not** add `--cap-drop=ALL`, `--read-only`, or `--security-opt no-new-privileges` here: the container runs `sshd` and gives agents passwordless `sudo apt install` for toolchains, all of which those flags would break. The isolation guarantees in [The isolation model](#the-isolation-model) (no mounts, loopback-only SSH, rootless userns) remain the primary boundary; the masks above are defense-in-depth against *fingerprinting* specifically.
 
 ### Opt-in Security Features
-
 See **[docs/opt-in-security.md](docs/opt-in-security.md)** for how to enable and configure them.
 
 ### What still can't be mitigated

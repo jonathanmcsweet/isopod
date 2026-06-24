@@ -55,6 +55,7 @@ done
 # --- sanity: are we sitting on a real isopod source tree? --------------------
 [ -f "$SELF_DIR/$APP" ] || die "can't find the '$APP' script next to this installer ($SELF_DIR)"
 [ -f "$SELF_DIR/lib/apply_color.py" ] || die "missing lib/apply_color.py — incomplete source tree"
+[ -f "$SELF_DIR/share/usage.txt" ] || die "missing share/ templates — incomplete source tree"
 
 # --- detect OS for messaging + engine hints --------------------------------
 OS="$(uname -s)"

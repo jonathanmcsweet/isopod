@@ -1,0 +1,12 @@
+Host $(ctr_name "$name")
+  HostName 127.0.0.1
+  Port $port
+  User $CONTAINER_USER
+  IdentityFile "$(box_dir "$name")/id_ed25519"
+  IdentitiesOnly yes
+  UserKnownHostsFile "$(box_dir "$name")/known_hosts"
+  StrictHostKeyChecking yes
+  ForwardAgent no
+  ForwardX11 no
+  LogLevel ERROR
+

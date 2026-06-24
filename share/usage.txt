@@ -1,0 +1,54 @@
+isopod $ISOPOD_VERSION — isolated AI-coding sandboxes for VSCodium & friends
+
+Usage:
+  isopod create <name> [options]      Create and start a new sandbox
+  isopod list                         List sandboxes and their status
+  isopod info <name>                  Show connection details for a sandbox
+  isopod code <name> [--app APP]      Open the sandbox in VSCodium (or APP)
+  isopod shell <name>                 Open a shell inside the sandbox
+  isopod start <name>                 Start a stopped sandbox
+  isopod stop <name>                  Stop a running sandbox
+  isopod export <name> [dest]         Copy the workspace OUT of the sandbox
+  isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
+  isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
+  isopod copy-in <name> <path>...     Copy more host folders INTO the sandbox
+  isopod rm <name> [--force]          Delete a sandbox (container + keys)
+  isopod doctor                       Check host prerequisites
+  isopod help                         Show this help
+
+Options for create (each accepts both '--opt value' and '--opt=value'):
+  --repo <url>          Git repo to clone inside the box (https or ssh URL)
+  --branch <name>       Branch to clone (with --repo)
+  --copy <path>         Host folder/file to COPY into the box (repeatable).
+                        This is the explicit allowlist — nothing else from
+                        the host is ever visible inside the box.
+  --color <preset|hex>  Tint the IDE title/status/activity bars so this
+                        box's windows are visually distinct. Presets:
+                        red orange amber green teal blue purple magenta gray
+                        or any hex like '#7e22ce'. Default: auto (rotates).
+  --engine <podman|docker>   Container engine (default: podman, else docker)
+  --image <ref>         Base image (default: $DEFAULT_BASE_IMAGE).
+                        Must be Debian/Ubuntu-based (apt): isopod layers
+                        sshd, git, and the in-box user on top of it.
+  --memory <size>       Memory limit, e.g. 4g
+  --cpus <n>            CPU limit, e.g. 2
+  --no-sudo             Do not give the in-box user passwordless sudo
+  --port <n>            Fixed host port for SSH (default: random free port,
+                        bound to 127.0.0.1 only)
+
+Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--opt=value'):
+  --name <new name>     New author/committer name to write   (required)
+  --email <new email>   New author/committer email to write  (required)
+  --old-email <e>       Identity to rewrite FROM; only commits with this
+                        email are touched. Auto-detected from the box if
+                        omitted (requires the box to still exist).
+  --old-name <n>        Also require this name to match before rewriting.
+  --force, -f           Skip the confirmation prompt.
+
+Examples:
+  isopod create myproj --repo https://github.com/me/proj --color teal
+  isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
+  isopod code myproj
+  isopod export myproj ./myproj-out
+  isopod fetch myproj            # from inside your host clone, pulls box history
+  isopod remap myproj --name "Real Name" --email me@real.com   # fix box commits
