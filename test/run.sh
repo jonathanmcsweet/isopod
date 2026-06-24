@@ -19,7 +19,7 @@ fail() { printf '%s%s%s\n' "$c_red" "$1" "$c_rst" >&2; exit 1; }
 # --- lint -------------------------------------------------------------------
 step "shellcheck"
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -S warning isopod install.sh test/run.sh test/packaging.sh verify-host-isolation.sh
+  shellcheck -S warning isopod install.sh test/run.sh test/packaging.sh test/brew-formula.sh verify-host-isolation.sh
   printf '%sshellcheck clean%s\n' "$c_grn" "$c_rst"
 else
   printf '%sshellcheck not installed — skipping (install it for full coverage)%s\n' "$c_yel" "$c_rst"
