@@ -1,7 +1,9 @@
 # CLAUDE.md — guidance for AI agents working in this repo
 
 ## Documentation
-Keep text descriptions short without excessive details unless necessary to prevent confusion
+- Keep text descriptions short without excessive details unless necessary to prevent confusion
+- Refrain from using idiomatic language such as "clobber" or "belt and suspenders" which may be
+  read differently by different people
 
 ## Commit messages — use Conventional Commits
 
