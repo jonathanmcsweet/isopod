@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck -S warning isopod install.sh test/run.sh verify-host-isolation.sh
+          shellcheck -S warning isopod install.sh test/run.sh test/packaging.sh test/brew-formula.sh verify-host-isolation.sh
           bash -n isopod install.sh verify-host-isolation.sh
           # lint the discrete python helpers under lib/
           sudo apt-get install -y -qq python3 python3-pyflakes
@@ -43,7 +43,23 @@ jobs:
           bash test/run.sh
 
   # -------------------------------------------------------------------------
-  # Stage 3: live — REAL containers, exercising the isolation guarantees.
+  # Homebrew formula: install isopod through the real tap formula, built from
+  # this checkout, then `brew test`. Catches a formula whose install method
+  # omits something the code needs at runtime (e.g. share/) — a class of bug the
+  # in-repo packaging check can't see, since the formula lives in the separate
+  # jonathanmcsweet/homebrew-isopod tap. Ubuntu runners don't ship Homebrew, so
+  # the official setup action installs/configures it first.
+  # -------------------------------------------------------------------------
+  brew-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Homebrew/actions/setup-homebrew@main
+      - name: install + test via the tap formula
+        run: bash test/brew-formula.sh
+
+  # -------------------------------------------------------------------------
+  # Stage 3: live — real containers, exercising the isolation guarantees.
   #
   # Needs a runner that can run podman inside the job. GitHub's shared runners
   # and `act` are unprivileged and cannot create the user namespaces this
