@@ -2,28 +2,13 @@
 #
 # isopod — disposable, isolated AI-coding sandboxes for VSCodium (and friends)
 #
-# Creates a rootless Podman (or Docker) container with an SSH server inside,
-# clones a git repo OR copies an explicit allowlist of host folders into it,
-# and wires up VSCodium / Cursor / JetBrains Gateway to connect over SSH.
-#
-# Isolation model:
-#   * NO bind mounts. The container never sees the host filesystem.
-#   * Files enter the box only via `git clone` (inside the box) or an
-#     explicit `--copy <path>` (a one-time copy, not a mount).
-#   * Files leave the box only via `git push` (from inside) or an explicit
-#     `isopod export`.
-#   * The IDE's server component, terminals, and any AI agent extensions all
-#     execute INSIDE the container. The agent sees the container's hostname,
-#     filesystem, and network identity — not your host's.
-#   * SSH agent forwarding and X11 forwarding are explicitly disabled.
-#
 # Requirements: bash 4+, podman or docker, ssh, ssh-keygen, ssh-keyscan.
 # Primary OS: Linux. macOS: works via podman machine / Docker Desktop.
 # Windows: run inside WSL2 (see README).
 #
 set -euo pipefail
 
-ISOPOD_VERSION="0.4.3"
+ISOPOD_VERSION="0.5.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
