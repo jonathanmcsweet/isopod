@@ -38,6 +38,10 @@ _resolve_script_dir() {
 }
 ISOPOD_DIR="$(_resolve_script_dir)"
 ISOPOD_LIB="$ISOPOD_DIR/lib"
+# Long user-facing text and data tables live as files under share/ rather than
+# inline heredocs; render_tmpl() streams them through the shell so embedded
+# $vars and $(...) still expand. Override for testing with ISOPOD_SHARE.
+ISOPOD_SHARE="${ISOPOD_SHARE:-$ISOPOD_DIR/share}"
 # Declarative container-hardening profile (anti-fingerprinting Tier 1 + Tier 2).
 # Settings live in this file, not inline here; override path with ISOPOD_HARDENING_CONF.
 HARDENING_CONF="${ISOPOD_HARDENING_CONF:-$ISOPOD_DIR/security/hardening.conf}"
@@ -54,11 +58,28 @@ WORKSPACE="/home/dev/workspace"
 # ---------------------------------------------------------------------------
 # small helpers
 # ---------------------------------------------------------------------------
-c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
+c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_rst=$'\033[0m'
+# c_dim is referenced only from share/ templates, which shellcheck can't see.
+# shellcheck disable=SC2034
+c_dim=$'\033[2m'
 info()  { printf '%s\n' "${c_grn}==>${c_rst} $*"; }
 warn()  { printf '%s\n' "${c_yel}warning:${c_rst} $*" >&2; }
 die()   { printf '%s\n' "${c_red}error:${c_rst} $*" >&2; exit 1; }
 have()  { command -v "$1" >/dev/null 2>&1; }
+
+# Render a text template from share/ exactly as the old inline heredocs did: the
+# file body is evaluated as an unquoted heredoc in THIS shell, so $vars and
+# $(...) inside it resolve against the caller's locals/globals (bash dynamic
+# scope). Templates are repo-owned — same trust level as this script — so eval
+# is safe here. A sentinel byte protects trailing newlines (command substitution
+# strips them) so separators like the blank line between ssh_config hosts survive.
+render_tmpl() { # render_tmpl <file-under-share>
+  local f="$ISOPOD_SHARE/$1" body
+  [ -f "$f" ] || die "missing template: $f (is your isopod install complete?)"
+  body=$(cat "$f"; printf x); body="${body%x}"
+  eval "cat <<EOF
+${body}EOF"
+}
 
 # ---------------------------------------------------------------------------
 # portable locking + exit cleanup
@@ -112,62 +133,7 @@ on_exit() {
 }
 
 usage() {
-  cat <<EOF
-isopod $ISOPOD_VERSION — isolated AI-coding sandboxes for VSCodium & friends
-
-Usage:
-  isopod create <name> [options]      Create and start a new sandbox
-  isopod list                         List sandboxes and their status
-  isopod info <name>                  Show connection details for a sandbox
-  isopod code <name> [--app APP]      Open the sandbox in VSCodium (or APP)
-  isopod shell <name>                 Open a shell inside the sandbox
-  isopod start <name>                 Start a stopped sandbox
-  isopod stop <name>                  Stop a running sandbox
-  isopod export <name> [dest]         Copy the workspace OUT of the sandbox
-  isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
-  isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
-  isopod copy-in <name> <path>...     Copy more host folders INTO the sandbox
-  isopod rm <name> [--force]          Delete a sandbox (container + keys)
-  isopod doctor                       Check host prerequisites
-  isopod help                         Show this help
-
-Options for create (each accepts both '--opt value' and '--opt=value'):
-  --repo <url>          Git repo to clone inside the box (https or ssh URL)
-  --branch <name>       Branch to clone (with --repo)
-  --copy <path>         Host folder/file to COPY into the box (repeatable).
-                        This is the explicit allowlist — nothing else from
-                        the host is ever visible inside the box.
-  --color <preset|hex>  Tint the IDE title/status/activity bars so this
-                        box's windows are visually distinct. Presets:
-                        red orange amber green teal blue purple magenta gray
-                        or any hex like '#7e22ce'. Default: auto (rotates).
-  --engine <podman|docker>   Container engine (default: podman, else docker)
-  --image <ref>         Base image (default: $DEFAULT_BASE_IMAGE).
-                        Must be Debian/Ubuntu-based (apt): isopod layers
-                        sshd, git, and the in-box user on top of it.
-  --memory <size>       Memory limit, e.g. 4g
-  --cpus <n>            CPU limit, e.g. 2
-  --no-sudo             Do not give the in-box user passwordless sudo
-  --port <n>            Fixed host port for SSH (default: random free port,
-                        bound to 127.0.0.1 only)
-
-Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--opt=value'):
-  --name <new name>     New author/committer name to write   (required)
-  --email <new email>   New author/committer email to write  (required)
-  --old-email <e>       Identity to rewrite FROM; only commits with this
-                        email are touched. Auto-detected from the box if
-                        omitted (requires the box to still exist).
-  --old-name <n>        Also require this name to match before rewriting.
-  --force, -f           Skip the confirmation prompt.
-
-Examples:
-  isopod create myproj --repo https://github.com/me/proj --color teal
-  isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
-  isopod code myproj
-  isopod export myproj ./myproj-out
-  isopod fetch myproj            # from inside your host clone, pulls box history
-  isopod remap myproj --name "Real Name" --email me@real.com   # fix box commits
-EOF
+  render_tmpl usage.txt
 }
 
 # ---------------------------------------------------------------------------
@@ -328,20 +294,7 @@ write_ssh_include() {
       name=$(basename "$d")
       port=$(meta_get "$name" port || true)
       [ -n "$port" ] || continue
-      cat <<ENTRY
-Host $(ctr_name "$name")
-  HostName 127.0.0.1
-  Port $port
-  User $CONTAINER_USER
-  IdentityFile "$(box_dir "$name")/id_ed25519"
-  IdentitiesOnly yes
-  UserKnownHostsFile "$(box_dir "$name")/known_hosts"
-  StrictHostKeyChecking yes
-  ForwardAgent no
-  ForwardX11 no
-  LogLevel ERROR
-
-ENTRY
+      render_tmpl ssh-entry.txt
     done
   } > "$tmp"
   mv "$tmp" "$SSH_INCLUDE_FILE"
@@ -428,19 +381,17 @@ wait_for_ssh() { # wait until we can actually authenticate
 # ---------------------------------------------------------------------------
 # color theming
 # ---------------------------------------------------------------------------
+# Look up a preset name in the share/colors palette. 'grey' is an alias for
+# 'gray'; an unknown name returns 1 (callers treat that as "not a preset").
 preset_color() {
-  case "$1" in
-    red)     printf '#b3261e' ;;
-    orange)  printf '#c2410c' ;;
-    amber)   printf '#b45309' ;;
-    green)   printf '#15803d' ;;
-    teal)    printf '#0f766e' ;;
-    blue)    printf '#1d4ed8' ;;
-    purple)  printf '#7e22ce' ;;
-    magenta) printf '#be185d' ;;
-    gray|grey) printf '#374151' ;;
-    *) return 1 ;;
-  esac
+  local want="$1"; [ "$want" = grey ] && want=gray
+  local f="$ISOPOD_SHARE/colors" name hex
+  [ -f "$f" ] || die "missing palette: $f (is your isopod install complete?)"
+  while read -r name hex; do
+    case "$name" in ''|'#'*) continue ;; esac   # skip blanks and comments
+    [ "$name" = "$want" ] && { printf '%s' "$hex"; return 0; }
+  done < "$f"
+  return 1
 }
 
 auto_color() { # rotate presets based on how many boxes exist
@@ -655,24 +606,7 @@ cmd_create() {
   info "Applying window color $hex (this box only)..."
   apply_color "$name" "$hex" || warn "could not apply window color (the sandbox is fine without it)"
 
-  cat <<EOF
-
-${c_grn}Sandbox '$name' is ready.${c_rst}
-
-  SSH host        : $(ctr_name "$name")   ${c_dim}(ssh $(ctr_name "$name"))${c_rst}
-  SSH endpoint    : 127.0.0.1:$hostport   ${c_dim}(loopback only — not on your LAN)${c_rst}
-  Workspace       : $WORKSPACE
-  Window color    : $hex
-
-Open it:
-  isopod code $name                 ${c_dim}# VSCodium via Open Remote - SSH${c_rst}
-  isopod code $name --app cursor    ${c_dim}# Cursor${c_rst}
-  isopod shell $name                ${c_dim}# plain terminal${c_rst}
-  JetBrains: Gateway -> SSH -> host '$(ctr_name "$name")' -> project $WORKSPACE
-
-Get files out later:
-  isopod export $name ./out         ${c_dim}# or git push from inside the box${c_rst}
-EOF
+  render_tmpl create-success.txt
 }
 
 do_copy_in() { # do_copy_in <name> <path>...
@@ -923,17 +857,7 @@ cmd_info() {
   detect_engine "$(meta_get "$name" engine || true)"
   acquire_lock   # refresh_port may rewrite the shared ssh_config
   refresh_port "$name"
-  cat <<EOF
-name      : $name
-container : $(ctr_name "$name")
-engine    : $(meta_get "$name" engine || true)
-status    : $("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || printf 'missing')
-ssh       : ssh $(ctr_name "$name")    (127.0.0.1:$(meta_get "$name" port || true), loopback only)
-workspace : $WORKSPACE
-color     : $(meta_get "$name" color || true)
-created   : $(meta_get "$name" created || true)
-key       : $(box_dir "$name")/id_ed25519
-EOF
+  render_tmpl info.txt
 }
 
 cmd_start() {
@@ -1064,11 +988,7 @@ Flatpak users: 'flatpak list | grep -i ${app}' to confirm the app ID is installe
   info "Opening $app -> $uri"
   "${IDE_CMD[@]}" --folder-uri "$uri" >/dev/null 2>&1 &
   disown || true
-  cat <<EOF
-${c_dim}First connection downloads the IDE's server component INSIDE the box
-(needs network in the box). Terminals, extensions, and AI agents you start
-in that window all run inside the container.${c_rst}
-EOF
+  render_tmpl code-note.txt
 }
 
 cmd_rm() {

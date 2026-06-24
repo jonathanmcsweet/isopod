@@ -49,3 +49,14 @@ Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
 - Container hardening settings live in `security/hardening.conf` (declarative),
   not inline in the `isopod` script. `security/compose.yaml` is reference-only and
   is NOT executed by the CLI.
+- Long strings and constant lists/lookup tables MUST live as files under
+  `share/`, NOT inline in the `isopod` script. This covers multi-line
+  user-facing text (usage, the create/info/code messages, the ssh_config entry)
+  AND data tables (e.g. the color palette in `share/colors`). When you add a new
+  large string or constant list in the future, put it in `share/` — do not embed
+  it as an inline heredoc or a hardcoded `case`/array.
+- Render text templates with `render_tmpl <file>` — the file body is evaluated
+  as a heredoc, so `$vars` and `$(...)` inside it still expand against the
+  caller's scope. Keep `$var` references in templates in sync with the
+  locals/globals available where `render_tmpl` is called. Read plain data tables
+  with a `while read` loop (see `preset_color`).

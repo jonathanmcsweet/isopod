@@ -1,0 +1,9 @@
+name      : $name
+container : $(ctr_name "$name")
+engine    : $(meta_get "$name" engine || true)
+status    : $("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || printf 'missing')
+ssh       : ssh $(ctr_name "$name")    (127.0.0.1:$(meta_get "$name" port || true), loopback only)
+workspace : $WORKSPACE
+color     : $(meta_get "$name" color || true)
+created   : $(meta_get "$name" created || true)
+key       : $(box_dir "$name")/id_ed25519
