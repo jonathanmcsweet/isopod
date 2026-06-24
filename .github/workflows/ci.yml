@@ -47,12 +47,14 @@ jobs:
   # this checkout, then `brew test`. Catches a formula whose install method
   # omits something the code needs at runtime (e.g. share/) — a class of bug the
   # in-repo packaging check can't see, since the formula lives in the separate
-  # jonathanmcsweet/homebrew-isopod tap. GitHub's Ubuntu runners ship Linuxbrew.
+  # jonathanmcsweet/homebrew-isopod tap. Ubuntu runners don't ship Homebrew, so
+  # the official setup action installs/configures it first.
   # -------------------------------------------------------------------------
   brew-formula:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: Homebrew/actions/setup-homebrew@master
       - name: install + test via the tap formula
         run: bash test/brew-formula.sh
 
