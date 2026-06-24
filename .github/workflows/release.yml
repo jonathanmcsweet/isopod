@@ -22,6 +22,11 @@ jobs:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
 
+      # Gate the release: a packaged install must ship share/ and render its
+      # templates. Blocks the tag, Release, and tap bump if share/ regresses.
+      - name: verify packaging
+        run: bash test/packaging.sh
+
       - id: v
         run: echo "version=$(sed -n 's/^ISOPOD_VERSION="\(.*\)"/\1/p' isopod)" >> "$GITHUB_OUTPUT"
 
