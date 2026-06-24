@@ -24,10 +24,13 @@ formula="$(brew --repository "$TAP")/Formula/isopod.rb"
 
 # Build a source tarball from this commit and repoint the formula's stable source
 # at it, so we exercise the formula against the code under review rather than the
-# last release. Homebrew strips the top-level prefix dir on extract.
+# the formula version from the tarball BASENAME — so name it isopod-<version>
+# (matching the checkout's ISOPOD_VERSION), or the formula has a nil version.
+ver="$(sed -n 's/^ISOPOD_VERSION="\(.*\)"/\1/p' isopod)"
+[ -n "$ver" ] || ver="0.0.0-ci"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
-tarball="$work/isopod-ci.tar.gz"
-git archive --format=tar.gz --prefix="isopod-ci/" HEAD -o "$tarball"
+tarball="$work/isopod-$ver.tar.gz"
+git archive --format=tar.gz --prefix="isopod-$ver/" HEAD -o "$tarball"
 if command -v sha256sum >/dev/null 2>&1; then
   sha="$(sha256sum "$tarball" | awk '{print $1}')"
 else
