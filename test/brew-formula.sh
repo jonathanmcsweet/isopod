@@ -13,14 +13,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 TAP="jonathanmcsweet/isopod"
 
-# Don't let an auto-update `git pull` the tap and clobber our local formula edit.
+# Don't let an auto-update `git pull` the tap and overwrite our local formula edit.
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1
 
 brew tap "$TAP"
 formula="$(brew --repository "$TAP")/Formula/isopod.rb"
 [ -f "$formula" ] || { echo "formula not found in tap: $formula" >&2; exit 1; }
 
-# Build a source tarball from THIS commit and repoint the formula's stable source
+# Build a source tarball from this commit and repoint the formula's stable source
 # at it, so we exercise the formula against the code under review rather than the
 # last release. Homebrew strips the top-level prefix dir on extract.
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
