@@ -14,7 +14,9 @@ cd "$ROOT"
 TAP="jonathanmcsweet/isopod"
 
 # Don't let an auto-update `git pull` the tap and overwrite our local formula edit.
-export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1
+# (Leave the API on: deps like bash/openssh resolve from it, while our
+# third-party tap formula is always read from its local clone — edits included.)
+export HOMEBREW_NO_AUTO_UPDATE=1
 
 brew tap "$TAP"
 formula="$(brew --repository "$TAP")/Formula/isopod.rb"
