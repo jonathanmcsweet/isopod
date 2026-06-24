@@ -24,10 +24,9 @@ _resolve_script_dir() {
 ISOPOD_DIR="$(_resolve_script_dir)"
 ISOPOD_LIB="$ISOPOD_DIR/lib"
 # Long user-facing text and data tables live as files under share/ rather than
-# inline heredocs; render_tmpl() streams them through the shell so embedded
-# $vars and $(...) still expand. Override for testing with ISOPOD_SHARE.
+# inline heredocs;
 ISOPOD_SHARE="${ISOPOD_SHARE:-$ISOPOD_DIR/share}"
-# Declarative container-hardening profile (anti-fingerprinting Tier 1 + Tier 2).
+# Declarative container-hardening profile.
 # Settings live in this file, not inline here; override path with ISOPOD_HARDENING_CONF.
 HARDENING_CONF="${ISOPOD_HARDENING_CONF:-$ISOPOD_DIR/security/hardening.conf}"
 
@@ -52,11 +51,9 @@ warn()  { printf '%s\n' "${c_yel}warning:${c_rst} $*" >&2; }
 die()   { printf '%s\n' "${c_red}error:${c_rst} $*" >&2; exit 1; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
-# Render a text template from share/ exactly as the old inline heredocs did: the
-# file body is evaluated as an unquoted heredoc in THIS shell, so $vars and
-# $(...) inside it resolve against the caller's locals/globals (bash dynamic
-# scope). Templates are repo-owned — same trust level as this script — so eval
-# is safe here. A sentinel byte protects trailing newlines (command substitution
+# Render a text template from share/ $vars and $(...) inside it resolve against
+# the caller's locals/globals (bash dynamic
+# scope). A sentinel byte protects trailing newlines (command substitution
 # strips them) so separators like the blank line between ssh_config hosts survive.
 render_tmpl() { # render_tmpl <file-under-share>
   local f="$ISOPOD_SHARE/$1" body
@@ -73,8 +70,8 @@ ${body}EOF"
 # generated ssh_config and per-box meta files), so two concurrent invocations
 # can't corrupt them or pick colliding ports/colors. We use an atomic `mkdir`
 # rather than flock(1) because mkdir is atomic on every platform isopod runs on
-# (Linux, macOS, Windows/WSL) whereas flock(1) is Linux-only. A lock left behind
-# by a crashed process is reclaimed via a POSIX `kill -0` liveness check.
+# (Linux, macOS, Windows/WSL). A lock left behind by a crashed process is 
+# reclaimed via a POSIX `kill -0` liveness check.
 LOCK_DIR=""
 acquire_lock() {
   [ -n "$LOCK_DIR" ] && return 0          # already held by this process
