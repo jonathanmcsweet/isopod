@@ -1,0 +1,3 @@
+${c_dim}First connection downloads the IDE's server component INSIDE the box
+(needs network in the box). Terminals, extensions, and AI agents you start
+in that window all run inside the container.${c_rst}

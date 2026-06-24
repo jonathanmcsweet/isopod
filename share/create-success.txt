@@ -1,0 +1,16 @@
+
+${c_grn}Sandbox '$name' is ready.${c_rst}
+
+  SSH host        : $(ctr_name "$name")   ${c_dim}(ssh $(ctr_name "$name"))${c_rst}
+  SSH endpoint    : 127.0.0.1:$hostport   ${c_dim}(loopback only — not on your LAN)${c_rst}
+  Workspace       : $WORKSPACE
+  Window color    : $hex
+
+Open it:
+  isopod code $name                 ${c_dim}# VSCodium via Open Remote - SSH${c_rst}
+  isopod code $name --app cursor    ${c_dim}# Cursor${c_rst}
+  isopod shell $name                ${c_dim}# plain terminal${c_rst}
+  JetBrains: Gateway -> SSH -> host '$(ctr_name "$name")' -> project $WORKSPACE
+
+Get files out later:
+  isopod export $name ./out         ${c_dim}# or git push from inside the box${c_rst}
