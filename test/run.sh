@@ -12,9 +12,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 BATS="$ROOT/test/libs/bats-core/bin/bats"
 
-c_grn=$'\033[32m'; c_red=$'\033[31m'; c_yel=$'\033[33m'; c_rst=$'\033[0m'
+c_grn=$'\033[32m'
+c_red=$'\033[31m'
+c_yel=$'\033[33m'
+c_rst=$'\033[0m'
 step() { printf '\n%s== %s ==%s\n' "$c_yel" "$1" "$c_rst"; }
-fail() { printf '%s%s%s\n' "$c_red" "$1" "$c_rst" >&2; exit 1; }
+fail() {
+  printf '%s%s%s\n' "$c_red" "$1" "$c_rst" >&2
+  exit 1
+}
 
 # --- lint -------------------------------------------------------------------
 step "shellcheck"
@@ -25,10 +31,24 @@ else
   printf '%sshellcheck not installed — skipping (install it for full coverage)%s\n' "$c_yel" "$c_rst"
 fi
 
+step "shfmt"
+# Keep flags in sync with .pre-commit-config.yaml and .editorconfig (-i 2 -ci).
+# Pure bash/sh only — shfmt can't parse .bats or the zsh completion.
+SHFMT_FILES="isopod install.sh verify-host-isolation.sh test/run.sh test/packaging.sh test/brew-formula.sh test/helper.bash completions/isopod.bash"
+if command -v shfmt >/dev/null 2>&1; then
+  # shellcheck disable=SC2086
+  if ! shfmt -i 2 -ci -d $SHFMT_FILES; then
+    fail "shfmt: formatting differences above — run 'shfmt -i 2 -ci -w $SHFMT_FILES' (or 'pre-commit run shfmt --all-files')"
+  fi
+  printf '%sshfmt clean%s\n' "$c_grn" "$c_rst"
+else
+  printf '%sshfmt not installed — skipping (install it for full coverage)%s\n' "$c_yel" "$c_rst"
+fi
+
 # --- syntax -----------------------------------------------------------------
 step "bash syntax"
-bash -n isopod install.sh verify-host-isolation.sh \
-  && printf '%sshell scripts parse%s\n' "$c_grn" "$c_rst"
+bash -n isopod install.sh verify-host-isolation.sh &&
+  printf '%sshell scripts parse%s\n' "$c_grn" "$c_rst"
 
 # --- python lib syntax ------------------------------------------------------
 step "python lib"

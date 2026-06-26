@@ -1,0 +1,26 @@
+# Pre-commit hooks: bash linting (ShellCheck) + formatting (shfmt).
+# Both hooks self-provision their binary (language: python, prebuilt) — no Docker
+# or Go toolchain needed. See docs/development.md for the contributor workflow.
+#
+#   pip install pre-commit   # or: pipx install pre-commit
+#   pre-commit install       # wire it into .git/hooks
+#   pre-commit run --all-files
+minimum_pre_commit_version: "3.2.0"
+repos:
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        args: ["-S", "warning"]
+        # Matches the lint scope in test/run.sh. .bats files use non-standard
+        # syntax shellcheck can't parse, so they're intentionally excluded.
+        files: '^(isopod|install\.sh|verify-host-isolation\.sh|test/(run|packaging|brew-formula)\.sh)$'
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.13.1-1
+    hooks:
+      - id: shfmt
+        args: ["-w", "-i", "2", "-ci"]
+        # Pure bash/sh only — shfmt can't parse .bats (@test) or the zsh
+        # completion (completions/_isopod).
+        files: '^(isopod|install\.sh|verify-host-isolation\.sh|completions/isopod\.bash|test/(run|packaging|brew-formula)\.sh|test/helper\.bash)$'
