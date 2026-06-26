@@ -27,13 +27,36 @@ toolchain required). Tool versions are pinned in
 
 ## What the hooks enforce
 
-| Tool | Role | Scope |
-|------|------|-------|
-| ShellCheck (`-S warning`) | static analysis / linting | `isopod`, `install.sh`, `verify-host-isolation.sh`, `test/*.sh` |
-| shfmt (`-i 2 -ci`) | formatting | the above + `test/helper.bash`, `completions/isopod.bash` |
+| Tool | Role | Scope | Stage |
+|------|------|-------|-------|
+| ShellCheck (`-S warning`) | static analysis / linting | `isopod`, `install.sh`, `verify-host-isolation.sh`, `test/*.sh` | commit |
+| shfmt (`-i 2 -ci`) | formatting | the above + `test/helper.bash`, `completions/isopod.bash` | commit |
+| actionlint | lint GitHub Actions workflows | `.github/workflows/*` | commit |
 
-`.bats` test files and the zsh completion (`completions/_isopod`) are excluded —
-neither tool can parse them.
+`.bats` test files and the zsh completion (`completions/_isopod`) are excluded
+from the bash hooks — neither tool can parse them.
+
+### CI-file checks (only fire when that CI file changes)
+
+The bash + actionlint hooks self-provision and run on every commit. Two heavier
+hooks actually *run* the pipelines locally, so they're on the **pre-push** stage
+and only trigger when their CI file is staged:
+
+| Hook | Runs | When | Needs |
+|------|------|------|-------|
+| `act-github-ci` | `act -j lint` | `.github/workflows/*` changed | [act](https://github.com/nektos/act) + Docker |
+| `gitlab-ci-local` | `gitlab-ci-local shellcheck unit-and-integration` | `.gitlab-ci.yml` changed | [gitlab-ci-local](https://github.com/firecow/gitlab-ci-local) (`npm i -g gitlab-ci-local`) + Docker |
+
+These use tools you install yourself (pre-commit does **not** provision `act` or
+`gitlab-ci-local`). To enable the pre-push stage:
+
+```sh
+pre-commit install --hook-type pre-push
+```
+
+The GitLab hook deliberately skips the `live-isolation` job (it needs privileged
+podman-in-podman). `act` lints the GitHub `lint` job; expand the args if you want
+more jobs run before pushing.
 
 Formatting style (2-space indent, indented `case` branches) is declared once in
 [`.editorconfig`](../.editorconfig) so editors with EditorConfig support match the
