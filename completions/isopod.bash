@@ -9,7 +9,7 @@
 _isopod() {
   local cur prev cword words
   cur="${COMP_WORDS[COMP_CWORD]}"
-  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  prev="${COMP_WORDS[COMP_CWORD - 1]}"
   cword="$COMP_CWORD"
   words=("${COMP_WORDS[@]}")
 
@@ -34,12 +34,26 @@ _isopod() {
 
   # Values that follow a specific option.
   case "$prev" in
-    --color)  mapfile -t COMPREPLY < <(compgen -W "$colors" -- "$cur"); return 0 ;;
-    --app)    mapfile -t COMPREPLY < <(compgen -W "$apps" -- "$cur"); return 0 ;;
-    --engine) mapfile -t COMPREPLY < <(compgen -W "podman docker" -- "$cur"); return 0 ;;
-    --copy)   compopt -o default 2>/dev/null; COMPREPLY=(); return 0 ;;  # a path
-    --repo|--branch|--image|--memory|--cpus|--port|--name|--email|--old-email|--old-name|--path)
-      return 0 ;;  # free-form argument; let the shell default take over
+    --color)
+      mapfile -t COMPREPLY < <(compgen -W "$colors" -- "$cur")
+      return 0
+      ;;
+    --app)
+      mapfile -t COMPREPLY < <(compgen -W "$apps" -- "$cur")
+      return 0
+      ;;
+    --engine)
+      mapfile -t COMPREPLY < <(compgen -W "podman docker" -- "$cur")
+      return 0
+      ;;
+    --copy)
+      compopt -o default 2>/dev/null
+      COMPREPLY=()
+      return 0
+      ;; # a path
+    --repo | --branch | --image | --memory | --cpus | --port | --name | --email | --old-email | --old-name | --path)
+      return 0
+      ;; # free-form argument; let the shell default take over
   esac
 
   # Option flags, scoped per subcommand.
@@ -47,10 +61,10 @@ _isopod() {
     local opts=""
     case "$sub" in
       create) opts="--repo --branch --copy --color --image --engine --memory --cpus --port --no-sudo" ;;
-      code)   opts="--app" ;;
-      rm)     opts="--force" ;;
-      remap)  opts="--name --email --old-email --old-name --force" ;;
-      fetch)  opts="--path" ;;
+      code) opts="--app" ;;
+      rm) opts="--force" ;;
+      remap) opts="--name --email --old-email --old-name --force" ;;
+      fetch) opts="--path" ;;
     esac
     mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
     return 0
@@ -58,8 +72,9 @@ _isopod() {
 
   # First positional for most subcommands is an existing box name.
   case "$sub" in
-    info|code|shell|start|stop|export|fetch|remap|copy-in|rm)
-      mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur") ;;
+    info | code | shell | start | stop | export | fetch | remap | copy-in | rm)
+      mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
+      ;;
   esac
   return 0
 }

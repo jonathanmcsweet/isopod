@@ -30,7 +30,7 @@ isopod_setup_env() {
   export STUB_DIR="$TEST_TMP/stubs"
   mkdir -p "$STUB_DIR"
   export STUB_LOG="$TEST_TMP/stub-calls.log"
-  : > "$STUB_LOG"
+  : >"$STUB_LOG"
   export PATH="$STUB_DIR:$PATH"
 }
 
@@ -60,10 +60,10 @@ load_isopod() {
 # For richer behavior, write the file yourself in STUB_DIR.
 make_stub() {
   local name="$1" code="${2:-0}" out="${3:-}"
-  cat > "$STUB_DIR/$name" <<EOF
+  cat >"$STUB_DIR/$name" <<EOF
 #!/usr/bin/env bash
 echo "$name \$*" >> "$STUB_LOG"
-$( [ -n "$out" ] && printf 'printf "%%s\\n" %q\n' "$out" )
+$([ -n "$out" ] && printf 'printf "%%s\\n" %q\n' "$out")
 exit $code
 EOF
   chmod +x "$STUB_DIR/$name"
