@@ -167,7 +167,7 @@ Two ways out, for two situations:
   isopod remap myproj --name "Ada Lovelace" --email ada@example.com
   ```
 
-  Only commits matching the old identity are touched — pass `--old-email <e>` (and optionally `--old-name <n>`) to set it explicitly, or let it auto-detect from the still-running container. The rewrite is scoped to the container's `<name>/*` refs, so **your own branches are never touched**, and the originals are snapshotted under `refs/remap-backup/` so you can undo. It uses [`git-filter-repo`](https://github.com/newren/git-filter-repo) when installed, otherwise a built-in `git fast-export`→`fast-import` rewrite that needs only **core git plus `python3`.
+  Only commits matching the old identity are touched — pass `--old-email <e>` (and optionally `--old-name <n>`) to set it explicitly, or let it auto-detect from the still-running container. The new identity defaults to your host `git config` (override with `--name`/`--email` or `ISOPOD_GIT_NAME`/`ISOPOD_GIT_EMAIL`), so the common case is just `isopod remap myproj`. The rewrite is scoped to the container's `<name>/*` refs, so **your own branches are never touched**, and the originals are snapshotted under `refs/remap-backup/` so you can undo. It uses [`git-filter-repo`](https://github.com/newren/git-filter-repo) when installed, otherwise a built-in `git fast-export`→`fast-import` rewrite that needs only **core git plus `python3`**. See **[docs/remap.md](docs/remap.md)** for the full details.
 
 ## Connecting each IDE
 
@@ -219,6 +219,7 @@ CI runs on both GitLab and GitHub, kept in lockstep with the same three jobs —
 More detailed docs live in [`docs/`](docs/):
 
 - **[Installation, platform notes & state layout](docs/installation-and-platform.md)** — manual install steps per platform, window colors, platform-specific notes, and how on-disk state is laid out.
+- **[Identity remap](docs/remap.md)** — rewriting the git identity on commits made inside a container after `fetch`, and how the new identity is resolved.
 - **[Opt-in security features](docs/opt-in-security.md)** — enabling the gVisor (`runsc`) syscall-virtualizing runtime.
 - **[Releasing isopod](docs/RELEASING.md)** — how the version gate and Homebrew tap automation work.
 - **[VSCodium host-isolation audit](docs/isopod-vscodium-host-isolation-audit.md)** — code-level audit of what (if anything) crosses from host into the container.
