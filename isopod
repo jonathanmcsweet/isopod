@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="0.5.1"
+ISOPOD_VERSION="0.7.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -439,7 +439,7 @@ apply_color() { # apply_color <name> <hexcolor>
 
 # Translate the declarative hardening profile (security/hardening.conf) into
 # `$ENGINE run` flags, printed one per line for the caller to read into an array.
-# Anti-fingerprinting Tier 1 (mask host-revealing /proc and /sys paths) + Tier 2
+# Anti-fingerprinting(mask host-revealing /proc and /sys paths) +
 # (run under a sandboxed runtime like gVisor). The two engines mask differently:
 #   podman — a single `--security-opt mask=a:b:c` covers both files and dirs.
 #   docker — no mask flag, so dirs get an empty `--tmpfs` and files a `/dev/null`
@@ -468,11 +468,10 @@ hardening_run_args() { # hardening_run_args <engine>
     esac
   done <"$conf"
 
-  # Tier 2: env var wins over the profile so it can be toggled per invocation.
+  # env var wins over the profile so it can be toggled per invocation.
   runtime="${ISOPOD_RUNTIME:-$runtime}"
   [ -n "$runtime" ] && printf '%s\n' "--runtime" "$runtime"
 
-  # Tier 1.
   if [ "$engine" = "docker" ]; then
     local p
     for p in "${masks[@]:-}"; do [ -n "$p" ] && printf '%s\n' "--tmpfs" "$p"; done
@@ -554,6 +553,7 @@ cmd_create() {
 
   [ -n "$name" ] || die "usage: isopod create <name> [options]"
   valid_name "$name" || die "invalid name '$name' (letters, digits, . _ - only)"
+  
   # Serialize from here on: the existence check, color rotation, and ssh_config
   # rewrite below all read/write shared state and must not race another create.
   acquire_lock
@@ -581,6 +581,7 @@ cmd_create() {
 
   detect_engine "$engine_opt"
   mkdir -p "$(box_dir "$name")"
+
   # From here a partial box exists on disk; arm rollback so any failure below
   # (image build, sshd never coming up, clone error) leaves nothing behind.
   CREATE_ROLLBACK_NAME="$name"
@@ -601,7 +602,7 @@ cmd_create() {
   -p "$publish" --pids-limit 4096)
   [ -n "$memory" ] && run_args+=(--memory "$memory")
   [ -n "$cpus" ] && run_args+=(--cpus "$cpus")
-  # Anti-fingerprinting hardening from security/hardening.conf (Tier 1 + Tier 2).
+  # Anti-fingerprinting hardening from security/hardening.conf.
   local -a hard_args=()
   mapfile -t hard_args < <(hardening_run_args "$ENGINE")
   [ "${#hard_args[@]}" -gt 0 ] && run_args+=("${hard_args[@]}")
@@ -708,7 +709,7 @@ cmd_export() {
   info "Done: $dest"
 }
 
-# Pull the box's git history into a host repo WITHOUT copying the working tree:
+# Pull the box's git history into a host repo without copying the working tree:
 # bundle the repo inside the box, copy the single bundle file out, and `git fetch`
 # it into the target repo as remote-tracking branches named <name>/*. This is the
 # git-native counterpart to `isopod export` — clean history, no file merges.
@@ -777,6 +778,7 @@ cmd_fetch() {
     "$ENGINE" cp "$ctr:$bundle_box" "$tmp"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "Fetching history into $top as '$name/*'..."
+
     # Force-update the box's tracking refs (leading '+'), exactly as a normal
     # remote's '+refs/heads/*:refs/remotes/origin/*' does. Without it, a re-fetch
     # after the box's history was rewritten — e.g. by 'isopod remap', which gives
@@ -853,15 +855,24 @@ cmd_remap() {
     esac
   done
 
-  [ -n "$name" ] || die "usage: isopod remap <name> [target-repo-dir] --name <new> --email <new> [--old-email <e>] [--old-name <n>]"
+  [ -n "$name" ] || die "usage: isopod remap <name> [target-repo-dir] [--name <new>] [--email <new>] [--old-email <e>] [--old-name <n>]"
   have git || die "git is required on the host for 'isopod remap'"
   [ -n "$new_name" ] || die "--name <new author name> is required"
   [ -n "$new_email" ] || die "--email <new author email> is required"
+
   target="${target:-.}"
   git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
     die "'$target' is not a git repo — run this in (or point it at) the repo you fetched into"
   local top
   top=$(git -C "$target" rev-parse --show-toplevel)
+
+  # New identity defaults so 'isopod remap <box>' just works in the common case
+  # (rewrite the box's throwaway identity -> your real one). Precedence:
+  #   explicit --name/--email  >  ISOPOD_GIT_NAME/EMAIL  >  host git config.
+  [ -n "$new_name" ]  || new_name="${ISOPOD_GIT_NAME:-$(git -C "$top" config user.name  2>/dev/null || true)}"
+  [ -n "$new_email" ] || new_email="${ISOPOD_GIT_EMAIL:-$(git -C "$top" config user.email 2>/dev/null || true)}"
+  [ -n "$new_name" ]  || die "no new author name — pass --name, set ISOPOD_GIT_NAME, or set git config user.name"
+  [ -n "$new_email" ] || die "no new author email — pass --email, set ISOPOD_GIT_EMAIL, or set git config user.email"
 
   # The box's commits live under refs/remotes/<name>/* after `isopod fetch`.
   local -a boxrefs=()
@@ -1190,7 +1201,8 @@ cmd_doctor() {
   for app in codium cursor windsurf code; do
     if find_ide_bin "$app"; then printf '  [ok]      IDE: %-9s (%s)\n' "$app" "${IDE_CMD[*]}"; fi
   done
-  # Anti-fingerprinting profile (Tier 1 masks + optional Tier 2 runtime).
+
+  # Anti-fingerprinting profile
   if [ -f "$HARDENING_CONF" ]; then
     printf '  [ok]      hardening profile (%s)\n' "$HARDENING_CONF"
     local rt

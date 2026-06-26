@@ -37,8 +37,10 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         bound to 127.0.0.1 only)
 
 Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--opt=value'):
-  --name <new name>     New author/committer name to write   (required)
-  --email <new email>   New author/committer email to write  (required)
+  --name <new name>     New author/committer name to write. Defaults to
+                        ISOPOD_GIT_NAME, else host 'git config user.name'.
+  --email <new email>   New author/committer email to write. Defaults to
+                        ISOPOD_GIT_EMAIL, else host 'git config user.email'.
   --old-email <e>       Identity to rewrite FROM; only commits with this
                         email are touched. Auto-detected from the box if
                         omitted (requires the box to still exist).
@@ -51,4 +53,5 @@ Examples:
   isopod code myproj
   isopod export myproj ./myproj-out
   isopod fetch myproj            # from inside your host clone, pulls box history
-  isopod remap myproj --name "Real Name" --email me@real.com   # fix box commits
+  isopod remap myproj           # rewrite box commits to your host git identity
+  isopod remap myproj --name "Real Name" --email me@real.com   # or override it
