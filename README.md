@@ -208,6 +208,8 @@ test/run.sh              # lint + stubbed bats + interactive (no container engin
 RUN_LIVE=1 test/run.sh   # also runs live end-to-end tests against real podman/docker
 ```
 
+Contributing? Install the ShellCheck + shfmt [pre-commit hooks](docs/development.md) first (`pip install pre-commit && pre-commit install`) so linting and formatting run on every commit.
+
 CI runs on both GitLab and GitHub, kept in lockstep with the same three jobs — a `lint` job (shellcheck + bash syntax + python), a `test` job (stubbed + interactive, runs anywhere), and a manual `live` job that needs a podman-capable runner:
 
 - **GitLab CI/CD** (`.gitlab-ci.yml`) — should run identically under [`gitlab-ci-local`](https://github.com/firecow/gitlab-ci-local) for debugging pipelines on your own machine before pushing.
@@ -218,6 +220,7 @@ CI runs on both GitLab and GitHub, kept in lockstep with the same three jobs —
 
 More detailed docs live in [`docs/`](docs/):
 
+- **[Development guide](docs/development.md)** — dev setup, the ShellCheck + shfmt pre-commit hooks, formatting conventions, and running the tests.
 - **[Installation, platform notes & state layout](docs/installation-and-platform.md)** — manual install steps per platform, window colors, platform-specific notes, and how on-disk state is laid out.
 - **[Identity remap](docs/remap.md)** — rewriting the git identity on commits made inside a container after `fetch`, and how the new identity is resolved.
 - **[Opt-in security features](docs/opt-in-security.md)** — enabling the gVisor (`runsc`) syscall-virtualizing runtime.

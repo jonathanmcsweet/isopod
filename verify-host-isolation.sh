@@ -41,7 +41,10 @@ HOST_SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}"
 
 leak=0
 note() { printf '  %s\n' "$*"; }
-flag() { printf '  [!] %s\n' "$*" >&2; leak=1; }
+flag() {
+  printf '  [!] %s\n' "$*" >&2
+  leak=1
+}
 
 run_in_box() {
   # -o BatchMode forces non-interactive; no agent, no X11, no extra env sent.
@@ -102,7 +105,7 @@ echo
 echo "--- 3. Host filesystem probes ---"
 # These host paths should NOT be readable/visible from inside the box.
 for probe in "$HOST_HOME/.ssh/id_rsa" "$HOST_HOME/.aws/credentials" \
-             "$HOST_HOME/.config/isopod" "/etc/machine-id-host" ; do
+  "$HOST_HOME/.config/isopod" "/etc/machine-id-host"; do
   if run_in_box test -e "$probe"; then
     flag "host path is visible inside the box: $probe"
   fi

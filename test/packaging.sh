@@ -14,9 +14,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-c_grn=$'\033[32m'; c_red=$'\033[31m'; c_rst=$'\033[0m'
-ok()   { printf '%s  ok%s %s\n' "$c_grn" "$c_rst" "$1"; }
-fail() { printf '%sFAIL%s %s\n' "$c_red" "$c_rst" "$1" >&2; exit 1; }
+c_grn=$'\033[32m'
+c_red=$'\033[31m'
+c_rst=$'\033[0m'
+ok() { printf '%s  ok%s %s\n' "$c_grn" "$c_rst" "$1"; }
+fail() {
+  printf '%sFAIL%s %s\n' "$c_red" "$c_rst" "$1" >&2
+  exit 1
+}
 
 # 1. Every template referenced by the script must exist in share/.
 while read -r tmpl; do
@@ -26,8 +31,8 @@ ok "every render_tmpl reference has a share/ file"
 
 # 2. The tag tarball GitHub serves is `git archive` of the commit — make sure it
 #    carries share/, or the formula has nothing to install.
-git archive --format=tar HEAD -- share | tar t 2>/dev/null | grep -q 'share/usage.txt' \
-  || fail "share/ is not in the git archive — the release tarball would omit it"
+git archive --format=tar HEAD -- share | tar t 2>/dev/null | grep -q 'share/usage.txt' ||
+  fail "share/ is not in the git archive — the release tarball would omit it"
 ok "release tarball ships share/"
 
 # 3. Install the symlink way (lib/, share/, security/ beside the script under a

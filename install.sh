@@ -22,10 +22,17 @@ set -euo pipefail
 APP=isopod
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-c_grn=$'\033[32m'; c_red=$'\033[31m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
+c_grn=$'\033[32m'
+c_red=$'\033[31m'
+c_yel=$'\033[33m'
+c_dim=$'\033[2m'
+c_rst=$'\033[0m'
 info() { printf '%s==>%s %s\n' "$c_grn" "$c_rst" "$*"; }
 warn() { printf '%swarning:%s %s\n' "$c_yel" "$c_rst" "$*" >&2; }
-die()  { printf '%serror:%s %s\n'  "$c_red" "$c_rst" "$*" >&2; exit 1; }
+die() {
+  printf '%serror:%s %s\n' "$c_red" "$c_rst" "$*" >&2
+  exit 1
+}
 have() { command -v "$1" >/dev/null 2>&1; }
 
 MODE=install
@@ -39,15 +46,35 @@ EXT_ID="jeanp413.open-remote-ssh"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --system)       SCOPE=system; shift ;;
-    --user)         SCOPE=user; shift ;;
-    --prefix)       PREFIX="$2"; SCOPE=prefix; shift 2 ;;
-    --uninstall)    MODE=uninstall; shift ;;
-    --check)        DRYRUN=1; shift ;;
-    --no-extension) WANT_EXT=0; shift ;;
-    -h|--help)
+    --system)
+      SCOPE=system
+      shift
+      ;;
+    --user)
+      SCOPE=user
+      shift
+      ;;
+    --prefix)
+      PREFIX="$2"
+      SCOPE=prefix
+      shift 2
+      ;;
+    --uninstall)
+      MODE=uninstall
+      shift
+      ;;
+    --check)
+      DRYRUN=1
+      shift
+      ;;
+    --no-extension)
+      WANT_EXT=0
+      shift
+      ;;
+    -h | --help)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; /^set -euo/d'
-      exit 0 ;;
+      exit 0
+      ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
@@ -77,21 +104,27 @@ fi
 case "$SCOPE" in
   prefix)
     [ -n "$PREFIX" ] || die "--prefix requires a directory"
-    LIBROOT="$PREFIX/lib"; BINDIR="$PREFIX/bin" ;;
+    LIBROOT="$PREFIX/lib"
+    BINDIR="$PREFIX/bin"
+    ;;
   system)
     # /usr/local is writable even on immutable Fedora (it's a symlink into /var).
-    LIBROOT="/usr/local/lib"; BINDIR="/usr/local/bin" ;;
+    LIBROOT="/usr/local/lib"
+    BINDIR="/usr/local/bin"
+    ;;
   user)
     if [ "$OS" = "Darwin" ] && have brew; then
       # Align with Homebrew so bin is already on PATH (Apple Silicon or Intel).
       _bp="$(brew --prefix)"
-      LIBROOT="$_bp/lib"; BINDIR="$_bp/bin"
+      LIBROOT="$_bp/lib"
+      BINDIR="$_bp/bin"
     else
       # XDG-style per-user layout. On immutable Fedora, $HOME is /var/home and
       # fully writable, so this is the recommended path there too.
       LIBROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
       BINDIR="$HOME/.local/bin"
-    fi ;;
+    fi
+    ;;
 esac
 
 # Apply DESTDIR (packaging staging) if set.
@@ -120,20 +153,28 @@ need_sudo_hint() {
 find_editor_cli() {
   local c
   for c in codium vscodium code-oss code cursor; do
-    if have "$c"; then printf '%s' "$c"; return 0; fi
+    if have "$c"; then
+      printf '%s' "$c"
+      return 0
+    fi
   done
   # Flatpak VSCodium (e.g. immutable Fedora) exposes no bare `codium` on PATH.
   if have flatpak && flatpak info com.vscodium.codium >/dev/null 2>&1; then
-    printf 'flatpak run com.vscodium.codium'; return 0
+    printf 'flatpak run com.vscodium.codium'
+    return 0
   fi
   if have flatpak && flatpak info com.visualstudio.code >/dev/null 2>&1; then
-    printf 'flatpak run com.visualstudio.code'; return 0
+    printf 'flatpak run com.visualstudio.code'
+    return 0
   fi
   return 1
 }
 
 install_extension() {
-  [ "$WANT_EXT" -eq 1 ] || { info "Skipping editor extension (--no-extension)."; return 0; }
+  [ "$WANT_EXT" -eq 1 ] || {
+    info "Skipping editor extension (--no-extension)."
+    return 0
+  }
 
   local cli
   if ! cli="$(find_editor_cli)"; then
@@ -155,7 +196,7 @@ install_extension() {
 
   # $cli may be a multi-word command ("flatpak run ..."), so don't quote it.
   # shellcheck disable=SC2086
-  run $cli --install-extension "$EXT_ID" --force || \
+  run $cli --install-extension "$EXT_ID" --force ||
     warn "couldn't install $EXT_ID automatically — add it from your editor's Extensions view."
 }
 
@@ -229,7 +270,7 @@ run mkdir -p "$(dirname "$PROGDIR")" "$(dirname "$LINK")"
 run rm -rf "$PROGDIR"
 if have rsync; then
   run rsync -a --exclude '.git' --exclude '__pycache__' --exclude 'test' \
-        "$SELF_DIR"/ "$PROGDIR"/
+    "$SELF_DIR"/ "$PROGDIR"/
 else
   run cp -r "$SELF_DIR" "$PROGDIR"
   run rm -rf "$PROGDIR/.git" "$PROGDIR/lib/__pycache__" "$PROGDIR/test"
@@ -272,10 +313,10 @@ if [ "$DRYRUN" -eq 0 ] && ! have podman && ! have docker; then
     printf '   host podman to manage your sandboxes. This installer put it on the host.\n'
   else
     case "$DISTRO" in
-      fedora|rhel|centos) printf '       %ssudo dnf install -y podman openssh-clients%s\n' "$c_dim" "$c_rst" ;;
-      ubuntu|debian)      printf '       %ssudo apt install -y podman openssh-client%s\n' "$c_dim" "$c_rst" ;;
-      *) [ "$OS" = "Darwin" ] && printf '       %sbrew install podman && podman machine init && podman machine start%s\n' "$c_dim" "$c_rst" \
-           || printf '       install podman or docker via your package manager\n' ;;
+      fedora | rhel | centos) printf '       %ssudo dnf install -y podman openssh-clients%s\n' "$c_dim" "$c_rst" ;;
+      ubuntu | debian) printf '       %ssudo apt install -y podman openssh-client%s\n' "$c_dim" "$c_rst" ;;
+      *) [ "$OS" = "Darwin" ] && printf '       %sbrew install podman && podman machine init && podman machine start%s\n' "$c_dim" "$c_rst" ||
+        printf '       install podman or docker via your package manager\n' ;;
     esac
   fi
 fi

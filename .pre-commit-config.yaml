@@ -1,0 +1,61 @@
+# Pre-commit hooks: bash lint/format (always), plus CI-file validation that only
+# fires when the relevant CI file changes. See docs/development.md.
+#
+#   pip install pre-commit
+#   pre-commit install                       # bash + actionlint, on commit
+#   pre-commit install --hook-type pre-push  # act + gitlab-ci-local, on push
+#   pre-commit run --all-files
+minimum_pre_commit_version: "3.2.0"
+repos:
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        args: ["-S", "warning"]
+        # Matches the lint scope in test/run.sh. .bats files use non-standard
+        # syntax shellcheck can't parse, so they're intentionally excluded.
+        files: '^(isopod|install\.sh|verify-host-isolation\.sh|test/(run|packaging|brew-formula)\.sh)$'
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.13.1-1
+    hooks:
+      - id: shfmt
+        args: ["-w", "-i", "2", "-ci"]
+        # Pure bash/sh only — shfmt can't parse .bats (@test) or the zsh
+        # completion (completions/_isopod).
+        files: '^(isopod|install\.sh|verify-host-isolation\.sh|completions/isopod\.bash|test/(run|packaging|brew-formula)\.sh|test/helper\.bash)$'
+
+  # GitHub Actions: static lint of workflow files, on commit. Self-provisions via
+  # Go (no system install). Already scoped to ^.github/workflows/ by the hook.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  # Heavier local CI runs — pre-push only, and only when the matching CI file
+  # changes. These use your own installed tools (NOT provisioned by pre-commit)
+  # and need Docker/Podman running. Install:
+  #   act            -> https://github.com/nektos/act
+  #   gitlab-ci-local-> npm i -g gitlab-ci-local
+  - repo: local
+    hooks:
+      - id: act-github-ci
+        name: act (run GitHub CI lint job locally)
+        entry: act
+        args: ["-j", "lint"]
+        language: system
+        files: '^\.github/workflows/.*\.ya?ml$'
+        pass_filenames: false
+        stages: [pre-push]
+        require_serial: true
+
+      - id: gitlab-ci-local
+        name: gitlab-ci-local (run GitLab lint+test locally)
+        entry: gitlab-ci-local
+        # Skip the 'live-isolation' job — it needs privileged podman-in-podman.
+        args: ["shellcheck", "unit-and-integration"]
+        language: system
+        files: '^\.gitlab-ci\.yml$'
+        pass_filenames: false
+        stages: [pre-push]
+        require_serial: true
