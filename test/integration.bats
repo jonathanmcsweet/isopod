@@ -178,11 +178,23 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   git -C "$host" fetch --no-tags "$box" "refs/heads/*:refs/remotes/mybox/*" >/dev/null 2>&1
 }
 
-@test "remap requires new --name and --email" {
+@test "remap defaults the new identity from host git config" {
+  # _seed_remapped_host sets the host repo's user to Me <me@home>; with no
+  # --name/--email the rewrite should fall back to exactly that.
   _seed_remapped_host "$TEST_TMP/host"
-  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --old-email dev@mybox.local --name X
-  assert_failure
-  assert_output --partial "--email"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --old-email dev@mybox.local --force
+  assert_success
+  run git -C "$TEST_TMP/host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "Me <me@home>"
+}
+
+@test "remap honors ISOPOD_GIT_NAME/EMAIL over host git config" {
+  _seed_remapped_host "$TEST_TMP/host"
+  run env ISOPOD_GIT_NAME="Env Name" ISOPOD_GIT_EMAIL=env@me.com \
+    "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --old-email dev@mybox.local --force
+  assert_success
+  run git -C "$TEST_TMP/host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "Env Name <env@me.com>"
 }
 
 @test "remap errors when the box has no fetched refs" {
