@@ -57,6 +57,49 @@ Name and email resolve independently, so you can pin one with a flag and let the
 other fall through. If none of the three sources yields a value, remap stops with
 a clear error rather than writing an empty identity.
 
+## Multiple identities at once — a remap file
+
+The single-pair flags above remap one identity. To remap several in one run —
+for example several throwaway box identities to your real one, or different
+contributors at once — list them in a **remap file**: one `old -> new` rule per
+line, read left-to-right.
+
+```
+# old identity          ->  new identity
+dev@box-a               ->  Real Name <me@real.com>
+dev@box-b               ->  Real Name <me@real.com>
+# match the old name too, not just the email:
+Throwaway <dev@box-c>   ->  Real Name <me@real.com>
+```
+
+- The **left** side must contain an `<email>` (a bare `dev@box` works too) — that
+  is what each commit is matched on. Add a name to also require a name match.
+- The **right** side is the replacement: `Name <email>`, just `<email>` (keep the
+  name), or just a `Name` (keep the email).
+- Blank lines and lines starting with `#` are ignored.
+
+Provide the file in either of two ways (precedence: flag, then default file):
+
+1. `--remap-file <file>` on a single run.
+2. `~/.config/isopod/remap` (under `$ISOPOD_CONFIG_DIR` if set) — a standing set
+   of rules applied automatically whenever you run `isopod remap` without
+   single-pair flags.
+
+```sh
+isopod remap myproj --remap-file ~/.config/isopod/remap
+isopod remap myproj            # uses ~/.config/isopod/remap if it exists
+```
+
+When a remap file is in effect the single-pair flags and box auto-detection are
+not used. Identities the file does not mention are left untouched, so a
+teammate's commits on the same branch are still safe. A `--remap-file` always
+wins; the default file is skipped if you pass any of
+`--old-email/--old-name/--name/--email`.
+
+> The file is isopod's own format, distinct from git's `.mailmap` (which git
+> reads to *display* collapsed identities). isopod translates these rules into a
+> mailmap internally to drive the rewrite, but does not read a repo's `.mailmap`.
+
 ## What it touches (and what it doesn't)
 
 - **Scoped to the container's refs** (`refs/remotes/<name>/*`) — your own
@@ -103,9 +146,11 @@ for confirmation. Pass `--force`/`-f` to skip the prompt (e.g. in scripts).
 
 ## Implementation
 
-remap uses [`git-filter-repo`](https://github.com/newren/git-filter-repo) when
-it's installed (via a mailmap matching the old identity). When it isn't, it falls
-back to a built-in `git fast-export` → `fast-import` rewrite that needs only
-**core git plus `python3`** — the rewrite logic lives in
+Both backends are driven by a git mailmap (the single-pair flags simply build a
+one-line mailmap on the fly). remap uses
+[`git-filter-repo`](https://github.com/newren/git-filter-repo) when it's
+installed. When it isn't, it falls back to a built-in `git fast-export` →
+`fast-import` rewrite that needs only **core git plus `python3`** — the
+mailmap-driven rewrite logic lives in
 [`lib/remap_identity_filter.py`](../lib/remap_identity_filter.py). Neither path
 touches the working tree or needs a network.

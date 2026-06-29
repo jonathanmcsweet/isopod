@@ -71,6 +71,7 @@ _isopod() {
             '--email[new author/committer email]:email:' \
             '--old-email[identity to rewrite from]:email:' \
             '--old-name[also require this name to match]:name:' \
+            '--remap-file[remap many identities from an old -> new file]:file:_files' \
             '(--force -f)'{--force,-f}'[skip confirmation]' \
             '1:sandbox:_isopod_boxes'
           ;;
