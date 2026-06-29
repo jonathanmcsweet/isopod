@@ -45,6 +45,10 @@ Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--o
                         email are touched. Auto-detected from the box if
                         omitted (requires the box to still exist).
   --old-name <n>        Also require this name to match before rewriting.
+  --remap-file <file>   Remap many identities at once from a file of
+                        'old -> new' lines (e.g. dev@box -> Me <me@real.com>).
+                        Overrides the single-pair flags and the default
+                        ~/.config/isopod/remap.
   --force, -f           Skip the confirmation prompt.
 
 Examples:
@@ -55,3 +59,5 @@ Examples:
   isopod fetch myproj            # from inside your host clone, pulls box history
   isopod remap myproj           # rewrite box commits to your host git identity
   isopod remap myproj --name "Real Name" --email me@real.com   # or override it
+  isopod remap myproj --remap-file ~/.config/isopod/remap      # remap many identities
+
