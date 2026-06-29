@@ -46,7 +46,7 @@ _isopod() {
       mapfile -t COMPREPLY < <(compgen -W "podman docker" -- "$cur")
       return 0
       ;;
-    --copy)
+    --copy | --remap-file)
       compopt -o default 2>/dev/null
       COMPREPLY=()
       return 0
@@ -63,7 +63,7 @@ _isopod() {
       create) opts="--repo --branch --copy --color --image --engine --memory --cpus --port --no-sudo" ;;
       code) opts="--app" ;;
       rm) opts="--force" ;;
-      remap) opts="--name --email --old-email --old-name --force" ;;
+      remap) opts="--name --email --old-email --old-name --remap-file --force" ;;
       fetch) opts="--path" ;;
     esac
     mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
