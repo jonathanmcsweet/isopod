@@ -926,6 +926,14 @@ cmd_remap() {
   local top
   top=$(git -C "$target" rev-parse --show-toplevel)
 
+  # New identity defaults so 'isopod remap <box>' just works in the common case
+  # (rewrite the box's throwaway identity -> your real one). Precedence:
+  #   explicit --name/--email  >  ISOPOD_GIT_NAME/EMAIL  >  host git config.
+  [ -n "$new_name" ] || new_name="${ISOPOD_GIT_NAME:-$(git -C "$top" config user.name 2>/dev/null || true)}"
+  [ -n "$new_email" ] || new_email="${ISOPOD_GIT_EMAIL:-$(git -C "$top" config user.email 2>/dev/null || true)}"
+  [ -n "$new_name" ] || die "no new author name — pass --name, set ISOPOD_GIT_NAME, or set git config user.name"
+  [ -n "$new_email" ] || die "no new author email — pass --email, set ISOPOD_GIT_EMAIL, or set git config user.email"
+
   # The box's commits live under refs/remotes/<name>/* after `isopod fetch`.
   local -a boxrefs=()
   local r

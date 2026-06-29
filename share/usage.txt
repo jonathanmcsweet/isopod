@@ -60,3 +60,4 @@ Examples:
   isopod remap myproj           # rewrite box commits to your host git identity
   isopod remap myproj --name "Real Name" --email me@real.com   # or override it
   isopod remap myproj --remap-file ~/.config/isopod/remap      # remap many identities
+
