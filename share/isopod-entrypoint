@@ -1,0 +1,46 @@
+#!/bin/sh
+# isopod box entrypoint — runs as PID 1 in every box.
+#
+# On boot it gives the box a unique SSH host key, then applies the bootstrap the
+# host passes in via the environment (the in-box user's authorized key and sudo
+# policy) before starting sshd. Doing this here, rather than via a host-side
+# `$ENGINE exec`, lets a box bring itself to a working SSH state under any OCI
+# runtime (runc, gVisor, Kata, krun).
+#
+# ISOPOD_AUTHORIZED_KEY (a public key) and ISOPOD_SUDO (0/1) are non-secret;
+# they are consumed and unset before sshd runs so they never reach a login
+# session. The in-box user is baked into /etc/isopod-user at image build.
+
+iso_u="$(cat /etc/isopod-user)"
+iso_h="/home/$iso_u"
+
+# Unique host keys on first boot, so every box has a distinct identity.
+if [ ! -f /etc/ssh/.isopod-host-keys ]; then
+  rm -f /etc/ssh/ssh_host_*
+  ssh-keygen -A >/dev/null
+  touch /etc/ssh/.isopod-host-keys
+fi
+
+# Authorized key. Append-if-absent, so reboots and reconfigure stay idempotent
+# and never clobber a key the user added inside the box.
+if [ -n "${ISOPOD_AUTHORIZED_KEY:-}" ]; then
+  install -d -m 700 -o "$iso_u" -g "$iso_u" "$iso_h/.ssh"
+  touch "$iso_h/.ssh/authorized_keys"
+  grep -qxF "$ISOPOD_AUTHORIZED_KEY" "$iso_h/.ssh/authorized_keys" ||
+    printf '%s\n' "$ISOPOD_AUTHORIZED_KEY" >>"$iso_h/.ssh/authorized_keys"
+  chown "$iso_u:$iso_u" "$iso_h/.ssh/authorized_keys"
+  chmod 600 "$iso_h/.ssh/authorized_keys"
+fi
+
+# Sudo policy. Set by create only (1 = passwordless, 0 = none); left untouched
+# when unset (e.g. reconfigure) so the box's existing policy is preserved.
+if [ "${ISOPOD_SUDO:-}" = "1" ]; then
+  printf '%s\n' "$iso_u ALL=(ALL) NOPASSWD:ALL" >"/etc/sudoers.d/$iso_u"
+  chmod 440 "/etc/sudoers.d/$iso_u"
+elif [ "${ISOPOD_SUDO:-}" = "0" ]; then
+  rm -f "/etc/sudoers.d/$iso_u"
+fi
+
+unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO
+mkdir -p /run/sshd
+exec /usr/sbin/sshd -D -e

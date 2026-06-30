@@ -1,11 +1,16 @@
 # CLAUDE.md — guidance for AI agents working in this repo
 
+## Chores
+- Always bump the ISOPOD_VERSION based on semantic versioning when commiting your final work to
+  a branch
+- SemVer reference: https://semver.org
+
 ## Documentation
 - Keep text descriptions short without excessive details unless necessary to prevent confusion
 - Refrain from using idiomatic language such as "clobber" or "belt and suspenders" which may be
   read differently by different people
 
-## Commit messages — use Conventional Commits
+## Branches and Commit messages — use Conventional Commits
 
 Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
 
