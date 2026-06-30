@@ -192,7 +192,7 @@ Two ways out, for two situations:
 The base image is defined by a standard Dockerfile, [`share/Dockerfile`](share/Dockerfile) — built identically by `docker build` and `podman build`. On top of whatever base you choose it adds sshd, git, common CLI tooling, the unprivileged in-container user, and passwordless sudo (drop sudo with `--no-sudo`). There are two ways to shape it:
 
 - **`--image <ref>`** swaps the base. Any Debian/Ubuntu-based image works (`--image ubuntu:24.04`), including one you built yourself from a Dockerfile and want to reuse across boxes.
-- **`--dockerfile <path>`** is the project-provisioning path: isopod builds your Dockerfile first, then layers sshd/git on top. This is how you bake in a toolchain (a JDK, Node, etc.) the industry-standard way, rather than a bespoke config format.
+- **`--dockerfile <path>`** is the project-provisioning path: isopod builds your Dockerfile first, then layers sshd/git on top (i.e. your image becomes the base via `FROM`). This is how you bake in a toolchain (a JDK, Node, etc.) the industry-standard way, rather than a bespoke config format.
 
 ```dockerfile
 # Dockerfile  — your project's toolchain
@@ -203,6 +203,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends default-jdk mav
 ```sh
 isopod create api --repo https://github.com/me/api --dockerfile ./Dockerfile
 ```
+
+Your Dockerfile must use a Debian/Ubuntu (`apt`) base, since isopod's layer installs sshd with `apt-get`. A trailing `USER` in your Dockerfile doesn't change the box's privilege model — isopod's layer resets to root (sshd must be PID 1 as root) and you log in as the unprivileged in-box user. **To limit privilege inside the box, use `--no-sudo`** (drops the in-box user's passwordless sudo), not the base image's `USER` — isopod's SSH model supersedes it. (isopod's real boundary is host isolation + rootless userns, not in-container rootlessness; see [The isolation model](#the-isolation-model).)
 
 Because the image is built before the container exists (and `--repo` clones *inside* the box afterward), the Dockerfile is a host-side file you point at — not something read from the cloned repo. For quick one-offs you can still install toolchains interactively with `isopod shell`.
 

@@ -9,6 +9,14 @@
 # sshd down to key-only single-user access, and runs sshd as PID 1.
 ARG ISOPOD_BASE=docker.io/library/debian:bookworm-slim
 FROM ${ISOPOD_BASE}
+
+# Reset to root so these layers (and the sshd entrypoint) work no matter what
+# USER a --dockerfile base ended on. In an isopod box the privilege model is
+# fixed by isopod regardless: sshd is PID 1 as root and you log in as the
+# unprivileged ISOPOD_USER. Tighten that user with --no-sudo — not the base
+# image's USER, which isopod supersedes.
+USER root
+
 ARG ISOPOD_USER=dev
 ENV DEBIAN_FRONTEND=noninteractive
 

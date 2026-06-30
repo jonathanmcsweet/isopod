@@ -211,6 +211,17 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   assert_success
 }
 
+@test "live: --dockerfile base ending in a non-root USER still yields a working box" {
+  # isopod's layer resets to root, so sshd (PID 1) and the sudoers/key injection
+  # still work even though the base image ends as a non-root user.
+  df="$TEST_TMP/Dockerfile"
+  printf 'FROM %s\nUSER nobody\n' "$IMG" > "$df"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --dockerfile "$df"
+  run bssh -- whoami
+  assert_success
+  assert_output "dev"
+}
+
 @test "live: rm destroys the container" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   "$ISOPOD_ROOT/isopod" rm "$BOX" --force
