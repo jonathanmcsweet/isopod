@@ -148,6 +148,8 @@ Every container also becomes a plain SSH host: `ssh isopod-myproj` works from an
 
 Two ways out, for two situations:
 
+Both run over the box's SSH connection, so the box must be **running** (`isopod start <name>` if not). `export` and `copy-in` move files as a tar stream, preserving timestamps, modes, and symlinks.
+
 - **`isopod export <name> [dest]`** copies the container's whole working tree (including its `.git`) to a fresh host directory. It will not write into an existing path so the export shape stays predictable.
 - **`isopod fetch <name> [target-repo]`** brings only **committed git history** across, the clean way — no file merges, no clobbering your working tree:
 
@@ -162,7 +164,7 @@ Two ways out, for two situations:
   git switch -c fingerprint-hardening myproj/fingerprint-hardening
   ```
 
-  `isopod fetch` finds the repo at the container's workspace automatically (or the single git subfolder inside it); pass `--path <in-container-repo>` if your layout is unusual. If the target isn't a git repo, it instead drops a `<name>.bundle` file and prints how to use it. Like `export`, it needs no network and no git remote.
+  `isopod fetch` finds the repo at the container's workspace automatically (or the single git subfolder inside it); pass `--path <in-container-repo>` if your layout is unusual. If the target isn't a git repo, it instead drops a `<name>.bundle` file and prints how to use it (this fallback needs git ≥ 2.36 in the box — the default base has it). Like `export`, it needs no network and no git remote.
 
 
   `isopod remap <name> [target-repo]` Pods don't set a git identity, so commits made inside one carry whatever was configured there (often a throwaway `dev@<container>`); this maps them to your real name/email while preserving commit messages and author/committer **dates**:
@@ -212,6 +214,8 @@ isopod create api --repo https://github.com/me/api --dockerfile ./Dockerfile
 Your Dockerfile must use a Debian/Ubuntu (`apt`) base, since isopod's layer installs sshd with `apt-get`. A trailing `USER` in your Dockerfile doesn't change the box's privilege model — isopod's layer resets to root (sshd must be PID 1 as root) and you log in as the unprivileged in-box user. **To limit privilege inside the box, use `--no-sudo`** (drops the in-box user's passwordless sudo), not the base image's `USER` — isopod's SSH model supersedes it. (isopod's real boundary is host isolation + rootless userns, not in-container rootlessness; see [The isolation model](#the-isolation-model).)
 
 Because the image is built before the container exists (and `--repo` clones *inside* the box afterward), the Dockerfile is a host-side file you point at — not something read from the cloned repo. For quick one-offs you can still install toolchains interactively with `isopod shell`.
+
+isopod runs box operations (clone, copy-in, export, fetch) over a non-interactive SSH command, which uses the system `PATH`, not the one your `~/.bashrc` builds. Install tools system-wide (in the Dockerfile, or with `sudo` in the box) so these operations can find them; a tool only on a shell-rc `PATH` is still available in `isopod shell`, just not to box operations.
 
 ### Reaching a server in the box (port forwarding)
 

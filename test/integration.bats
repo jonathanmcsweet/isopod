@@ -63,9 +63,16 @@ EOF
   chmod +x "$STUB_DIR/ssh-keyscan"
 
   # ssh: used by wait_for_ssh (BatchMode true) and every box op — succeed.
-  make_stub ssh 0
-  # scp: used by copy-in / export to move files over SSH.
-  make_stub scp 0
+  # Drain any piped stdin (e.g. a tar stream from copy-in) so the writer does
+  # not get SIGPIPE under `set -o pipefail`; skip when stdin is a tty so
+  # non-piped calls never block.
+  cat >"$STUB_DIR/ssh" <<'EOF'
+#!/usr/bin/env bash
+echo "ssh $*" >> "$STUB_LOG"
+[ -t 0 ] || cat >/dev/null 2>&1 || true
+exit 0
+EOF
+  chmod +x "$STUB_DIR/ssh"
   make_stub flatpak 1   # no flatpak by default
 }
 
@@ -119,11 +126,12 @@ EOF
   assert_output --partial "ForwardAgent no"
 }
 
-@test "create with --copy scps into the container, not a mount" {
+@test "create with --copy tars into the container, not a mount" {
   mkdir -p "$TEST_TMP/src"; echo hi > "$TEST_TMP/src/file.txt"
   run "$ISOPOD_ROOT/isopod" create demo --copy "$TEST_TMP/src" --color blue
   assert_success
-  assert_stub_called "scp .* -r $TEST_TMP/src dev@127.0.0.1:/home/dev/workspace/src"
+  # files stream in over ssh as a tar archive extracted in the workspace
+  assert_stub_called "ssh .*tar -C /home/dev/workspace -xpf -"
   # crucially, no bind mount flag should ever appear in the run command
   refute_output --partial "-v "
   assert_stub_not_called 'podman run .*--volume'
@@ -134,7 +142,7 @@ EOF
   mkdir -p "$TEST_TMP/src"; echo hi > "$TEST_TMP/src/file.txt"
   run "$ISOPOD_ROOT/isopod" create demo --copy="$TEST_TMP/src" --color blue
   assert_success
-  assert_stub_called "scp .* -r $TEST_TMP/src dev@127.0.0.1:/home/dev/workspace/src"
+  assert_stub_called "ssh .*tar -C /home/dev/workspace -xpf -"
 }
 
 @test "create applies Tier 1 fingerprint masks from the hardening profile" {

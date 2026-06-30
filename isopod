@@ -450,6 +450,12 @@ scan_host_key() { # scan_host_key <name>
 # Connect to a box using its own key/port/known_hosts explicitly, so internal
 # SSH never depends on ~/.ssh/config resolution (which OpenSSH derives from the
 # passwd database, not $HOME — important for hermetic tests and odd setups).
+#
+# A remote command passed here runs non-interactively, so it gets sshd's PATH
+# (the system default), NOT the PATH your ~/.bashrc would build. Built-in flows
+# only need tools on the system PATH (git, python3 in /usr/bin). A box op that
+# depends on a tool you added to PATH from a shell rc file will not see it —
+# install such tools system-wide, or run them yourself from `isopod shell`.
 box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
   local name="$1"
   shift
@@ -488,28 +494,19 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
     "${opts[@]}" "$CONTAINER_USER@127.0.0.1" "${rcmd[@]}"
 }
 
-# Copy files to/from a box over SSH, pinned to its key/port/host key exactly
-# like box_ssh. Callers pass scp arguments including the dev@127.0.0.1:<path>
-# endpoint. Routing file transfer over SSH (not `$ENGINE cp`) means it reaches
-# the workload under any runtime — including a microVM, where `$ENGINE cp` would
-# land outside the guest.
-box_scp() { # box_scp <name> <scp-arg...>
-  local name="$1"
-  shift
-  local port
-  port=$(meta_get "$name" port)
-  scp -P "$port" \
-    -i "$(box_dir "$name")/id_ed25519" \
-    -o IdentitiesOnly=yes \
-    -o UserKnownHostsFile="$(box_dir "$name")/known_hosts" \
-    -o StrictHostKeyChecking=yes \
-    -o ForwardAgent=no -o ForwardX11=no \
-    "$@"
+# Stream a tar archive between host and box over SSH. File transfer uses tar
+# (not scp) so it preserves what `$ENGINE cp` did — mtimes, modes, symlinks, and
+# special files — instead of dereferencing symlinks and resetting timestamps the
+# way scp would. Going over SSH (not `$ENGINE cp`) also means it reaches the
+# workload under any runtime, including a microVM. Callers pipe a tar stream:
+#   tar -C src -cf - item | box_tar_in  <name> <dest-dir>      (host -> box)
+#   box_tar_out <name> <src-dir> | tar -C dest -xpf -          (box  -> host)
+box_tar_in() { # box_tar_in <name> <dest-dir>   (reads a tar stream on stdin)
+  box_ssh "$1" -- tar -C "$2" -xpf -
 }
-
-# The box's SSH endpoint for scp/git: dev@127.0.0.1:<path>. The path is appended
-# by the caller.
-box_at() { printf '%s@127.0.0.1:' "$CONTAINER_USER"; }
+box_tar_out() { # box_tar_out <name> <src-dir>  (writes a tar stream to stdout)
+  box_ssh "$1" -- tar -C "$2" -cf - .
+}
 
 wait_for_ssh() { # wait until we can actually authenticate
   local name="$1" tries=0
@@ -936,15 +933,17 @@ cmd_create() {
 do_copy_in() { # do_copy_in <name> <path>...
   local name="$1"
   shift
-  # Transfer over SSH (scp) as the in-box user, so the files arrive owned by
-  # that user and the copy reaches the workload under any runtime.
+  # Stream each item in as a tar archive over SSH: the in-box user runs the
+  # extraction (so files arrive owned by it), tar preserves mtimes/modes/symlinks
+  # like `$ENGINE cp` did, and it reaches the workload under any runtime.
   box_ssh "$name" -- mkdir -p "$WORKSPACE"
-  local p base
+  local p rp base
   for p in "$@"; do
     [ -e "$p" ] || die "path does not exist: $p"
-    base=$(basename "$(realpath "$p")")
+    rp=$(realpath "$p")
+    base=$(basename "$rp")
     info "Copying $p -> $WORKSPACE/$base (one-time copy, not a mount)"
-    box_scp "$name" -r "$p" "$(box_at)$WORKSPACE/$base"
+    tar -C "$(dirname "$rp")" -cf - "$base" | box_tar_in "$name" "$WORKSPACE"
   done
 }
 
@@ -965,7 +964,12 @@ cmd_export() {
   dest="${dest:-./isopod-$name-export}"
   [ -e "$dest" ] && die "destination already exists: $dest"
   info "Copying $WORKSPACE out of the box to $dest ..."
-  box_scp "$name" -r "$(box_at)$WORKSPACE" "$dest"
+  # Stream the workspace out as a tar archive (preserves mtimes/modes/symlinks).
+  mkdir -p "$dest"
+  box_tar_out "$name" "$WORKSPACE" | tar -C "$dest" -xpf - || {
+    rm -rf "$dest"
+    die "export failed (is '$name' running? try: isopod start $name)"
+  }
   info "Done: $dest"
 }
 
@@ -1069,7 +1073,9 @@ BOXSH
   else
     # Target is not a git repo: drop a portable bundle for manual use — the one
     # artifact git-over-SSH can't produce. Stream it straight out of the box to
-    # stdout (no temp file, no cp), so it works under any runtime.
+    # stdout (no temp file, no cp), so it works under any runtime. `git bundle
+    # create -` (stdout) needs git >= 2.36 in the box; the default base has it,
+    # so this only matters for an unusually old custom --dockerfile base.
     local out="$target"
     [ "$out" = "." ] && out="./isopod-$name.bundle"
     [ -d "$out" ] && out="${out%/}/isopod-$name.bundle"
@@ -1537,8 +1543,10 @@ cmd_shell() {
   require_box "$name"
   # Interactive shell over SSH (-t for a tty), landing in the workspace. Like
   # every other box op, this goes through SSH so it enters the workload under
-  # any runtime — including a microVM, where the engine's exec would not.
-  exec box_ssh "$name" -t -- "cd '$WORKSPACE' 2>/dev/null; exec bash -l"
+  # any runtime — including a microVM, where the engine's exec would not. Plain
+  # `bash` (not `bash -l`) keeps the old non-login behavior: it sources ~/.bashrc,
+  # matching what `engine exec ... bash` did before.
+  exec box_ssh "$name" -t -- "cd '$WORKSPACE' 2>/dev/null; exec bash"
 }
 
 # Resolved IDE launch command (array, since Flatpak needs 'flatpak run <id>')
