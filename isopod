@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="1.1.0"
+ISOPOD_VERSION="1.2.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -47,6 +47,10 @@ DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
 IMAGE_LAYER_VERSION="2" # bump to force image rebuild when Dockerfile changes
 CONTAINER_USER="dev"
 WORKSPACE="/home/dev/workspace"
+# Default guest memory when a Tier 3 microVM runtime is active and the user gave
+# no --memory (a microVM boots a fixed-size guest; without this it would be
+# starved). Override with ISOPOD_MICROVM_MEMORY or an explicit --memory.
+MICROVM_DEFAULT_MEMORY="${ISOPOD_MICROVM_MEMORY:-2g}"
 
 # ---------------------------------------------------------------------------
 # small helpers
@@ -631,6 +635,48 @@ hardening_run_args() { # hardening_run_args <engine>
   fi
 }
 
+# The runtime isopod will run boxes under, resolved the same way as the box
+# flags: ISOPOD_RUNTIME wins, else the last `runtime`/`no-runtime` across the
+# shipped baseline and the user override. Echoes nothing when no runtime is set.
+active_runtime() {
+  if [ -n "${ISOPOD_RUNTIME:-}" ]; then
+    printf '%s' "$ISOPOD_RUNTIME"
+    return 0
+  fi
+  local f key val r=""
+  for f in "$HARDENING_CONF" "$USER_HARDENING_CONF"; do
+    [ -f "$f" ] || continue
+    while read -r key val _; do
+      case "$key" in
+        runtime) r="$val" ;;
+        no-runtime) r="" ;;
+      esac
+    done <"$f"
+  done
+  printf '%s' "$r"
+}
+
+# Tier of a runtime from the share/runtimes table: 2 (syscall sandbox) or 3
+# (microVM). Returns 1 (no output) when the runtime is unlisted or the table is
+# missing, so callers treat it as "tier unknown".
+runtime_tier() { # runtime_tier <name>
+  local want="$1" f="$ISOPOD_SHARE/runtimes" name tier
+  [ -n "$want" ] && [ -f "$f" ] || return 1
+  while read -r name tier _; do
+    case "$name" in '' | '#'*) continue ;; esac
+    [ "$name" = "$want" ] && {
+      printf '%s' "$tier"
+      return 0
+    }
+  done <"$f"
+  return 1
+}
+
+# True when the configured runtime is a Tier 3 microVM (its own guest kernel).
+is_microvm_runtime() {
+  [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
+}
+
 # Assemble the `$ENGINE run` argument list for a box into the global RUN_ARGS
 # array (bash can't return arrays). Shared by create and reconfigure so the two
 # can't drift. Hardening masks are read fresh from the profile each time.
@@ -815,6 +861,13 @@ cmd_create() {
   # publish sshd on a loopback-only host port; random free port unless --port
   local publish="127.0.0.1::22"
   [ -n "$port" ] && publish="127.0.0.1:$port:22"
+
+  # A Tier 3 microVM runtime boots a fixed-size guest; if the user gave no
+  # --memory, size it so the guest isn't starved.
+  if [ -z "$memory" ] && is_microvm_runtime; then
+    memory="$MICROVM_DEFAULT_MEMORY"
+    info "microVM runtime active — defaulting --memory to $memory (override with --memory)"
+  fi
 
   # Passwordless sudo on by default (1), off with --no-sudo (0). The box
   # entrypoint applies this from the run env; see build_run_args.
@@ -1666,22 +1719,37 @@ cmd_doctor() {
     if find_ide_bin "$app"; then printf '  [ok]      IDE: %-9s (%s)\n' "$app" "${IDE_CMD[*]}"; fi
   done
 
-  # Anti-fingerprinting profile
+  # Anti-fingerprinting profile + sandboxed runtime (Tier 2 syscall sandbox /
+  # Tier 3 microVM).
   if [ -f "$HARDENING_CONF" ]; then
     printf '  [ok]      hardening profile (%s)\n' "$HARDENING_CONF"
-    local rt
-    rt="${ISOPOD_RUNTIME:-$(awk '$1=="runtime"{print $2}' "$HARDENING_CONF" 2>/dev/null | tail -1)}"
+    local rt tier label
+    rt="$(active_runtime)"
     if [ -n "$rt" ]; then
+      tier="$(runtime_tier "$rt" 2>/dev/null || true)"
+      case "$tier" in
+        2) label="Tier 2 (syscall sandbox, shared kernel)" ;;
+        3) label="Tier 3 (microVM, separate kernel)" ;;
+        *) label="custom runtime (tier unknown)" ;;
+      esac
       if have "$rt" || { have podman && podman info 2>/dev/null | grep -q "$rt"; }; then
-        printf '  [ok]      Tier 2 runtime: %s\n' "$rt"
+        printf '  [ok]      sandboxed runtime: %s — %s\n' "$rt" "$label"
       else
-        printf '  [warn]    Tier 2 runtime "%s" not found on host — install/register it or boxes will fail to start\n' "$rt"
+        printf '  [warn]    runtime "%s" not found on host — install/register it or boxes will fail to start\n' "$rt"
+      fi
+      if [ "$tier" = 3 ] && [ ! -e /dev/kvm ]; then
+        printf '  [warn]    /dev/kvm absent — the microVM runtime "%s" needs it (KVM / nested virt unavailable here)\n' "$rt"
       fi
     else
-      printf '  [--]      Tier 2 runtime: off (Tier 1 masks active; see security/hardening.conf)\n'
+      printf '  [--]      sandboxed runtime: off (Tier 1 masks active; see security/hardening.conf)\n'
     fi
   else
     printf '  [warn]    hardening profile missing (%s) — boxes start WITHOUT fingerprint masks\n' "$HARDENING_CONF"
+  fi
+  if [ -e /dev/kvm ]; then
+    printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes (kata, krun) available\n'
+  else
+    printf '  [--]      /dev/kvm absent — Tier 3 microVM runtimes unavailable (Tier 1/2 still work)\n'
   fi
   have podman || have docker || {
     printf '\nInstall podman (recommended) or docker.\n'

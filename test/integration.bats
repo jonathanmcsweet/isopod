@@ -149,6 +149,29 @@ EOF
   ISOPOD_RUNTIME=runsc run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   assert_stub_called 'podman run .*--runtime runsc'
+  # Tier 2 shares the host kernel — no microVM memory default.
+  assert_stub_not_called 'podman run .*--memory'
+}
+
+@test "create defaults --memory for a Tier 3 microVM runtime" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called 'podman run .*--runtime krun'
+  assert_stub_called 'podman run .*--memory 2g'
+}
+
+@test "explicit --memory overrides the microVM default" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --memory 8g --color teal
+  assert_success
+  assert_stub_called 'podman run .*--memory 8g'
+  assert_stub_not_called 'podman run .*--memory 2g'
+}
+
+@test "ISOPOD_MICROVM_MEMORY overrides the microVM memory default" {
+  ISOPOD_MICROVM_MEMORY=4g ISOPOD_RUNTIME=krun \
+    run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called 'podman run .*--memory 4g'
 }
 
 @test "create builds the base image from share/Dockerfile with build args" {

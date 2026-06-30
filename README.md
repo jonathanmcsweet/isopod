@@ -123,7 +123,9 @@ Even with every mask on, a **plain shared-kernel container cannot hide these** �
 - **Host boot epoch / boot id** — `/proc/stat`'s `btime` and `/proc/sys/kernel/random/boot_id` are a single value per host boot, identical in every container on that host. (`btime` is left unmasked because masking `/proc/stat` breaks `top`/`htop` and most monitoring.)
 - **Timing side channels** — `RDTSC` and clock-skew fingerprints.
 
-Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a VM; isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
+A **Tier 3 microVM runtime** (Kata or krun) does close these — the box runs on its own guest kernel behind a hardware boundary, so `uname`, boot id, and the timing channels reflect the VM, not the host. See [docs/opt-in-security.md](docs/opt-in-security.md#microvm-runtimes-kata-krun--tier-3).
+
+Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a Tier 3 microVM runtime (or a full VM); isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
 ## Requirements
 
 - Linux (primary), macOS (via `podman machine` or Docker Desktop), or Windows (via WSL2 — see [docs/installation-and-platform.md](docs/installation-and-platform.md#windows))
@@ -186,7 +188,8 @@ Two ways out, for two situations:
 `ISOPOD_BUILD_ARGS` — extra args for `build` (e.g. `--network=host`, 
 `--build-arg http_proxy=...` behind corporate proxies). 
 `ISOPOD_RUN_ARGS` — extra args for `run` (e.g. `--network=none` for an offline container, `--userns=keep-id`, custom DNS).
-`ISOPOD_RUNTIME` — Tier 2 runtime (e.g. `runsc`), overriding the hardening profile. 
+`ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata`, `krun`; needs `/dev/kvm`).
+`ISOPOD_MICROVM_MEMORY` — default guest memory when a Tier 3 microVM runtime is active and no `--memory` is given (default `2g`). 
 `ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
 
 ## Customizing the container
@@ -267,7 +270,7 @@ More detailed docs live in [`docs/`](docs/):
 - **[Development guide](docs/development.md)** — dev setup, the ShellCheck + shfmt pre-commit hooks, formatting conventions, and running the tests.
 - **[Installation, platform notes & state layout](docs/installation-and-platform.md)** — manual install steps per platform, window colors, platform-specific notes, and how on-disk state is laid out.
 - **[Identity remap](docs/remap.md)** — rewriting the git identity on commits made inside a container after `fetch`, and how the new identity is resolved.
-- **[Opt-in security features](docs/opt-in-security.md)** — enabling the gVisor (`runsc`) syscall-virtualizing runtime.
+- **[Opt-in security features](docs/opt-in-security.md)** — enabling the gVisor (`runsc`) syscall-virtualizing runtime, or a Tier 3 microVM runtime (Kata, krun).
 - **[Releasing isopod](docs/RELEASING.md)** — how the version gate and Homebrew tap automation work.
 - **[VSCodium host-isolation audit](docs/isopod-vscodium-host-isolation-audit.md)** — code-level audit of what (if anything) crosses from host into the container.
 
