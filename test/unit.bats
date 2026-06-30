@@ -167,3 +167,39 @@ teardown() { isopod_teardown_env; }
   [ "$LOCK_DIR" = "$ISOPOD_CONFIG_DIR/.lock" ]
   release_lock
 }
+
+# ---- hardening_run_args (baseline + user override layering) -------------------
+@test "hardening_run_args uses the shipped baseline when there is no override" {
+  run hardening_run_args podman
+  assert_success
+  assert_output --partial "/proc/cmdline"
+  assert_output --partial "/sys/class/net"
+  refute_output --partial "--runtime"
+}
+
+@test "hardening_run_args layers a user override: unmask drops a baseline mask" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'unmask /sys/class/net\n' > "$ISOPOD_CONFIG_DIR/hardening.conf"
+  run hardening_run_args podman
+  assert_success
+  refute_output --partial "/sys/class/net"   # dropped by the override
+  assert_output --partial "/proc/cmdline"     # other baseline masks remain
+}
+
+@test "hardening_run_args layers a user override: runtime turns on Tier 2" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'runtime runsc\n' > "$ISOPOD_CONFIG_DIR/hardening.conf"
+  run hardening_run_args podman
+  assert_success
+  assert_output --partial "--runtime"
+  assert_output --partial "runsc"
+}
+
+@test "hardening_run_args: a user mask: directive adds to the baseline" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'mask /sys/class/power_supply\n' > "$ISOPOD_CONFIG_DIR/hardening.conf"
+  run hardening_run_args podman
+  assert_success
+  assert_output --partial "/sys/class/power_supply"
+  assert_output --partial "/proc/cmdline"
+}

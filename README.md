@@ -86,7 +86,7 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 ## Fingerprint hardening
 
-A container shares the host's kernel and hardware, so by default a process inside can read a surprising amount about the host through `/proc` and `/sys` — far more than its own hostname. Isopod ships a hardening profile that closes the file-based leaks and supports an optional sandboxed runtime for the rest. It's all configured in one declarative file, **[`security/hardening.conf`](security/hardening.conf)** that you can edit.
+A container shares the host's kernel and hardware, so by default a process inside can read a surprising amount about the host through `/proc` and `/sys` — far more than its own hostname. Isopod ships a hardening profile that closes the file-based leaks and supports an optional sandboxed runtime for the rest. The shipped defaults live in **[`security/hardening.conf`](security/hardening.conf)** — a read-only baseline you don't edit (package upgrades replace it). To customize, drop an override file at **`~/.config/isopod/hardening.conf`** that *layers* on top of the baseline with `mask` / `unmask` / `runtime` / `no-runtime` directives (so you keep getting new masks on upgrade), or toggle the runtime per-run with `ISOPOD_RUNTIME=runsc`.
 
 ### What's implemented
 
@@ -184,8 +184,8 @@ Two ways out, for two situations:
 `ISOPOD_BUILD_ARGS` — extra args for `build` (e.g. `--network=host`, 
 `--build-arg http_proxy=...` behind corporate proxies). 
 `ISOPOD_RUN_ARGS` — extra args for `run` (e.g. `--network=none` for an offline container, `--userns=keep-id`, custom DNS).
-`ISOPOD_RUNTIME` — (e.g. `runsc`), overriding `security/hardening.conf`. 
-`ISOPOD_HARDENING_CONF` — path to an alternate [fingerprint-hardening profile](#fingerprint-hardening).
+`ISOPOD_RUNTIME` — Tier 2 runtime (e.g. `runsc`), overriding the hardening profile. 
+`ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
 
 ## Customizing the container
 

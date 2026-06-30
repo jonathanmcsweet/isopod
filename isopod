@@ -29,14 +29,17 @@ ISOPOD_SHARE="${ISOPOD_SHARE:-$ISOPOD_DIR/share}"
 # The sandbox base image, defined as a standard Dockerfile (built by docker and
 # podman alike). Override the path with ISOPOD_DOCKERFILE.
 ISOPOD_DOCKERFILE="${ISOPOD_DOCKERFILE:-$ISOPOD_SHARE/Dockerfile}"
-# Declarative container-hardening profile.
-# Settings live in this file, not inline here; override path with ISOPOD_HARDENING_CONF.
+# Shipped, read-only hardening baseline (do not edit — package upgrades replace
+# it). Advanced: point at a different baseline with ISOPOD_HARDENING_CONF.
 HARDENING_CONF="${ISOPOD_HARDENING_CONF:-$ISOPOD_DIR/security/hardening.conf}"
 
 CONFIG_DIR="${ISOPOD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/isopod}"
 BOXES_DIR="$CONFIG_DIR/boxes"
 SSH_INCLUDE_FILE="$CONFIG_DIR/ssh_config"
 USER_SSH_CONFIG="$HOME/.ssh/config"
+# Optional user override, layered on top of the baseline (mask/unmask/runtime/
+# no-runtime). Lives in the user's config dir so it survives package upgrades.
+USER_HARDENING_CONF="$CONFIG_DIR/hardening.conf"
 DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
 IMAGE_LAYER_VERSION="1" # bump to force image rebuild when Dockerfile changes
 CONTAINER_USER="dev"
@@ -433,36 +436,58 @@ apply_color() { # apply_color <name> <hexcolor>
     "$(ctr_name "$name")" python3 - <"$script"
 }
 
-# Translate the declarative hardening profile (security/hardening.conf) into
-# `$ENGINE run` flags, printed one per line for the caller to read into an array.
-# Anti-fingerprinting(mask host-revealing /proc and /sys paths) +
-# (run under a sandboxed runtime like gVisor). The two engines mask differently:
+# Translate the hardening profile into `$ENGINE run` flags, printed one per line
+# for the caller to read into an array. Anti-fingerprinting (mask host-revealing
+# /proc and /sys paths) + an optional sandboxed runtime like gVisor.
+#
+# Layered: the shipped baseline (HARDENING_CONF) is read first, then the user's
+# own overrides (USER_HARDENING_CONF, in their config dir) on top — so a tweak
+# never silently drops the baseline, and upgrades keep delivering new masks.
+# Directives: `mask <path> [file]`, `unmask <path>` (drop a baseline mask),
+# `runtime <name>`, `no-runtime`.
+#
+# The two engines mask differently:
 #   podman — a single `--security-opt mask=a:b:c` covers both files and dirs.
 #   docker — no mask flag, so dirs get an empty `--tmpfs` and files a `/dev/null`
 #            bind mount.
-# Missing profile is non-fatal: the box is still created, just without the masks.
+# Missing baseline is non-fatal: the box is still created, just without masks.
 hardening_run_args() { # hardening_run_args <engine>
-  local engine="$1" conf="$HARDENING_CONF"
-  if [ ! -f "$conf" ]; then
-    warn "hardening profile not found ($conf); creating box without fingerprint masks"
+  local engine="$1"
+  local -a conf_files=()
+  [ -f "$HARDENING_CONF" ] && conf_files+=("$HARDENING_CONF")
+  [ -f "$USER_HARDENING_CONF" ] && conf_files+=("$USER_HARDENING_CONF")
+  if [ "${#conf_files[@]}" -eq 0 ]; then
+    warn "hardening profile not found ($HARDENING_CONF); creating box without fingerprint masks"
     return 0
   fi
 
-  local runtime="" key path kind line
-  local -a masks=() fmasks=()
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%%#*}"                       # strip comments
-    read -r key path kind <<<"$line" || true # whitespace-split + trim
-    [ -n "${key:-}" ] || continue
-    case "$key" in
-      runtime) runtime="${path:-}" ;;
-      mask)
-        [ -n "${path:-}" ] || continue
-        if [ "${kind:-}" = "file" ]; then fmasks+=("$path"); else masks+=("$path"); fi
-        ;;
-      *) warn "hardening profile: ignoring unknown directive '$key'" ;;
-    esac
-  done <"$conf"
+  local runtime="" key path kind line conf m
+  local -a masks=() fmasks=() keep=()
+  for conf in "${conf_files[@]}"; do
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%#*}"                       # strip comments
+      read -r key path kind <<<"$line" || true # whitespace-split + trim
+      [ -n "${key:-}" ] || continue
+      case "$key" in
+        runtime) runtime="${path:-}" ;;
+        no-runtime) runtime="" ;;
+        mask)
+          [ -n "${path:-}" ] || continue
+          if [ "${kind:-}" = "file" ]; then fmasks+=("$path"); else masks+=("$path"); fi
+          ;;
+        unmask) # drop a baseline mask (by path), from either dir or file masks
+          [ -n "${path:-}" ] || continue
+          keep=()
+          for m in "${masks[@]:-}"; do [ -n "$m" ] && [ "$m" != "$path" ] && keep+=("$m"); done
+          masks=("${keep[@]:-}")
+          keep=()
+          for m in "${fmasks[@]:-}"; do [ -n "$m" ] && [ "$m" != "$path" ] && keep+=("$m"); done
+          fmasks=("${keep[@]:-}")
+          ;;
+        *) warn "hardening profile: ignoring unknown directive '$key'" ;;
+      esac
+    done <"$conf"
+  done
 
   # env var wins over the profile so it can be toggled per invocation.
   runtime="${ISOPOD_RUNTIME:-$runtime}"
