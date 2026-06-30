@@ -152,7 +152,7 @@ Two ways out, for two situations:
   isopod fetch myproj        # target defaults to the current directory
   ```
 
-  Under the hood it `git bundle`s the container's repo, copies that single file out, and `git fetch`es it in — so the container's branches appear as **remote-tracking refs named `<name>/*`** without touching your local branches. Check one out with:
+  Under the hood it `git fetch`es straight from the container over its SSH remote (the same dedicated key and pinned host key isopod already set up) — so the container's branches appear as **remote-tracking refs named `<name>/*`** without touching your local branches. Check one out with:
 
   ```sh
   git switch -c fingerprint-hardening myproj/fingerprint-hardening
@@ -189,7 +189,33 @@ Two ways out, for two situations:
 
 ## Customizing the container
 
-The default image is `debian:bookworm-slim` plus sshd, git, curl, python3, and sudo (the in-container user has passwordless sudo by default — lets agents `apt install` toolchains; pass `--no-sudo` to disable). Use `--image ubuntu:24.04` or any Debian/Ubuntu-based image to change the base. Install language toolchains either interactively (`isopod shell`) or bake your own base image and pass it with `--image`.
+The base image is defined by a standard Dockerfile, [`share/Dockerfile`](share/Dockerfile) — built identically by `docker build` and `podman build`. On top of whatever base you choose it adds sshd, git, common CLI tooling, the unprivileged in-container user, and passwordless sudo (drop sudo with `--no-sudo`). There are two ways to shape it:
+
+- **`--image <ref>`** swaps the base. Any Debian/Ubuntu-based image works (`--image ubuntu:24.04`), including one you built yourself from a Dockerfile and want to reuse across boxes.
+- **`--dockerfile <path>`** is the project-provisioning path: isopod builds your Dockerfile first, then layers sshd/git on top. This is how you bake in a toolchain (a JDK, Node, etc.) the industry-standard way, rather than a bespoke config format.
+
+```dockerfile
+# Dockerfile  — your project's toolchain
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends default-jdk maven
+```
+
+```sh
+isopod create api --repo https://github.com/me/api --dockerfile ./Dockerfile
+```
+
+Because the image is built before the container exists (and `--repo` clones *inside* the box afterward), the Dockerfile is a host-side file you point at — not something read from the cloned repo. For quick one-offs you can still install toolchains interactively with `isopod shell`.
+
+### Reaching a server in the box (port forwarding)
+
+A dev server inside the box (say `pnpm run start` on `:3000`) isn't on your host by default. Publish it with **`--expose`**, which maps a container port to a `127.0.0.1` host port — the standard `podman/docker run -p`, loopback-only:
+
+```sh
+isopod create web --repo <url> --expose 3001:3000   # box :3000 -> localhost:3001
+isopod create web --repo <url> --expose 8080         # same port on both sides
+```
+
+Port mappings are fixed at create time (engine port mappings can't be added to a running container) and are restored across stop/start. `isopod info <name>` lists them. In the VSCodium Remote-SSH window, ports a server opens are also auto-forwarded by the IDE.
 
 ## FAQ
 

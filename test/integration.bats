@@ -147,6 +147,62 @@ EOF
   assert_stub_called 'podman run .*--runtime runsc'
 }
 
+@test "create builds the base image from share/Dockerfile with build args" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called "podman build .*--build-arg ISOPOD_BASE="
+  assert_stub_called "podman build .*--build-arg ISOPOD_USER=dev"
+  assert_stub_called "podman build .*-f $ISOPOD_ROOT/share/Dockerfile"
+}
+
+# ---- --expose ----------------------------------------------------------------
+@test "create --expose publishes ports on loopback only" {
+  run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --expose 8080 --color teal
+  assert_success
+  assert_stub_called 'podman run .*-p 127\.0\.0\.1:3001:3000'
+  assert_stub_called 'podman run .*-p 127\.0\.0\.1:8080:8080'
+  refute_output --partial "0.0.0.0"
+  run grep '^expose=3001:3000,8080:8080$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+@test "create rejects an out-of-range --expose port" {
+  run "$ISOPOD_ROOT/isopod" create demo --expose 70000 --color teal
+  assert_failure
+  assert_output --partial "invalid --expose"
+}
+
+@test "create rejects a non-numeric --expose spec" {
+  run "$ISOPOD_ROOT/isopod" create demo --expose web:3000 --color teal
+  assert_failure
+  assert_output --partial "invalid --expose"
+}
+
+# ---- --dockerfile ------------------------------------------------------------
+@test "create --dockerfile builds the user image and layers the base on it" {
+  printf 'FROM debian:bookworm-slim\nRUN true\n' > "$TEST_TMP/Dockerfile"
+  run "$ISOPOD_ROOT/isopod" create demo --dockerfile "$TEST_TMP/Dockerfile" --color teal
+  assert_success
+  # the project's Dockerfile is built into an isopod-user image...
+  assert_stub_called "podman build .*-f $TEST_TMP/Dockerfile"
+  assert_stub_called "podman build .*-t localhost/isopod-user:"
+  # ...which then becomes the base passed to the sandbox image build
+  assert_stub_called "podman build .*--build-arg ISOPOD_BASE=localhost/isopod-user:"
+}
+
+@test "create refuses both --image and --dockerfile" {
+  printf 'FROM debian\n' > "$TEST_TMP/Dockerfile"
+  run "$ISOPOD_ROOT/isopod" create demo --image ubuntu:24.04 --dockerfile "$TEST_TMP/Dockerfile"
+  assert_failure
+  assert_output --partial "either --image or --dockerfile"
+}
+
+@test "create rejects a --dockerfile that does not exist" {
+  run "$ISOPOD_ROOT/isopod" create demo --dockerfile /no/such/Dockerfile
+  assert_failure
+  assert_output --partial "--dockerfile not found"
+}
+
 @test "fetch requires a box name" {
   run "$ISOPOD_ROOT/isopod" fetch
   assert_failure

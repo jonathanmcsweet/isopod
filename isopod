@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="0.8.0"
+ISOPOD_VERSION="1.0.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -26,6 +26,9 @@ ISOPOD_LIB="$ISOPOD_DIR/lib"
 # Long user-facing text and data tables live as files under share/ rather than
 # inline heredocs;
 ISOPOD_SHARE="${ISOPOD_SHARE:-$ISOPOD_DIR/share}"
+# The sandbox base image, defined as a standard Dockerfile (built by docker and
+# podman alike). Override the path with ISOPOD_DOCKERFILE.
+ISOPOD_DOCKERFILE="${ISOPOD_DOCKERFILE:-$ISOPOD_SHARE/Dockerfile}"
 # Declarative container-hardening profile.
 # Settings live in this file, not inline here; override path with ISOPOD_HARDENING_CONF.
 HARDENING_CONF="${ISOPOD_HARDENING_CONF:-$ISOPOD_DIR/security/hardening.conf}"
@@ -172,90 +175,83 @@ valid_name() {
   [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,40}$ ]]
 }
 
+valid_port() { # valid_port <n> -> true for a 1-65535 TCP port number
+  case "$1" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
 # ---------------------------------------------------------------------------
-# image build (embedded Dockerfile)
+# image build (share/Dockerfile)
 # ---------------------------------------------------------------------------
-# Render the Dockerfile for a base image to stdout. This is the single source of
-# truth for the image: both the build and the cache-key hash derive from it, so
-# any edit here automatically invalidates the cached image (no manual version
-# bump needed — IMAGE_LAYER_VERSION remains only as a force-rebuild override).
-render_dockerfile() { # render_dockerfile <base-image>
-  local base="$1"
-  cat <<DOCKERFILE
-FROM $base
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \\
- && apt-get install -y --no-install-recommends \\
-      openssh-server sudo git curl wget ca-certificates \\
-      python3 nano less procps tar gzip unzip xz-utils locales \\
- && rm -rf /var/lib/apt/lists/* \\
- && mkdir -p /run/sshd
-# Create the unprivileged in-box user (skip if base image already has it)
-RUN id -u $CONTAINER_USER >/dev/null 2>&1 || useradd -m -s /bin/bash $CONTAINER_USER
-# Lock down sshd: key-only auth, single user, no root login
-RUN printf '%s\\n' \\
-      'PasswordAuthentication no' \\
-      'KbdInteractiveAuthentication no' \\
-      'PermitRootLogin no' \\
-      'AllowUsers $CONTAINER_USER' \\
-      'X11Forwarding no' \\
-      'AllowAgentForwarding no' \\
-      'ClientAliveInterval 60' \\
-      > /etc/ssh/sshd_config.d/90-isopod.conf \\
- && grep -q 'Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config \\
-      || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
-# Entrypoint: regenerate host keys on first boot so every box is unique,
-# then run sshd in the foreground as PID 1.
-RUN printf '%s\\n' \\
-      '#!/bin/sh' \\
-      'if [ ! -f /etc/ssh/.isopod-host-keys ]; then' \\
-      '  rm -f /etc/ssh/ssh_host_*' \\
-      '  ssh-keygen -A >/dev/null' \\
-      '  touch /etc/ssh/.isopod-host-keys' \\
-      'fi' \\
-      'mkdir -p /run/sshd' \\
-      'exec /usr/sbin/sshd -D -e' \\
-      > /usr/local/bin/isopod-entrypoint \\
- && chmod +x /usr/local/bin/isopod-entrypoint
-EXPOSE 22
-CMD ["/usr/local/bin/isopod-entrypoint"]
-DOCKERFILE
+# The image is defined by a standard Dockerfile (share/Dockerfile), built the
+# same way by docker and podman. The base image and in-box user are passed as
+# build args. The cache key hashes the Dockerfile content + those args, so an
+# edit to the Dockerfile forces a one-time rebuild on its own (IMAGE_LAYER_VERSION
+# remains only as a manual force-rebuild override).
+image_exists() { # image_exists <tag>
+  "$ENGINE" image exists "$1" 2>/dev/null || "$ENGINE" image inspect "$1" >/dev/null 2>&1
 }
 
 image_tag_for() { # image_tag_for <base-image>
-  # Tag tracks the actual Dockerfile content (+ the manual override knob), so an
-  # edit to render_dockerfile yields a new tag and forces a one-time rebuild.
+  [ -f "$ISOPOD_DOCKERFILE" ] || die "missing Dockerfile: $ISOPOD_DOCKERFILE"
   local hash
   hash=$({
-    render_dockerfile "$1"
-    printf '%s' "$IMAGE_LAYER_VERSION"
+    cat "$ISOPOD_DOCKERFILE"
+    printf '%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION"
   } | cksum | awk '{print $1}')
   printf 'localhost/isopod-base:%s' "$hash"
+}
+
+# ISOPOD_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
+# --build-arg http_proxy=...) for proxied or unusual environments. Emits one
+# token per line (nothing when unset) for the caller to read into an array.
+engine_build_extra() {
+  [ -n "${ISOPOD_BUILD_ARGS:-}" ] || return 0
+  # shellcheck disable=SC2086
+  printf '%s\n' $ISOPOD_BUILD_ARGS
 }
 
 build_image() { # build_image <base-image> -> echoes tag
   local base="$1" tag
   tag=$(image_tag_for "$base")
-  if "$ENGINE" image exists "$tag" 2>/dev/null || "$ENGINE" image inspect "$tag" >/dev/null 2>&1; then
+  if image_exists "$tag"; then
     printf '%s' "$tag"
     return 0
   fi
   info "Building sandbox base image from $base (one-time)..." >&2
-  # ISOPOD_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
-  # --build-arg http_proxy=...) for proxied or unusual environments.
   local -a extra_build=()
-  # shellcheck disable=SC2206
-  [ -n "${ISOPOD_BUILD_ARGS:-}" ] && extra_build=($ISOPOD_BUILD_ARGS)
-  # Write the Dockerfile to a temp file rather than piping it in: a piped
-  # heredoc breaks under `set -o pipefail` if the engine exits early (SIGPIPE).
-  local dockerfile
-  dockerfile=$(mktemp "${TMPDIR:-/tmp}/isopod-dockerfile-XXXXXX")
-  render_dockerfile "$base" >"$dockerfile"
-  if ! "$ENGINE" build "${extra_build[@]}" -t "$tag" -f "$dockerfile" . >&2; then
-    rm -f "$dockerfile"
+  mapfile -t extra_build < <(engine_build_extra)
+  # No COPY in the base Dockerfile, so build from an empty context.
+  local ctx
+  ctx=$(mktemp -d "${TMPDIR:-/tmp}/isopod-ctx-XXXXXX")
+  if ! "$ENGINE" build "${extra_build[@]}" \
+    --build-arg "ISOPOD_BASE=$base" --build-arg "ISOPOD_USER=$CONTAINER_USER" \
+    -t "$tag" -f "$ISOPOD_DOCKERFILE" "$ctx" >&2; then
+    rm -rf "$ctx"
     die "image build failed (see output above)"
   fi
-  rm -f "$dockerfile"
+  rm -rf "$ctx"
+  printf '%s' "$tag"
+}
+
+# Build a user-provided Dockerfile (from --dockerfile) into an image, then echo
+# its tag so it can be used as the base the sandbox layers sshd/git onto — the
+# same role as --image, but you hand over a Dockerfile and isopod builds it.
+build_user_image() { # build_user_image <dockerfile-path> -> echoes tag
+  local df="$1" ctx tag
+  [ -f "$df" ] || die "--dockerfile not found: $df"
+  ctx=$(dirname "$df")
+  tag="localhost/isopod-user:$(cksum <"$df" | awk '{print $1}')"
+  if image_exists "$tag"; then
+    printf '%s' "$tag"
+    return 0
+  fi
+  info "Building image from $df (one-time)..." >&2
+  local -a extra_build=()
+  mapfile -t extra_build < <(engine_build_extra)
+  if ! "$ENGINE" build "${extra_build[@]}" -t "$tag" -f "$df" "$ctx" >&2; then
+    die "build of $df failed (see output above)"
+  fi
   printf '%s' "$tag"
 }
 
@@ -490,8 +486,8 @@ hardening_run_args() { # hardening_run_args <engine>
 # ---------------------------------------------------------------------------
 cmd_create() {
   local name="" repo="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
-  local memory="" cpus="" no_sudo=0 engine_opt=""
-  local -a copies=()
+  local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
+  local -a copies=() exposes=()
 
   while [ $# -gt 0 ]; do
     # accept --opt=value as an alias for --opt value (e.g. --copy=path)
@@ -517,6 +513,15 @@ cmd_create() {
         ;;
       --image)
         base="$2"
+        image_opt=1
+        shift 2
+        ;;
+      --dockerfile)
+        dockerfile_opt="$2"
+        shift 2
+        ;;
+      --expose)
+        exposes+=("$2")
         shift 2
         ;;
       --engine)
@@ -561,12 +566,35 @@ cmd_create() {
   if [ -n "$repo" ] && [ "${#copies[@]}" -gt 0 ]; then
     die "use either --repo or --copy, not both (you can 'isopod copy-in' later)"
   fi
+  if [ -n "$dockerfile_opt" ] && [ "$image_opt" -eq 1 ]; then
+    die "use either --image or --dockerfile, not both"
+  fi
+  [ -n "$dockerfile_opt" ] && [ ! -f "$dockerfile_opt" ] &&
+    die "--dockerfile not found: $dockerfile_opt"
 
   # validate copy paths up front
   local p
   for p in "${copies[@]:-}"; do
     [ -z "$p" ] && continue
     [ -e "$p" ] || die "--copy path does not exist: $p"
+  done
+
+  # Resolve --expose specs into loopback-only port publishings. A spec is either
+  # 'PORT' (host port = container port) or 'HOSTPORT:CONTAINERPORT'. Bound to
+  # 127.0.0.1 only, matching the SSH binding — a box never listens on all host
+  # interfaces unless you opt in with ISOPOD_RUN_ARGS.
+  local -a expose_args=() expose_specs=()
+  local spec host_p ctr_p
+  for spec in "${exposes[@]:-}"; do
+    [ -z "$spec" ] && continue
+    case "$spec" in
+      *:*) host_p="${spec%%:*}" ctr_p="${spec##*:}" ;;
+      *) host_p="$spec" ctr_p="$spec" ;;
+    esac
+    valid_port "$host_p" && valid_port "$ctr_p" ||
+      die "invalid --expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
+    expose_args+=(-p "127.0.0.1:$host_p:$ctr_p")
+    expose_specs+=("$host_p:$ctr_p")
   done
 
   # resolve color
@@ -580,6 +608,14 @@ cmd_create() {
   fi
 
   detect_engine "$engine_opt"
+
+  # --dockerfile: build the project's Dockerfile first and use it as the base the
+  # sandbox layers sshd/git onto (same role as --image, you just hand over a
+  # Dockerfile). Done before the rollback is armed so a build error leaves no box.
+  if [ -n "$dockerfile_opt" ]; then
+    base=$(build_user_image "$dockerfile_opt") || die "could not build --dockerfile image"
+  fi
+
   mkdir -p "$(box_dir "$name")"
 
   # From here a partial box exists on disk; arm rollback so any failure below
@@ -606,6 +642,8 @@ cmd_create() {
   local -a hard_args=()
   mapfile -t hard_args < <(hardening_run_args "$ENGINE")
   [ "${#hard_args[@]}" -gt 0 ] && run_args+=("${hard_args[@]}")
+  # Loopback-only app port publishings from --expose.
+  [ "${#expose_args[@]}" -gt 0 ] && run_args+=("${expose_args[@]}")
   # ISOPOD_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
   # shellcheck disable=SC2206
   [ -n "${ISOPOD_RUN_ARGS:-}" ] && run_args+=($ISOPOD_RUN_ARGS)
@@ -623,6 +661,10 @@ cmd_create() {
     printf 'color=%s\n' "$hex"
     printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'port=%s\n' "$hostport"
+    printf 'expose=%s\n' "$(
+      IFS=,
+      printf '%s' "${expose_specs[*]:-}"
+    )"
   } >"$(box_dir "$name")/meta"
 
   # sudo policy + authorized key, injected at runtime (root inside the box
@@ -709,10 +751,12 @@ cmd_export() {
   info "Done: $dest"
 }
 
-# Pull the box's git history into a host repo without copying the working tree:
-# bundle the repo inside the box, copy the single bundle file out, and `git fetch`
-# it into the target repo as remote-tracking branches named <name>/*. This is the
-# git-native counterpart to `isopod export` — clean history, no file merges.
+# Pull the box's git history into a host repo. Every box is already a git SSH
+# remote (dedicated key, pinned host key, loopback port), so for a git target we
+# just `git fetch` straight from it into <name>/* tracking refs — no bundle, no
+# temp files. For a non-git target we fall back to a portable .bundle file, the
+# one thing plain git-over-SSH can't produce. The git-native counterpart to
+# `isopod export` — clean history, no file merges.
 cmd_fetch() {
   local name="" target="" inbox_path=""
   while [ $# -gt 0 ]; do
@@ -744,6 +788,8 @@ cmd_fetch() {
   require_box "$name"
   have git || die "git is required on the host for 'isopod fetch'"
   detect_engine "$(meta_get "$name" engine || true)"
+  acquire_lock # refresh_port may rewrite the shared ssh_config
+  refresh_port "$name"
   target="${target:-.}"
   local ctr
   ctr=$(ctr_name "$name")
@@ -765,39 +811,41 @@ cmd_fetch() {
       die "no git repo found in the box under $WORKSPACE — pass --path <in-box-repo>"
   fi
 
-  local bundle_box="/tmp/isopod-$name.bundle"
-  info "Bundling $repo inside the box..."
-  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null ||
-    die "git bundle failed in the box (does $repo have any commits?)"
-
   if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    # Target is a git repo: fetch the box's branches in as <name>/* tracking refs.
-    local top tmp
+    # Target is a git repo: fetch straight from the box over SSH into <name>/*.
+    # The repo-detection exec above already proved the box is up, so re-pin its
+    # host key for the current port — keeps known_hosts valid if it changed ports.
+    local top port key kh
+    scan_host_key "$name" >/dev/null 2>&1 || true
     top=$(git -C "$target" rev-parse --show-toplevel)
-    tmp=$(mktemp "${TMPDIR:-/tmp}/isopod-${name}-XXXXXX")
-    "$ENGINE" cp "$ctr:$bundle_box" "$tmp"
-    "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
-    info "Fetching history into $top as '$name/*'..."
+    port=$(meta_get "$name" port)
+    key="$(box_dir "$name")/id_ed25519"
+    kh="$(box_dir "$name")/known_hosts"
+    info "Fetching history into $top as '$name/*' (over SSH)..."
 
     # Force-update the box's tracking refs (leading '+'), exactly as a normal
     # remote's '+refs/heads/*:refs/remotes/origin/*' does. Without it, a re-fetch
     # after the box's history was rewritten — e.g. by 'isopod remap', which gives
     # commits new SHAs — is rejected as non-fast-forward. These refs are a mirror
     # namespace isopod owns; the host's own branches (refs/heads/*) are untouched.
-    if ! git -C "$target" fetch --no-tags "$tmp" "+refs/heads/*:refs/remotes/$name/*"; then
-      rm -f "$tmp"
-      die "git fetch from the bundle failed"
-    fi
-    rm -f "$tmp"
+    # GIT_SSH_COMMAND pins the box's key/port/host key, mirroring box_ssh.
+    GIT_SSH_COMMAND="ssh -p $port -i '$key' -o IdentitiesOnly=yes -o UserKnownHostsFile='$kh' -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no" \
+      git -C "$target" fetch --no-tags "$CONTAINER_USER@127.0.0.1:$repo" \
+      "+refs/heads/*:refs/remotes/$name/*" ||
+      die "git fetch from the box over SSH failed (is '$name' running? try: isopod start $name)"
     info "Done. Box branches are now available as:"
     git -C "$target" branch -r --list "$name/*" | sed 's/^/    /'
     printf '\nCheck one out with:\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
   else
-    # Target is not a git repo: drop the bundle file for manual use.
-    local out="$target"
+    # Target is not a git repo: drop a portable bundle for manual use — the one
+    # artifact git-over-SSH can't produce, so this path still bundles in the box.
+    local bundle_box="/tmp/isopod-$name.bundle" out="$target"
     [ "$out" = "." ] && out="./isopod-$name.bundle"
     [ -d "$out" ] && out="${out%/}/isopod-$name.bundle"
     [ -e "$out" ] && die "destination already exists: $out (remove it or pick another path)"
+    info "Bundling $repo inside the box..."
+    "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null ||
+      die "git bundle failed in the box (does $repo have any commits?)"
     "$ENGINE" cp "$ctr:$bundle_box" "$out"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "'$target' is not a git repo — wrote a bundle instead: $out"
@@ -1083,6 +1131,9 @@ cmd_info() {
   detect_engine "$(meta_get "$name" engine || true)"
   acquire_lock # refresh_port may rewrite the shared ssh_config
   refresh_port "$name"
+  local forwards
+  forwards=$(meta_get "$name" expose || true)
+  [ -n "$forwards" ] || forwards="(none — see --expose)"
   render_tmpl info.txt
 }
 

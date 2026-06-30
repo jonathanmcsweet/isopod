@@ -29,7 +29,15 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
   --engine <podman|docker>   Container engine (default: podman, else docker)
   --image <ref>         Base image (default: $DEFAULT_BASE_IMAGE).
                         Must be Debian/Ubuntu-based (apt): isopod layers
-                        sshd, git, and the in-box user on top of it.
+                        sshd, git, and the in-box user on top of it. Build
+                        your own with a Dockerfile to bake in a toolchain.
+  --dockerfile <path>   Build this Dockerfile first and use it as the base
+                        (isopod then layers sshd/git on top). The standard
+                        way to provision a box; mutually exclusive with --image.
+  --expose <spec>       Publish a container port to the host on 127.0.0.1
+                        (repeatable). <spec> is 'PORT' (same port on host) or
+                        'HOSTPORT:CONTAINERPORT', e.g. --expose 3001:3000 makes
+                        a server on the box's :3000 reachable at localhost:3001.
   --memory <size>       Memory limit, e.g. 4g
   --cpus <n>            CPU limit, e.g. 2
   --no-sudo             Do not give the in-box user passwordless sudo
@@ -53,6 +61,7 @@ Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--o
 
 Examples:
   isopod create myproj --repo https://github.com/me/proj --color teal
+  isopod create web --repo https://github.com/me/web --dockerfile ./Dockerfile --expose 3000
   isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
   isopod code myproj
   isopod export myproj ./myproj-out
