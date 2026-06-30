@@ -3,7 +3,9 @@ container : $(ctr_name "$name")
 engine    : $(meta_get "$name" engine || true)
 status    : $("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || printf 'missing')
 ssh       : ssh $(ctr_name "$name")    (127.0.0.1:$(meta_get "$name" port || true), loopback only)
+forwards  : $forwards
 workspace : $WORKSPACE
 color     : $(meta_get "$name" color || true)
 created   : $(meta_get "$name" created || true)
+config    : $(box_config_file "$name")    (edit, then: isopod reconfigure $name)
 key       : $(box_dir "$name")/id_ed25519

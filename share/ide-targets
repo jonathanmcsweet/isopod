@@ -1,0 +1,12 @@
+# isopod IDE launch targets — read by find_ide_bin().
+# Whitespace-separated columns ('-' means "none"):
+#   aliases   comma-separated names that select this row (first is canonical)
+#   binaries  comma-separated PATH binaries to try, in order
+#   macos-app single macOS app binary path to try (no spaces)
+#   flatpak   comma-separated flatpak app-ids to try, in order
+#
+# aliases          binaries                         macos-app                                                     flatpak
+codium,vscodium    codium,vscodium,codium-insiders  /Applications/VSCodium.app/Contents/Resources/app/bin/codium  com.vscodium.codium,com.vscodium.codium-insiders
+cursor             cursor                           /Applications/Cursor.app/Contents/Resources/app/bin/cursor   -
+code,vscode        code                             -                                                            com.visualstudio.code
+windsurf           windsurf                         -                                                            -

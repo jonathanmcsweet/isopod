@@ -29,11 +29,18 @@ while read -r tmpl; do
 done < <(grep -oE 'render_tmpl[[:space:]]+[A-Za-z0-9._-]+' isopod | awk '{print $2}' | sort -u)
 ok "every render_tmpl reference has a share/ file"
 
+# 1b. The base image build reads share/Dockerfile at runtime — it must exist.
+[ -f "share/Dockerfile" ] || fail "isopod builds from share/Dockerfile but it is missing"
+ok "share/Dockerfile is present"
+
 # 2. The tag tarball GitHub serves is `git archive` of the commit — make sure it
 #    carries share/, or the formula has nothing to install.
-git archive --format=tar HEAD -- share | tar t 2>/dev/null | grep -q 'share/usage.txt' ||
+archive=$(git archive --format=tar HEAD -- share | tar t 2>/dev/null)
+printf '%s\n' "$archive" | grep -q 'share/usage.txt' ||
   fail "share/ is not in the git archive — the release tarball would omit it"
-ok "release tarball ships share/"
+printf '%s\n' "$archive" | grep -q 'share/Dockerfile' ||
+  fail "share/Dockerfile is not in the git archive — the base image build would break"
+ok "release tarball ships share/ (incl. Dockerfile)"
 
 # 3. Install the symlink way (lib/, share/, security/ beside the script under a
 #    libexec dir, bin symlink) into a throwaway prefix, then render a template

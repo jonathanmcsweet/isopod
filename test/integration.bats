@@ -29,6 +29,8 @@ case "$cmd" in
   exec)    exit 0 ;;
   cp)      exit 0 ;;
   inspect) echo "running" ;;                # state status
+  commit)  exit 0 ;;                        # snapshot for reconfigure
+  rmi)     exit 0 ;;                         # drop old snapshot
   start|stop) exit 0 ;;
   rm)      exit 0 ;;
   *)       exit 0 ;;
@@ -145,6 +147,107 @@ EOF
   ISOPOD_RUNTIME=runsc run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   assert_stub_called 'podman run .*--runtime runsc'
+}
+
+@test "create builds the base image from share/Dockerfile with build args" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called "podman build .*--build-arg ISOPOD_BASE="
+  assert_stub_called "podman build .*--build-arg ISOPOD_USER=dev"
+  assert_stub_called "podman build .*-f $ISOPOD_ROOT/share/Dockerfile"
+}
+
+# ---- --expose ----------------------------------------------------------------
+@test "create --expose publishes ports on loopback only" {
+  run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --expose 8080 --color teal
+  assert_success
+  assert_stub_called 'podman run .*-p 127\.0\.0\.1:3001:3000'
+  assert_stub_called 'podman run .*-p 127\.0\.0\.1:8080:8080'
+  refute_output --partial "0.0.0.0"
+  run grep '^expose=3001:3000,8080:8080$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+@test "create rejects an out-of-range --expose port" {
+  run "$ISOPOD_ROOT/isopod" create demo --expose 70000 --color teal
+  assert_failure
+  assert_output --partial "invalid --expose"
+}
+
+@test "create rejects a non-numeric --expose spec" {
+  run "$ISOPOD_ROOT/isopod" create demo --expose web:3000 --color teal
+  assert_failure
+  assert_output --partial "invalid --expose"
+}
+
+# ---- --dockerfile ------------------------------------------------------------
+@test "create --dockerfile builds the user image and layers the base on it" {
+  printf 'FROM debian:bookworm-slim\nRUN true\n' > "$TEST_TMP/Dockerfile"
+  run "$ISOPOD_ROOT/isopod" create demo --dockerfile "$TEST_TMP/Dockerfile" --color teal
+  assert_success
+  # the project's Dockerfile is built into an isopod-user image...
+  assert_stub_called "podman build .*-f $TEST_TMP/Dockerfile"
+  assert_stub_called "podman build .*-t localhost/isopod-user:"
+  # ...which then becomes the base passed to the sandbox image build
+  assert_stub_called "podman build .*--build-arg ISOPOD_BASE=localhost/isopod-user:"
+}
+
+@test "create refuses both --image and --dockerfile" {
+  printf 'FROM debian\n' > "$TEST_TMP/Dockerfile"
+  run "$ISOPOD_ROOT/isopod" create demo --image ubuntu:24.04 --dockerfile "$TEST_TMP/Dockerfile"
+  assert_failure
+  assert_output --partial "either --image or --dockerfile"
+}
+
+@test "create rejects a --dockerfile that does not exist" {
+  run "$ISOPOD_ROOT/isopod" create demo --dockerfile /no/such/Dockerfile
+  assert_failure
+  assert_output --partial "--dockerfile not found"
+}
+
+# ---- config / reconfigure ----------------------------------------------------
+@test "create writes a per-box config.yaml shaped like a Compose service" {
+  run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --memory 4g --color teal
+  assert_success
+  cfg="$ISOPOD_CONFIG_DIR/boxes/demo/config.yaml"
+  [ -f "$cfg" ]
+  run cat "$cfg"
+  assert_output --partial "REFERENCE Compose file"
+  assert_output --partial "services:"
+  assert_output --partial "container_name: isopod-demo"
+  assert_output --partial "mem_limit: 4g"
+  assert_output --partial '- "127.0.0.1:3001:3000"'
+  assert_output --partial "security_opt:"   # masks rendered into the reference
+}
+
+@test "config prints the box's config.yaml" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" config demo
+  assert_success
+  assert_output --partial "isopod reconfigure demo"
+  assert_output --partial "x-isopod-color:"
+}
+
+@test "reconfigure snapshots the box and recreates it with new settings" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" reconfigure demo --memory 8g --expose 5173
+  assert_success
+  # snapshot to a per-box image, then recreate from it with the new flags
+  assert_stub_called "podman commit isopod-demo localhost/isopod-box-demo:"
+  assert_stub_called "podman run .*--memory 8g"
+  assert_stub_called 'podman run .*-p 127\.0\.0\.1:5173:5173'
+  # records updated in both meta and config.yaml
+  run grep '^memory=8g$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/config.yaml"
+  assert_output --partial "mem_limit: 8g"
+  assert_output --partial '- "127.0.0.1:5173:5173"'
+}
+
+@test "reconfigure errors on an unknown box" {
+  run "$ISOPOD_ROOT/isopod" reconfigure ghost --memory 4g
+  assert_failure
+  assert_output --partial "no such sandbox"
 }
 
 @test "fetch requires a box name" {

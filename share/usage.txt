@@ -8,6 +8,8 @@ Usage:
   isopod shell <name>                 Open a shell inside the sandbox
   isopod start <name>                 Start a stopped sandbox
   isopod stop <name>                  Stop a running sandbox
+  isopod config <name>                Show a box's editable config (config.yaml)
+  isopod reconfigure <name> [opts]    Apply new run settings to an existing box
   isopod export <name> [dest]         Copy the workspace OUT of the sandbox
   isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
   isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
@@ -29,12 +31,35 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
   --engine <podman|docker>   Container engine (default: podman, else docker)
   --image <ref>         Base image (default: $DEFAULT_BASE_IMAGE).
                         Must be Debian/Ubuntu-based (apt): isopod layers
-                        sshd, git, and the in-box user on top of it.
+                        sshd, git, and the in-box user on top of it. Build
+                        your own with a Dockerfile to bake in a toolchain.
+  --dockerfile <path>   Build this Dockerfile first and use it as the base
+                        (isopod then layers sshd/git on top). The standard
+                        way to provision a box; mutually exclusive with --image.
+  --expose <spec>       Publish a container port to the host on 127.0.0.1
+                        (repeatable). <spec> is 'PORT' (same port on host) or
+                        'HOSTPORT:CONTAINERPORT', e.g. --expose 3001:3000 makes
+                        a server on the box's :3000 reachable at localhost:3001.
   --memory <size>       Memory limit, e.g. 4g
   --cpus <n>            CPU limit, e.g. 2
   --no-sudo             Do not give the in-box user passwordless sudo
   --port <n>            Fixed host port for SSH (default: random free port,
                         bound to 127.0.0.1 only)
+
+Reconfiguring a box (change run settings without starting over):
+  Every box has an editable config at $CONFIG_DIR/boxes/<name>/config.yaml,
+  written as a real (engine-correct) Compose service you can read or reuse — but
+  isopod owns and parses it and does NOT run it (see the file's header).
+  View it with 'isopod config <name>'. Edit a value, or pass flags below, then run
+  'isopod reconfigure <name>'. isopod snapshots the box (preserving your workspace
+  and installed packages), then recreates the container with the new settings.
+
+Options for reconfigure (or edit config.yaml; each accepts '--opt value' and '--opt=value'):
+  --expose <spec>       Replace the box's forwarded ports (repeatable; same form
+                        as create's --expose)
+  --memory <size>       New memory limit, e.g. 8g (blank clears it)
+  --cpus <n>            New CPU limit, e.g. 4 (blank clears it)
+  --color <preset|hex>  Re-tint the IDE window
 
 Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--opt=value'):
   --name <new name>     New author/committer name to write. Defaults to
@@ -53,6 +78,7 @@ Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--o
 
 Examples:
   isopod create myproj --repo https://github.com/me/proj --color teal
+  isopod create web --repo https://github.com/me/web --dockerfile ./Dockerfile --expose 3000
   isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
   isopod code myproj
   isopod export myproj ./myproj-out

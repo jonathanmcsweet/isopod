@@ -167,3 +167,75 @@ teardown() { isopod_teardown_env; }
   [ "$LOCK_DIR" = "$ISOPOD_CONFIG_DIR/.lock" ]
   release_lock
 }
+
+# ---- hardening_run_args (baseline + user override layering) -------------------
+@test "hardening_run_args uses the shipped baseline when there is no override" {
+  run hardening_run_args podman
+  assert_success
+  assert_output --partial "/proc/cmdline"
+  assert_output --partial "/sys/class/net"
+  refute_output --partial "--runtime"
+}
+
+@test "hardening_run_args layers a user override: unmask drops a baseline mask" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'unmask /sys/class/net\n' > "$ISOPOD_CONFIG_DIR/hardening.conf"
+  run hardening_run_args podman
+  assert_success
+  refute_output --partial "/sys/class/net"   # dropped by the override
+  assert_output --partial "/proc/cmdline"     # other baseline masks remain
+}
+
+@test "hardening_run_args layers a user override: runtime turns on Tier 2" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'runtime runsc\n' > "$ISOPOD_CONFIG_DIR/hardening.conf"
+  run hardening_run_args podman
+  assert_success
+  assert_output --partial "--runtime"
+  assert_output --partial "runsc"
+}
+
+@test "hardening_run_args: a user mask: directive adds to the baseline" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'mask /sys/class/power_supply\n' > "$ISOPOD_CONFIG_DIR/hardening.conf"
+  run hardening_run_args podman
+  assert_success
+  assert_output --partial "/sys/class/power_supply"
+  assert_output --partial "/proc/cmdline"
+}
+
+# ---- per-box config.yaml (Compose-shaped, isopod-parsed) ---------------------
+@test "config.yaml round-trips through the parsers" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
+  printf 'engine=podman\nimage=img:1\ncolor=#0f766e\ncreated=t\nmemory=4g\ncpus=2\nexpose=3001:3000,8080:8080\n' \
+    > "$ISOPOD_CONFIG_DIR/boxes/web/meta"
+  write_box_config web
+  assert_equal "$(config_get web mem_limit)" "4g"
+  assert_equal "$(config_get web cpus)" "2"
+  assert_equal "$(config_get web x-isopod-color)" "#0f766e"
+  assert_equal "$(config_expose web | paste -sd, -)" "3001:3000,8080:8080"
+}
+
+@test "config.yaml is a Compose service with engine-correct masks; empties omitted" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
+  printf 'engine=podman\nimage=img:1\ncolor=#0f766e\ncreated=t\nmemory=\ncpus=\nexpose=\n' \
+    > "$ISOPOD_CONFIG_DIR/boxes/web/meta"
+  write_box_config web
+  run cat "$ISOPOD_CONFIG_DIR/boxes/web/config.yaml"
+  assert_output --partial "services:"
+  assert_output --partial "security_opt:"
+  assert_output --partial "mask=/sys/class/dmi"
+  refute_output --partial "mem_limit:"   # blank limit omitted, not rendered empty
+  refute_output --partial "ports:"        # no forwards -> no ports block
+}
+
+@test "config.yaml renders docker masks as tmpfs + /dev/null binds" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
+  printf 'engine=docker\nimage=img:1\ncolor=#0f766e\ncreated=t\nmemory=\ncpus=\nexpose=\n' \
+    > "$ISOPOD_CONFIG_DIR/boxes/web/meta"
+  write_box_config web
+  run cat "$ISOPOD_CONFIG_DIR/boxes/web/config.yaml"
+  assert_output --partial "tmpfs:"
+  assert_output --partial "- /dev/null:/proc/cmdline:ro"
+  refute_output --partial "security_opt:"  # docker has no mask flag
+}

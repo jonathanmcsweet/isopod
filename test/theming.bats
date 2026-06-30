@@ -135,3 +135,26 @@ EOF
   run find_ide_bin codium
   assert_failure
 }
+
+@test "find_ide_bin resolves a native cursor from the table" {
+  make_stub cursor 0
+  find_ide_bin cursor
+  assert_equal "${IDE_CMD[*]}" "cursor"
+}
+
+@test "find_ide_bin resolves the code flatpak id from the table" {
+  cat > "$STUB_DIR/flatpak" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in info) [ "$2" = "com.visualstudio.code" ] && exit 0 || exit 1 ;; esac
+exit 0
+EOF
+  chmod +x "$STUB_DIR/flatpak"
+  find_ide_bin code
+  assert_equal "${IDE_CMD[*]}" "flatpak run com.visualstudio.code"
+}
+
+@test "find_ide_bin falls back to a bare binary for an unknown app" {
+  make_stub myeditor 0
+  find_ide_bin myeditor
+  assert_equal "${IDE_CMD[*]}" "myeditor"
+}

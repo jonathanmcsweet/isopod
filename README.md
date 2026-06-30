@@ -88,7 +88,7 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 ## Fingerprint hardening
 
-A container shares the host's kernel and hardware, so by default a process inside can read a surprising amount about the host through `/proc` and `/sys` — far more than its own hostname. Isopod ships a hardening profile that closes the file-based leaks and supports an optional sandboxed runtime for the rest. It's all configured in one declarative file, **[`security/hardening.conf`](security/hardening.conf)** that you can edit.
+A container shares the host's kernel and hardware, so by default a process inside can read a surprising amount about the host through `/proc` and `/sys` — far more than its own hostname. Isopod ships a hardening profile that closes the file-based leaks and supports an optional sandboxed runtime for the rest. The shipped defaults live in **[`security/hardening.conf`](security/hardening.conf)** — a read-only baseline you don't edit (package upgrades replace it). To customize, drop an override file at **`~/.config/isopod/hardening.conf`** that *layers* on top of the baseline with `mask` / `unmask` / `runtime` / `no-runtime` directives (so you keep getting new masks on upgrade), or toggle the runtime per-run with `ISOPOD_RUNTIME=runsc`.
 
 ### What's implemented
 
@@ -154,7 +154,7 @@ Two ways out, for two situations:
   isopod fetch myproj        # target defaults to the current directory
   ```
 
-  Under the hood it `git bundle`s the container's repo, copies that single file out, and `git fetch`es it in — so the container's branches appear as **remote-tracking refs named `<name>/*`** without touching your local branches. Check one out with:
+  Under the hood it `git fetch`es straight from the container over its SSH remote (the same dedicated key and pinned host key isopod already set up) — so the container's branches appear as **remote-tracking refs named `<name>/*`** without touching your local branches. Check one out with:
 
   ```sh
   git switch -c fingerprint-hardening myproj/fingerprint-hardening
@@ -186,12 +186,54 @@ Two ways out, for two situations:
 `ISOPOD_BUILD_ARGS` — extra args for `build` (e.g. `--network=host`, 
 `--build-arg http_proxy=...` behind corporate proxies). 
 `ISOPOD_RUN_ARGS` — extra args for `run` (e.g. `--network=none` for an offline container, `--userns=keep-id`, custom DNS).
-`ISOPOD_RUNTIME` — (e.g. `runsc`), overriding `security/hardening.conf`. 
-`ISOPOD_HARDENING_CONF` — path to an alternate [fingerprint-hardening profile](#fingerprint-hardening).
+`ISOPOD_RUNTIME` — Tier 2 runtime (e.g. `runsc`), overriding the hardening profile. 
+`ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
 
 ## Customizing the container
 
-The default image is `debian:bookworm-slim` plus sshd, git, curl, python3, and sudo (the in-container user has passwordless sudo by default — lets agents `apt install` toolchains; pass `--no-sudo` to disable). Use `--image ubuntu:24.04` or any Debian/Ubuntu-based image to change the base. Install language toolchains either interactively (`isopod shell`) or bake your own base image and pass it with `--image`.
+The base image is defined by a standard Dockerfile, [`share/Dockerfile`](share/Dockerfile) — built identically by `docker build` and `podman build`. On top of whatever base you choose it adds sshd, git, common CLI tooling, the unprivileged in-container user, and passwordless sudo (drop sudo with `--no-sudo`). There are two ways to shape it:
+
+- **`--image <ref>`** swaps the base. Any Debian/Ubuntu-based image works (`--image ubuntu:24.04`), including one you built yourself from a Dockerfile and want to reuse across boxes.
+- **`--dockerfile <path>`** is the project-provisioning path: isopod builds your Dockerfile first, then layers sshd/git on top (i.e. your image becomes the base via `FROM`). This is how you bake in a toolchain (a JDK, Node, etc.) the industry-standard way, rather than a bespoke config format.
+
+```dockerfile
+# Dockerfile  — your project's toolchain
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends default-jdk maven
+```
+
+```sh
+isopod create api --repo https://github.com/me/api --dockerfile ./Dockerfile
+```
+
+Your Dockerfile must use a Debian/Ubuntu (`apt`) base, since isopod's layer installs sshd with `apt-get`. A trailing `USER` in your Dockerfile doesn't change the box's privilege model — isopod's layer resets to root (sshd must be PID 1 as root) and you log in as the unprivileged in-box user. **To limit privilege inside the box, use `--no-sudo`** (drops the in-box user's passwordless sudo), not the base image's `USER` — isopod's SSH model supersedes it. (isopod's real boundary is host isolation + rootless userns, not in-container rootlessness; see [The isolation model](#the-isolation-model).)
+
+Because the image is built before the container exists (and `--repo` clones *inside* the box afterward), the Dockerfile is a host-side file you point at — not something read from the cloned repo. For quick one-offs you can still install toolchains interactively with `isopod shell`.
+
+### Reaching a server in the box (port forwarding)
+
+A dev server inside the box (say `pnpm run start` on `:3000`) isn't on your host by default. Publish it with **`--expose`**, which maps a container port to a `127.0.0.1` host port — the standard `podman/docker run -p`, loopback-only:
+
+```sh
+isopod create web --repo <url> --expose 3001:3000   # box :3000 -> localhost:3001
+isopod create web --repo <url> --expose 8080         # same port on both sides
+```
+
+Port mappings are set at create time (engine port mappings can't be added to a *running* container) and restored across stop/start. `isopod info <name>` lists them. To add or change ports later without starting over, use `isopod reconfigure` (below). In the VSCodium Remote-SSH window, ports a server opens are also auto-forwarded by the IDE.
+
+### Changing a box after create (`reconfigure`)
+
+A container's run settings — ports, memory, cpus, fingerprint masks — can't be edited in place; the engine bakes them in at creation. So every box has a readable config you can change, and isopod re-applies it for you:
+
+```sh
+isopod config web                       # view the box's config.yaml
+isopod reconfigure web --expose 5173 --memory 8g   # or edit config.yaml, then:
+isopod reconfigure web
+```
+
+The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — and it's written as a **real, valid Compose service** (engine-correct: podman gets `security_opt: mask=…`, docker gets `tmpfs`/`/dev/null` binds), so you can read, copy, or adapt it elsewhere. But **isopod owns and parses it; it does not launch boxes from it** — a working box also needs the per-box SSH key, pinned host key, and cloned workspace that Compose can't set up, so `docker compose up` on it gives a bare container. isopod reads a few fields back on `reconfigure` (`ports`, `mem_limit`, `cpus`, `x-isopod-color`); the rest is a managed reference.
+
+On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box.
 
 ## FAQ
 

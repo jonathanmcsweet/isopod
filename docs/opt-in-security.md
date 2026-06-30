@@ -9,8 +9,10 @@ and [isolation model](../README.md#the-isolation-model) described in the README.
 Isopod can run containers under a syscall-virtualizing runtime — **gVisor
 (`runsc`)** — which presents a synthetic `/proc`, `/sys`, `uname`, and CPU to the
 container instead of the host's. It's off by default because it requires host-side
-setup. Enable it by uncommenting `runtime runsc` in `security/hardening.conf`, or
-per-container with `ISOPOD_RUNTIME=runsc isopod create …`.
+setup. Enable it per-container with `ISOPOD_RUNTIME=runsc isopod create …`, or
+persistently by adding `runtime runsc` to your override file at
+`~/.config/isopod/hardening.conf` (don't edit the shipped baseline — upgrades
+replace it).
 
 **What you must do on the host to use these features**:
 

@@ -157,4 +157,4 @@ Runtime state lives separately under `~/.config/isopod`:
     └── meta                # engine, image, port, color, created
 ```
 
-Deleting a container removes its container, its keys, and its SSH config entry. The base image (`localhost/isopod-base:*`) is shared across containers and rebuilt automatically when the embedded Dockerfile layer changes.
+Deleting a container removes its container, its keys, and its SSH config entry. The base image (`localhost/isopod-base:*`) is built from [`share/Dockerfile`](../share/Dockerfile), shared across containers, and rebuilt automatically when that Dockerfile changes.

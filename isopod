@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="0.8.2"
+ISOPOD_VERSION="1.0.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -26,14 +26,20 @@ ISOPOD_LIB="$ISOPOD_DIR/lib"
 # Long user-facing text and data tables live as files under share/ rather than
 # inline heredocs;
 ISOPOD_SHARE="${ISOPOD_SHARE:-$ISOPOD_DIR/share}"
-# Declarative container-hardening profile.
-# Settings live in this file, not inline here; override path with ISOPOD_HARDENING_CONF.
+# The sandbox base image, defined as a standard Dockerfile (built by docker and
+# podman alike). Override the path with ISOPOD_DOCKERFILE.
+ISOPOD_DOCKERFILE="${ISOPOD_DOCKERFILE:-$ISOPOD_SHARE/Dockerfile}"
+# Shipped, read-only hardening baseline (do not edit — package upgrades replace
+# it). Advanced: point at a different baseline with ISOPOD_HARDENING_CONF.
 HARDENING_CONF="${ISOPOD_HARDENING_CONF:-$ISOPOD_DIR/security/hardening.conf}"
 
 CONFIG_DIR="${ISOPOD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/isopod}"
 BOXES_DIR="$CONFIG_DIR/boxes"
 SSH_INCLUDE_FILE="$CONFIG_DIR/ssh_config"
 USER_SSH_CONFIG="$HOME/.ssh/config"
+# Optional user override, layered on top of the baseline (mask/unmask/runtime/
+# no-runtime). Lives in the user's config dir so it survives package upgrades.
+USER_HARDENING_CONF="$CONFIG_DIR/hardening.conf"
 DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
 IMAGE_LAYER_VERSION="1" # bump to force image rebuild when Dockerfile changes
 CONTAINER_USER="dev"
@@ -168,94 +174,181 @@ meta_get() { # meta_get <name> <key>
   sed -n "s/^$2=//p" "$f" | head -1
 }
 
+meta_set() { # meta_set <name> <key> <value> — replace or append a meta line
+  local f tmp
+  f="$(box_dir "$1")/meta"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/isopod-meta-XXXXXX")"
+  grep -v "^$2=" "$f" 2>/dev/null >"$tmp" || true
+  printf '%s=%s\n' "$2" "$3" >>"$tmp"
+  mv "$tmp" "$f"
+}
+
+# Per-box config.yaml — a real, valid Compose service describing the box, kept as
+# a readable reference (see share/box-config.yaml). isopod owns it: it is rendered
+# from meta and a few fields are read back by `isopod reconfigure`. isopod does
+# NOT launch boxes from it (see the file's header for why).
+box_config_file() { printf '%s/config.yaml' "$(box_dir "$1")"; }
+
+# Render the box's hardening as engine-correct Compose YAML (indented 4 spaces),
+# derived from the same hardening_run_args as the live `run` flags so the two
+# can't drift: podman -> security_opt mask=...; docker -> tmpfs + /dev/null binds.
+render_hardening_compose() { # render_hardening_compose <engine>
+  local engine="$1" i=0 x runtime=""
+  local -a flags=() sopts=() tmpfs=() vols=()
+  mapfile -t flags < <(hardening_run_args "$engine")
+  while [ "$i" -lt "${#flags[@]}" ]; do
+    case "${flags[$i]}" in
+      --security-opt) sopts+=("${flags[$((i + 1))]}") && i=$((i + 2)) ;;
+      --tmpfs) tmpfs+=("${flags[$((i + 1))]}") && i=$((i + 2)) ;;
+      -v) vols+=("${flags[$((i + 1))]}") && i=$((i + 2)) ;;
+      --runtime) runtime="${flags[$((i + 1))]}" && i=$((i + 2)) ;;
+      *) i=$((i + 1)) ;;
+    esac
+  done
+  [ -n "$runtime" ] && printf '    runtime: %s\n' "$runtime"
+  if [ "${#sopts[@]}" -gt 0 ]; then
+    printf '    security_opt:\n'
+    for x in "${sopts[@]}"; do printf '      - %s\n' "$x"; done
+  fi
+  if [ "${#tmpfs[@]}" -gt 0 ]; then
+    printf '    tmpfs:\n'
+    for x in "${tmpfs[@]}"; do printf '      - %s\n' "$x"; done
+  fi
+  if [ "${#vols[@]}" -gt 0 ]; then
+    printf '    volumes:\n'
+    for x in "${vols[@]}"; do printf '      - %s\n' "$x"; done
+  fi
+}
+
+write_box_config() { # write_box_config <name>
+  local name="$1" image created color memory cpus expose engine e
+  local limits_block="" ports_block="" hardening_block=""
+  image=$(meta_get "$name" image || true)
+  created=$(meta_get "$name" created || true)
+  color=$(meta_get "$name" color || true)
+  memory=$(meta_get "$name" memory || true)
+  cpus=$(meta_get "$name" cpus || true)
+  expose=$(meta_get "$name" expose || true)
+  engine=$(meta_get "$name" engine || true)
+  [ -n "$memory" ] && limits_block+="    mem_limit: $memory"$'\n'
+  [ -n "$cpus" ] && limits_block+="    cpus: \"$cpus\""$'\n'
+  if [ -n "$expose" ]; then
+    ports_block="    ports:"$'\n'
+    # split on commas without changing IFS (a leaked IFS=, would break the
+    # whitespace-split read in hardening_run_args, called below).
+    # shellcheck disable=SC2086
+    for e in ${expose//,/ }; do ports_block+="      - \"127.0.0.1:$e\""$'\n'; done
+  fi
+  hardening_block=$(render_hardening_compose "$engine")
+  [ -n "$hardening_block" ] && hardening_block+=$'\n'
+  # Consumed by the template via render_tmpl (invisible to the linter).
+  : "$image" "$created" "$color" "$limits_block" "$ports_block" "$hardening_block"
+  render_tmpl box-config.yaml >"$(box_config_file "$name")"
+}
+
+# Read a scalar service field from a box's config.yaml (indentation-tolerant,
+# surrounding double-quotes stripped).
+config_get() { # config_get <name> <key>
+  local f v
+  f="$(box_config_file "$1")"
+  [ -f "$f" ] || return 1
+  v=$(sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" "$f" | head -1)
+  v="${v%\"}"
+  v="${v#\"}"
+  printf '%s' "$v"
+}
+
+# Read the forwarded ports from a box's config.yaml as HOSTPORT:CONTAINERPORT, one
+# per line. Ports are the `- "127.0.0.1:H:C"` list items (the loopback prefix
+# distinguishes them from security_opt/tmpfs/volume list items).
+config_expose() { # config_expose <name>
+  local f
+  f="$(box_config_file "$1")"
+  [ -f "$f" ] || return 0
+  sed -n 's/^[[:space:]]*-[[:space:]]*"127\.0\.0\.1:\(.*\)"[[:space:]]*$/\1/p' "$f"
+}
+
 valid_name() {
   [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,40}$ ]]
 }
 
+valid_port() { # valid_port <n> -> true for a 1-65535 TCP port number
+  case "$1" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
 # ---------------------------------------------------------------------------
-# image build (embedded Dockerfile)
+# image build (share/Dockerfile)
 # ---------------------------------------------------------------------------
-# Render the Dockerfile for a base image to stdout. This is the single source of
-# truth for the image: both the build and the cache-key hash derive from it, so
-# any edit here automatically invalidates the cached image (no manual version
-# bump needed — IMAGE_LAYER_VERSION remains only as a force-rebuild override).
-render_dockerfile() { # render_dockerfile <base-image>
-  local base="$1"
-  cat <<DOCKERFILE
-FROM $base
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \\
- && apt-get install -y --no-install-recommends \\
-      openssh-server sudo git curl wget ca-certificates \\
-      python3 nano less procps tar gzip unzip xz-utils locales \\
- && rm -rf /var/lib/apt/lists/* \\
- && mkdir -p /run/sshd
-# Create the unprivileged in-box user (skip if base image already has it)
-RUN id -u $CONTAINER_USER >/dev/null 2>&1 || useradd -m -s /bin/bash $CONTAINER_USER
-# Lock down sshd: key-only auth, single user, no root login
-RUN printf '%s\\n' \\
-      'PasswordAuthentication no' \\
-      'KbdInteractiveAuthentication no' \\
-      'PermitRootLogin no' \\
-      'AllowUsers $CONTAINER_USER' \\
-      'X11Forwarding no' \\
-      'AllowAgentForwarding no' \\
-      'ClientAliveInterval 60' \\
-      > /etc/ssh/sshd_config.d/90-isopod.conf \\
- && grep -q 'Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config \\
-      || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
-# Entrypoint: regenerate host keys on first boot so every box is unique,
-# then run sshd in the foreground as PID 1.
-RUN printf '%s\\n' \\
-      '#!/bin/sh' \\
-      'if [ ! -f /etc/ssh/.isopod-host-keys ]; then' \\
-      '  rm -f /etc/ssh/ssh_host_*' \\
-      '  ssh-keygen -A >/dev/null' \\
-      '  touch /etc/ssh/.isopod-host-keys' \\
-      'fi' \\
-      'mkdir -p /run/sshd' \\
-      'exec /usr/sbin/sshd -D -e' \\
-      > /usr/local/bin/isopod-entrypoint \\
- && chmod +x /usr/local/bin/isopod-entrypoint
-EXPOSE 22
-CMD ["/usr/local/bin/isopod-entrypoint"]
-DOCKERFILE
+# The image is defined by a standard Dockerfile (share/Dockerfile), built the
+# same way by docker and podman. The base image and in-box user are passed as
+# build args. The cache key hashes the Dockerfile content + those args, so an
+# edit to the Dockerfile forces a one-time rebuild on its own (IMAGE_LAYER_VERSION
+# remains only as a manual force-rebuild override).
+image_exists() { # image_exists <tag>
+  "$ENGINE" image exists "$1" 2>/dev/null || "$ENGINE" image inspect "$1" >/dev/null 2>&1
 }
 
 image_tag_for() { # image_tag_for <base-image>
-  # Tag tracks the actual Dockerfile content (+ the manual override knob), so an
-  # edit to render_dockerfile yields a new tag and forces a one-time rebuild.
+  [ -f "$ISOPOD_DOCKERFILE" ] || die "missing Dockerfile: $ISOPOD_DOCKERFILE"
   local hash
   hash=$({
-    render_dockerfile "$1"
-    printf '%s' "$IMAGE_LAYER_VERSION"
+    cat "$ISOPOD_DOCKERFILE"
+    printf '%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION"
   } | cksum | awk '{print $1}')
   printf 'localhost/isopod-base:%s' "$hash"
+}
+
+# ISOPOD_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
+# --build-arg http_proxy=...) for proxied or unusual environments. Emits one
+# token per line (nothing when unset) for the caller to read into an array.
+engine_build_extra() {
+  [ -n "${ISOPOD_BUILD_ARGS:-}" ] || return 0
+  # shellcheck disable=SC2086
+  printf '%s\n' $ISOPOD_BUILD_ARGS
 }
 
 build_image() { # build_image <base-image> -> echoes tag
   local base="$1" tag
   tag=$(image_tag_for "$base")
-  if "$ENGINE" image exists "$tag" 2>/dev/null || "$ENGINE" image inspect "$tag" >/dev/null 2>&1; then
+  if image_exists "$tag"; then
     printf '%s' "$tag"
     return 0
   fi
   info "Building sandbox base image from $base (one-time)..." >&2
-  # ISOPOD_BUILD_ARGS: extra args for '$ENGINE build' (e.g. --network=host,
-  # --build-arg http_proxy=...) for proxied or unusual environments.
   local -a extra_build=()
-  # shellcheck disable=SC2206
-  [ -n "${ISOPOD_BUILD_ARGS:-}" ] && extra_build=($ISOPOD_BUILD_ARGS)
-  # Write the Dockerfile to a temp file rather than piping it in: a piped
-  # heredoc breaks under `set -o pipefail` if the engine exits early (SIGPIPE).
-  local dockerfile
-  dockerfile=$(mktemp "${TMPDIR:-/tmp}/isopod-dockerfile-XXXXXX")
-  render_dockerfile "$base" >"$dockerfile"
-  if ! "$ENGINE" build "${extra_build[@]}" -t "$tag" -f "$dockerfile" . >&2; then
-    rm -f "$dockerfile"
+  mapfile -t extra_build < <(engine_build_extra)
+  # No COPY in the base Dockerfile, so build from an empty context.
+  local ctx
+  ctx=$(mktemp -d "${TMPDIR:-/tmp}/isopod-ctx-XXXXXX")
+  if ! "$ENGINE" build "${extra_build[@]}" \
+    --build-arg "ISOPOD_BASE=$base" --build-arg "ISOPOD_USER=$CONTAINER_USER" \
+    -t "$tag" -f "$ISOPOD_DOCKERFILE" "$ctx" >&2; then
+    rm -rf "$ctx"
     die "image build failed (see output above)"
   fi
-  rm -f "$dockerfile"
+  rm -rf "$ctx"
+  printf '%s' "$tag"
+}
+
+# Build a user-provided Dockerfile (from --dockerfile) into an image, then echo
+# its tag so it can be used as the base the sandbox layers sshd/git onto — the
+# same role as --image, but you hand over a Dockerfile and isopod builds it.
+build_user_image() { # build_user_image <dockerfile-path> -> echoes tag
+  local df="$1" ctx tag
+  [ -f "$df" ] || die "--dockerfile not found: $df"
+  ctx=$(dirname "$df")
+  tag="localhost/isopod-user:$(cksum <"$df" | awk '{print $1}')"
+  if image_exists "$tag"; then
+    printf '%s' "$tag"
+    return 0
+  fi
+  info "Building image from $df (one-time)..." >&2
+  local -a extra_build=()
+  mapfile -t extra_build < <(engine_build_extra)
+  if ! "$ENGINE" build "${extra_build[@]}" -t "$tag" -f "$df" "$ctx" >&2; then
+    die "build of $df failed (see output above)"
+  fi
   printf '%s' "$tag"
 }
 
@@ -437,36 +530,58 @@ apply_color() { # apply_color <name> <hexcolor>
     "$(ctr_name "$name")" python3 - <"$script"
 }
 
-# Translate the declarative hardening profile (security/hardening.conf) into
-# `$ENGINE run` flags, printed one per line for the caller to read into an array.
-# Anti-fingerprinting(mask host-revealing /proc and /sys paths) +
-# (run under a sandboxed runtime like gVisor). The two engines mask differently:
+# Translate the hardening profile into `$ENGINE run` flags, printed one per line
+# for the caller to read into an array. Anti-fingerprinting (mask host-revealing
+# /proc and /sys paths) + an optional sandboxed runtime like gVisor.
+#
+# Layered: the shipped baseline (HARDENING_CONF) is read first, then the user's
+# own overrides (USER_HARDENING_CONF, in their config dir) on top — so a tweak
+# never silently drops the baseline, and upgrades keep delivering new masks.
+# Directives: `mask <path> [file]`, `unmask <path>` (drop a baseline mask),
+# `runtime <name>`, `no-runtime`.
+#
+# The two engines mask differently:
 #   podman — a single `--security-opt mask=a:b:c` covers both files and dirs.
 #   docker — no mask flag, so dirs get an empty `--tmpfs` and files a `/dev/null`
 #            bind mount.
-# Missing profile is non-fatal: the box is still created, just without the masks.
+# Missing baseline is non-fatal: the box is still created, just without masks.
 hardening_run_args() { # hardening_run_args <engine>
-  local engine="$1" conf="$HARDENING_CONF"
-  if [ ! -f "$conf" ]; then
-    warn "hardening profile not found ($conf); creating box without fingerprint masks"
+  local engine="$1"
+  local -a conf_files=()
+  [ -f "$HARDENING_CONF" ] && conf_files+=("$HARDENING_CONF")
+  [ -f "$USER_HARDENING_CONF" ] && conf_files+=("$USER_HARDENING_CONF")
+  if [ "${#conf_files[@]}" -eq 0 ]; then
+    warn "hardening profile not found ($HARDENING_CONF); creating box without fingerprint masks"
     return 0
   fi
 
-  local runtime="" key path kind line
-  local -a masks=() fmasks=()
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%%#*}"                       # strip comments
-    read -r key path kind <<<"$line" || true # whitespace-split + trim
-    [ -n "${key:-}" ] || continue
-    case "$key" in
-      runtime) runtime="${path:-}" ;;
-      mask)
-        [ -n "${path:-}" ] || continue
-        if [ "${kind:-}" = "file" ]; then fmasks+=("$path"); else masks+=("$path"); fi
-        ;;
-      *) warn "hardening profile: ignoring unknown directive '$key'" ;;
-    esac
-  done <"$conf"
+  local runtime="" key path kind line conf m
+  local -a masks=() fmasks=() keep=()
+  for conf in "${conf_files[@]}"; do
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%#*}"                       # strip comments
+      read -r key path kind <<<"$line" || true # whitespace-split + trim
+      [ -n "${key:-}" ] || continue
+      case "$key" in
+        runtime) runtime="${path:-}" ;;
+        no-runtime) runtime="" ;;
+        mask)
+          [ -n "${path:-}" ] || continue
+          if [ "${kind:-}" = "file" ]; then fmasks+=("$path"); else masks+=("$path"); fi
+          ;;
+        unmask) # drop a baseline mask (by path), from either dir or file masks
+          [ -n "${path:-}" ] || continue
+          keep=()
+          for m in "${masks[@]:-}"; do [ -n "$m" ] && [ "$m" != "$path" ] && keep+=("$m"); done
+          masks=("${keep[@]:-}")
+          keep=()
+          for m in "${fmasks[@]:-}"; do [ -n "$m" ] && [ "$m" != "$path" ] && keep+=("$m"); done
+          fmasks=("${keep[@]:-}")
+          ;;
+        *) warn "hardening profile: ignoring unknown directive '$key'" ;;
+      esac
+    done <"$conf"
+  done
 
   # env var wins over the profile so it can be toggled per invocation.
   runtime="${ISOPOD_RUNTIME:-$runtime}"
@@ -485,13 +600,38 @@ hardening_run_args() { # hardening_run_args <engine>
   fi
 }
 
+# Assemble the `$ENGINE run` argument list for a box into the global RUN_ARGS
+# array (bash can't return arrays). Shared by create and reconfigure so the two
+# can't drift. Hardening masks are read fresh from the profile each time.
+RUN_ARGS=()
+build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [host:ctr expose...]
+  local name="$1" image="$2" publish="$3" memory="$4" cpus="$5"
+  shift 5
+  RUN_ARGS=(run -d --name "$(ctr_name "$name")" --hostname "$name"
+  --label "isopod=true" --label "isopod.name=$name"
+  -p "$publish" --pids-limit 4096)
+  [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
+  [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
+  # Anti-fingerprinting hardening from the hardening profile.
+  local -a hard_args=()
+  mapfile -t hard_args < <(hardening_run_args "$ENGINE")
+  [ "${#hard_args[@]}" -gt 0 ] && RUN_ARGS+=("${hard_args[@]}")
+  # Loopback-only app port publishings (from --expose / config.yaml).
+  local spec
+  for spec in "$@"; do [ -n "$spec" ] && RUN_ARGS+=(-p "127.0.0.1:$spec"); done
+  # ISOPOD_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
+  # shellcheck disable=SC2206
+  [ -n "${ISOPOD_RUN_ARGS:-}" ] && RUN_ARGS+=($ISOPOD_RUN_ARGS)
+  RUN_ARGS+=("$image")
+}
+
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
 cmd_create() {
   local name="" repo="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
-  local memory="" cpus="" no_sudo=0 engine_opt=""
-  local -a copies=()
+  local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
+  local -a copies=() exposes=()
 
   while [ $# -gt 0 ]; do
     # accept --opt=value as an alias for --opt value (e.g. --copy=path)
@@ -517,6 +657,15 @@ cmd_create() {
         ;;
       --image)
         base="$2"
+        image_opt=1
+        shift 2
+        ;;
+      --dockerfile)
+        dockerfile_opt="$2"
+        shift 2
+        ;;
+      --expose)
+        exposes+=("$2")
         shift 2
         ;;
       --engine)
@@ -561,12 +710,34 @@ cmd_create() {
   if [ -n "$repo" ] && [ "${#copies[@]}" -gt 0 ]; then
     die "use either --repo or --copy, not both (you can 'isopod copy-in' later)"
   fi
+  if [ -n "$dockerfile_opt" ] && [ "$image_opt" -eq 1 ]; then
+    die "use either --image or --dockerfile, not both"
+  fi
+  [ -n "$dockerfile_opt" ] && [ ! -f "$dockerfile_opt" ] &&
+    die "--dockerfile not found: $dockerfile_opt"
 
   # validate copy paths up front
   local p
   for p in "${copies[@]:-}"; do
     [ -z "$p" ] && continue
     [ -e "$p" ] || die "--copy path does not exist: $p"
+  done
+
+  # Resolve --expose specs into loopback-only port publishings. A spec is either
+  # 'PORT' (host port = container port) or 'HOSTPORT:CONTAINERPORT'. Bound to
+  # 127.0.0.1 only, matching the SSH binding — a box never listens on all host
+  # interfaces unless you opt in with ISOPOD_RUN_ARGS.
+  local -a expose_specs=()
+  local spec host_p ctr_p
+  for spec in "${exposes[@]:-}"; do
+    [ -z "$spec" ] && continue
+    case "$spec" in
+      *:*) host_p="${spec%%:*}" ctr_p="${spec##*:}" ;;
+      *) host_p="$spec" ctr_p="$spec" ;;
+    esac
+    valid_port "$host_p" && valid_port "$ctr_p" ||
+      die "invalid --expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
+    expose_specs+=("$host_p:$ctr_p")
   done
 
   # resolve color
@@ -580,6 +751,14 @@ cmd_create() {
   fi
 
   detect_engine "$engine_opt"
+
+  # --dockerfile: build the project's Dockerfile first and use it as the base the
+  # sandbox layers sshd/git onto (same role as --image, you just hand over a
+  # Dockerfile). Done before the rollback is armed so a build error leaves no box.
+  if [ -n "$dockerfile_opt" ]; then
+    base=$(build_user_image "$dockerfile_opt") || die "could not build --dockerfile image"
+  fi
+
   mkdir -p "$(box_dir "$name")"
 
   # From here a partial box exists on disk; arm rollback so any failure below
@@ -597,22 +776,10 @@ cmd_create() {
   local publish="127.0.0.1::22"
   [ -n "$port" ] && publish="127.0.0.1:$port:22"
 
-  local -a run_args=(run -d --name "$(ctr_name "$name")" --hostname "$name"
-  --label "isopod=true" --label "isopod.name=$name"
-  -p "$publish" --pids-limit 4096)
-  [ -n "$memory" ] && run_args+=(--memory "$memory")
-  [ -n "$cpus" ] && run_args+=(--cpus "$cpus")
-  # Anti-fingerprinting hardening from security/hardening.conf.
-  local -a hard_args=()
-  mapfile -t hard_args < <(hardening_run_args "$ENGINE")
-  [ "${#hard_args[@]}" -gt 0 ] && run_args+=("${hard_args[@]}")
-  # ISOPOD_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
-  # shellcheck disable=SC2206
-  [ -n "${ISOPOD_RUN_ARGS:-}" ] && run_args+=($ISOPOD_RUN_ARGS)
-  run_args+=("$tag")
+  build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${expose_specs[@]}"
 
   info "Starting container ($ENGINE)..."
-  "$ENGINE" "${run_args[@]}" >/dev/null
+  "$ENGINE" "${RUN_ARGS[@]}" >/dev/null
 
   local hostport
   hostport=$(resolve_port "$name") || die "could not determine published SSH port"
@@ -623,7 +790,14 @@ cmd_create() {
     printf 'color=%s\n' "$hex"
     printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'port=%s\n' "$hostport"
+    printf 'memory=%s\n' "$memory"
+    printf 'cpus=%s\n' "$cpus"
+    printf 'expose=%s\n' "$(
+      IFS=,
+      printf '%s' "${expose_specs[*]:-}"
+    )"
   } >"$(box_dir "$name")/meta"
+  write_box_config "$name"
 
   # sudo policy + authorized key, injected at runtime (root inside the box
   # only — which, under rootless podman, is just your own unprivileged UID
@@ -709,10 +883,12 @@ cmd_export() {
   info "Done: $dest"
 }
 
-# Pull the box's git history into a host repo without copying the working tree:
-# bundle the repo inside the box, copy the single bundle file out, and `git fetch`
-# it into the target repo as remote-tracking branches named <name>/*. This is the
-# git-native counterpart to `isopod export` — clean history, no file merges.
+# Pull the box's git history into a host repo. Every box is already a git SSH
+# remote (dedicated key, pinned host key, loopback port), so for a git target we
+# just `git fetch` straight from it into <name>/* tracking refs — no bundle, no
+# temp files. For a non-git target we fall back to a portable .bundle file, the
+# one thing plain git-over-SSH can't produce. The git-native counterpart to
+# `isopod export` — clean history, no file merges.
 cmd_fetch() {
   local name="" target="" inbox_path=""
   while [ $# -gt 0 ]; do
@@ -744,6 +920,8 @@ cmd_fetch() {
   require_box "$name"
   have git || die "git is required on the host for 'isopod fetch'"
   detect_engine "$(meta_get "$name" engine || true)"
+  acquire_lock # refresh_port may rewrite the shared ssh_config
+  refresh_port "$name"
   target="${target:-.}"
   local ctr
   ctr=$(ctr_name "$name")
@@ -765,39 +943,41 @@ cmd_fetch() {
       die "no git repo found in the box under $WORKSPACE — pass --path <in-box-repo>"
   fi
 
-  local bundle_box="/tmp/isopod-$name.bundle"
-  info "Bundling $repo inside the box..."
-  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null ||
-    die "git bundle failed in the box (does $repo have any commits?)"
-
   if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    # Target is a git repo: fetch the box's branches in as <name>/* tracking refs.
-    local top tmp
+    # Target is a git repo: fetch straight from the box over SSH into <name>/*.
+    # The repo-detection exec above already proved the box is up, so re-pin its
+    # host key for the current port — keeps known_hosts valid if it changed ports.
+    local top port key kh
+    scan_host_key "$name" >/dev/null 2>&1 || true
     top=$(git -C "$target" rev-parse --show-toplevel)
-    tmp=$(mktemp "${TMPDIR:-/tmp}/isopod-${name}-XXXXXX")
-    "$ENGINE" cp "$ctr:$bundle_box" "$tmp"
-    "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
-    info "Fetching history into $top as '$name/*'..."
+    port=$(meta_get "$name" port)
+    key="$(box_dir "$name")/id_ed25519"
+    kh="$(box_dir "$name")/known_hosts"
+    info "Fetching history into $top as '$name/*' (over SSH)..."
 
     # Force-update the box's tracking refs (leading '+'), exactly as a normal
     # remote's '+refs/heads/*:refs/remotes/origin/*' does. Without it, a re-fetch
     # after the box's history was rewritten — e.g. by 'isopod remap', which gives
     # commits new SHAs — is rejected as non-fast-forward. These refs are a mirror
     # namespace isopod owns; the host's own branches (refs/heads/*) are untouched.
-    if ! git -C "$target" fetch --no-tags "$tmp" "+refs/heads/*:refs/remotes/$name/*"; then
-      rm -f "$tmp"
-      die "git fetch from the bundle failed"
-    fi
-    rm -f "$tmp"
+    # GIT_SSH_COMMAND pins the box's key/port/host key, mirroring box_ssh.
+    GIT_SSH_COMMAND="ssh -p $port -i '$key' -o IdentitiesOnly=yes -o UserKnownHostsFile='$kh' -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no" \
+      git -C "$target" fetch --no-tags "$CONTAINER_USER@127.0.0.1:$repo" \
+      "+refs/heads/*:refs/remotes/$name/*" ||
+      die "git fetch from the box over SSH failed (is '$name' running? try: isopod start $name)"
     info "Done. Box branches are now available as:"
     git -C "$target" branch -r --list "$name/*" | sed 's/^/    /'
     printf '\nCheck one out with:\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
   else
-    # Target is not a git repo: drop the bundle file for manual use.
-    local out="$target"
+    # Target is not a git repo: drop a portable bundle for manual use — the one
+    # artifact git-over-SSH can't produce, so this path still bundles in the box.
+    local bundle_box="/tmp/isopod-$name.bundle" out="$target"
     [ "$out" = "." ] && out="./isopod-$name.bundle"
     [ -d "$out" ] && out="${out%/}/isopod-$name.bundle"
     [ -e "$out" ] && die "destination already exists: $out (remove it or pick another path)"
+    info "Bundling $repo inside the box..."
+    "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null ||
+      die "git bundle failed in the box (does $repo have any commits?)"
     "$ENGINE" cp "$ctr:$bundle_box" "$out"
     "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
     info "'$target' is not a git repo — wrote a bundle instead: $out"
@@ -1083,6 +1263,9 @@ cmd_info() {
   detect_engine "$(meta_get "$name" engine || true)"
   acquire_lock # refresh_port may rewrite the shared ssh_config
   refresh_port "$name"
+  local forwards
+  forwards=$(meta_get "$name" expose || true)
+  [ -n "$forwards" ] || forwards="(none — see --expose)"
   render_tmpl info.txt
 }
 
@@ -1107,6 +1290,146 @@ cmd_stop() {
   info "stopped '$name'"
 }
 
+# Print a box's config.yaml (the readable record of its reconfigurable settings).
+cmd_config() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: isopod config <name>"
+  require_box "$name"
+  [ -f "$(box_config_file "$name")" ] || write_box_config "$name"
+  cat "$(box_config_file "$name")"
+}
+
+# Apply changed run settings to an existing box. Container run-config (ports,
+# memory, cpus, masks) can't be changed in place, so we snapshot the box to an
+# image (preserving its workspace + installed packages), then recreate from that
+# image with the new flags. Identity (SSH key, host key, color, ssh_config) is
+# preserved. Desired settings come from config.yaml; flags override it.
+cmd_reconfigure() {
+  local name="" memory="" cpus="" color="" memory_set=0 cpus_set=0 color_set=0 expose_set=0
+  local -a exposes=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
+    case "$1" in
+      --memory)
+        memory="$2" memory_set=1
+        shift 2
+        ;;
+      --cpus)
+        cpus="$2" cpus_set=1
+        shift 2
+        ;;
+      --color)
+        color="$2" color_set=1
+        shift 2
+        ;;
+      --expose)
+        exposes+=("$2") expose_set=1
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      -*) die "unknown option for reconfigure: $1" ;;
+      *)
+        [ -z "$name" ] && name="$1" || die "unexpected argument: $1"
+        shift
+        ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: isopod reconfigure <name> [--memory|--cpus|--color|--expose ...]"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  acquire_lock
+
+  # config.yaml is the source of truth (synthesize it for pre-feature boxes),
+  # with any flags overriding individual fields.
+  [ -f "$(box_config_file "$name")" ] || write_box_config "$name"
+  local d_memory d_cpus d_color
+  d_memory=$(config_get "$name" mem_limit || true)
+  d_cpus=$(config_get "$name" cpus || true)
+  d_color=$(config_get "$name" x-isopod-color || true)
+  local -a d_expose=()
+  mapfile -t d_expose < <(config_expose "$name")
+  [ "$memory_set" = 1 ] && d_memory="$memory"
+  [ "$cpus_set" = 1 ] && d_cpus="$cpus"
+  [ "$color_set" = 1 ] && d_color="$color"
+  [ "$expose_set" = 1 ] && d_expose=("${exposes[@]}")
+
+  # validate + normalize the exposes
+  local -a expose_specs=()
+  local spec host_p ctr_p
+  for spec in "${d_expose[@]:-}"; do
+    [ -z "$spec" ] && continue
+    case "$spec" in
+      *:*) host_p="${spec%%:*}" ctr_p="${spec##*:}" ;;
+      *) host_p="$spec" ctr_p="$spec" ;;
+    esac
+    valid_port "$host_p" && valid_port "$ctr_p" ||
+      die "invalid expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
+    expose_specs+=("$host_p:$ctr_p")
+  done
+
+  # resolve color to a hex (keep the current one if unset)
+  local hex
+  hex=$(meta_get "$name" color || true)
+  if [ -n "$d_color" ]; then
+    if [[ "$d_color" =~ ^#?[0-9a-fA-F]{6}$ ]]; then
+      hex="#${d_color#\#}"
+    else
+      hex=$(preset_color "$d_color") || die "unknown color '$d_color' (use a preset or '#rrggbb')"
+    fi
+  fi
+
+  local ctr
+  ctr=$(ctr_name "$name")
+  "$ENGINE" inspect "$ctr" >/dev/null 2>&1 || die "container for '$name' is missing; recreate the box"
+
+  # Snapshot the box so the recreate keeps the workspace + installed packages.
+  local snap old_img
+  old_img=$(meta_get "$name" image || true)
+  snap="localhost/isopod-box-$name:r$(date -u +%Y%m%d%H%M%S)"
+  info "Snapshotting '$name' (preserves your workspace and installed packages)..."
+  "$ENGINE" commit "$ctr" "$snap" >/dev/null || die "could not snapshot the box"
+
+  # Recreate from the snapshot with the new flags, reusing the box's SSH port.
+  local port
+  port=$(meta_get "$name" port)
+  "$ENGINE" rm -f "$ctr" >/dev/null 2>&1 || true
+  build_run_args "$name" "$snap" "127.0.0.1:$port:22" "$d_memory" "$d_cpus" "${expose_specs[@]}"
+  info "Recreating the container with the new settings ($ENGINE)..."
+  if ! "$ENGINE" "${RUN_ARGS[@]}" >/dev/null; then
+    die "recreate failed — your snapshot is saved as '$snap'"
+  fi
+
+  # Refresh runtime state and the box's records.
+  local hostport
+  hostport=$(resolve_port "$name") || die "could not determine published SSH port"
+  meta_set "$name" image "$snap"
+  meta_set "$name" port "$hostport"
+  meta_set "$name" memory "$d_memory"
+  meta_set "$name" cpus "$d_cpus"
+  meta_set "$name" color "$hex"
+  meta_set "$name" expose "$(
+    IFS=,
+    printf '%s' "${expose_specs[*]:-}"
+  )"
+  write_ssh_include
+  scan_host_key "$name" >/dev/null 2>&1 || true
+  wait_for_ssh "$name" || warn "box recreated but SSH didn't authenticate yet (check: isopod info $name)"
+  apply_color "$name" "$hex" || warn "could not apply window color (the box is fine without it)"
+  write_box_config "$name"
+
+  # Drop the previous snapshot image (never the shared base).
+  case "$old_img" in
+    localhost/isopod-box-"$name":*) "$ENGINE" rmi "$old_img" >/dev/null 2>&1 || true ;;
+  esac
+
+  info "reconfigured '$name' — see: isopod info $name"
+}
+
 cmd_shell() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod shell <name>"
@@ -1127,56 +1450,40 @@ flatpak_app() { # flatpak_app <app-id> -> sets IDE_CMD if installed
   return 1
 }
 
+# Resolve an IDE name to a launch command via the share/ide-targets table:
+# try its PATH binaries, then a macOS app path, then flatpak ids — in that order.
+# A name not in the table falls back to running it as a bare PATH binary.
 find_ide_bin() { # find_ide_bin <app> -> sets IDE_CMD, returns 0/1
-  local app="$1" b mac
+  local app="$1" f="$ISOPOD_SHARE/ide-targets"
   IDE_CMD=()
-  case "$app" in
-    codium | vscodium)
-      for b in codium vscodium codium-insiders; do
-        have "$b" && {
-          IDE_CMD=("$b")
-          return 0
-        }
-      done
-      mac="/Applications/VSCodium.app/Contents/Resources/app/bin/codium"
-      [ -x "$mac" ] && {
-        IDE_CMD=("$mac")
+  [ -f "$f" ] || die "missing IDE target table: $f (is your isopod install complete?)"
+  local aliases bins macpath flatpaks b id
+  local -a blist flist
+  while read -r aliases bins macpath flatpaks; do
+    case "$aliases" in '' | '#'*) continue ;; esac # skip blanks and comments
+    case ",$aliases," in *",$app,"*) ;; *) continue ;; esac
+    IFS=',' read -ra blist <<<"$bins"
+    for b in "${blist[@]}"; do
+      have "$b" && {
+        IDE_CMD=("$b")
         return 0
       }
-      flatpak_app com.vscodium.codium && return 0
-      flatpak_app com.vscodium.codium-insiders && return 0
-      ;;
-    cursor)
-      have cursor && {
-        IDE_CMD=(cursor)
-        return 0
-      }
-      mac="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
-      [ -x "$mac" ] && {
-        IDE_CMD=("$mac")
-        return 0
-      }
-      ;;
-    code | vscode)
-      have code && {
-        IDE_CMD=(code)
-        return 0
-      }
-      flatpak_app com.visualstudio.code && return 0
-      ;;
-    windsurf)
-      have windsurf && {
-        IDE_CMD=(windsurf)
-        return 0
-      }
-      ;;
-    *)
-      have "$app" && {
-        IDE_CMD=("$app")
-        return 0
-      }
-      ;;
-  esac
+    done
+    [ "$macpath" != "-" ] && [ -x "$macpath" ] && {
+      IDE_CMD=("$macpath")
+      return 0
+    }
+    if [ "$flatpaks" != "-" ]; then
+      IFS=',' read -ra flist <<<"$flatpaks"
+      for id in "${flist[@]}"; do flatpak_app "$id" && return 0; done
+    fi
+    return 1 # matched this target but nothing is installed for it
+  done <"$f"
+  # Not a known target: try the literal name as a PATH binary.
+  have "$app" && {
+    IDE_CMD=("$app")
+    return 0
+  }
   return 1
 }
 
@@ -1352,6 +1659,8 @@ main() {
     shell | sh) cmd_shell "$@" ;;
     start) cmd_start "$@" ;;
     stop) cmd_stop "$@" ;;
+    reconfigure | reconfig) cmd_reconfigure "$@" ;;
+    config) cmd_config "$@" ;;
     export) cmd_export "$@" ;;
     fetch) cmd_fetch "$@" ;;
     remap) cmd_remap "$@" ;;

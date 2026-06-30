@@ -13,7 +13,7 @@ _isopod() {
   cword="$COMP_CWORD"
   words=("${COMP_WORDS[@]}")
 
-  local cmds="create list info code shell start stop export fetch remap copy-in rm doctor help version"
+  local cmds="create list info code shell start stop config reconfigure export fetch remap copy-in rm doctor help version"
   local colors="red orange amber green teal blue purple magenta gray grey"
   local apps="codium vscodium cursor windsurf code"
 
@@ -46,12 +46,12 @@ _isopod() {
       mapfile -t COMPREPLY < <(compgen -W "podman docker" -- "$cur")
       return 0
       ;;
-    --copy | --remap-file)
+    --copy | --remap-file | --dockerfile)
       compopt -o default 2>/dev/null
       COMPREPLY=()
       return 0
       ;; # a path
-    --repo | --branch | --image | --memory | --cpus | --port | --name | --email | --old-email | --old-name | --path)
+    --repo | --branch | --image | --memory | --cpus | --port | --expose | --name | --email | --old-email | --old-name | --path)
       return 0
       ;; # free-form argument; let the shell default take over
   esac
@@ -60,7 +60,8 @@ _isopod() {
   if [[ "$cur" == -* ]]; then
     local opts=""
     case "$sub" in
-      create) opts="--repo --branch --copy --color --image --engine --memory --cpus --port --no-sudo" ;;
+      create) opts="--repo --branch --copy --color --image --dockerfile --expose --engine --memory --cpus --port --no-sudo" ;;
+      reconfigure) opts="--expose --memory --cpus --color" ;;
       code) opts="--app" ;;
       rm) opts="--force" ;;
       remap) opts="--name --email --old-email --old-name --remap-file --force" ;;
@@ -72,7 +73,7 @@ _isopod() {
 
   # First positional for most subcommands is an existing box name.
   case "$sub" in
-    info | code | shell | start | stop | export | fetch | remap | copy-in | rm)
+    info | code | shell | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
       mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
       ;;
   esac
