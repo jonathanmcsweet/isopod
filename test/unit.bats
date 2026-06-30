@@ -203,3 +203,39 @@ teardown() { isopod_teardown_env; }
   assert_output --partial "/sys/class/power_supply"
   assert_output --partial "/proc/cmdline"
 }
+
+# ---- per-box config.yaml (Compose-shaped, isopod-parsed) ---------------------
+@test "config.yaml round-trips through the parsers" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
+  printf 'engine=podman\nimage=img:1\ncolor=#0f766e\ncreated=t\nmemory=4g\ncpus=2\nexpose=3001:3000,8080:8080\n' \
+    > "$ISOPOD_CONFIG_DIR/boxes/web/meta"
+  write_box_config web
+  assert_equal "$(config_get web mem_limit)" "4g"
+  assert_equal "$(config_get web cpus)" "2"
+  assert_equal "$(config_get web x-isopod-color)" "#0f766e"
+  assert_equal "$(config_expose web | paste -sd, -)" "3001:3000,8080:8080"
+}
+
+@test "config.yaml is a Compose service with engine-correct masks; empties omitted" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
+  printf 'engine=podman\nimage=img:1\ncolor=#0f766e\ncreated=t\nmemory=\ncpus=\nexpose=\n' \
+    > "$ISOPOD_CONFIG_DIR/boxes/web/meta"
+  write_box_config web
+  run cat "$ISOPOD_CONFIG_DIR/boxes/web/config.yaml"
+  assert_output --partial "services:"
+  assert_output --partial "security_opt:"
+  assert_output --partial "mask=/sys/class/dmi"
+  refute_output --partial "mem_limit:"   # blank limit omitted, not rendered empty
+  refute_output --partial "ports:"        # no forwards -> no ports block
+}
+
+@test "config.yaml renders docker masks as tmpfs + /dev/null binds" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
+  printf 'engine=docker\nimage=img:1\ncolor=#0f766e\ncreated=t\nmemory=\ncpus=\nexpose=\n' \
+    > "$ISOPOD_CONFIG_DIR/boxes/web/meta"
+  write_box_config web
+  run cat "$ISOPOD_CONFIG_DIR/boxes/web/config.yaml"
+  assert_output --partial "tmpfs:"
+  assert_output --partial "- /dev/null:/proc/cmdline:ro"
+  refute_output --partial "security_opt:"  # docker has no mask flag
+}

@@ -1,25 +1,29 @@
-# isopod box '$name' — configuration (REFERENCE ONLY; not a runnable compose file).
+# isopod box '$name' — REFERENCE Compose file. isopod does NOT run this.
 #
-# isopod reads and writes this file. It is deliberately YAML so it's easy to read,
-# but it is NOT docker-compose and you cannot 'compose up' it: a working box also
-# needs the per-box SSH key, pinned host key, sudo policy, and workspace that
-# isopod sets up separately, which compose can't reproduce. This file documents
-# and controls the box; isopod owns and parses it.
+# This is a real, valid Compose service describing the box, kept so you can read
+# it, copy it, or adapt it elsewhere. But isopod launches boxes with podman/docker
+# 'run' directly, NOT from this file — a working box also needs a generated SSH
+# key, a pinned host key, sudo, and your cloned workspace, none of which Compose
+# sets up. A 'compose up' on this gives you a bare container without those.
 #
-# Edit a value below, then run:   isopod reconfigure $name
-# isopod recreates the container with the new settings while preserving your
-# workspace and anything you installed. Fingerprint masks come from your hardening
-# profile (not here); the base image is a managed snapshot — to change the base,
+# isopod reads a few fields back when you run 'isopod reconfigure $name':
+#   ports (your --expose forwards), mem_limit, cpus, and x-isopod-color.
+# Everything else (image, security_opt/masks, pids_limit, labels) is managed by
+# isopod — editing it here has no effect. Fingerprint masks come from your
+# hardening profile. The image is a managed snapshot; to change the base image,
 # create a new box.
 #
-#   image:   $image
+# Edit a reconfigurable value, then run:   isopod reconfigure $name
+#
 #   created: $created
 
-# --memory limit, e.g. 4g (blank = unlimited)
-memory: $memory
-# --cpus limit, e.g. 2 (blank = unlimited)
-cpus: $cpus
-# IDE window tint: a preset name or #rrggbb (quoted — a bare # is a YAML comment)
-color: "$color"
-# host<-container TCP forwards on 127.0.0.1, as HOSTPORT:CONTAINERPORT
-$expose_yaml
+services:
+  $name:
+    container_name: $(ctr_name "$name")
+    hostname: $name
+    image: $image
+    labels:
+      isopod: "true"
+      isopod.name: "$name"
+    pids_limit: 4096
+${limits_block}${ports_block}${hardening_block}    x-isopod-color: "$color"

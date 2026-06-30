@@ -47,8 +47,9 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         bound to 127.0.0.1 only)
 
 Reconfiguring a box (change run settings without starting over):
-  Every box has an editable config at $CONFIG_DIR/boxes/<name>/config.yaml
-  (a readable YAML reference — isopod owns it; it is NOT a runnable compose file).
+  Every box has an editable config at $CONFIG_DIR/boxes/<name>/config.yaml,
+  written as a real (engine-correct) Compose service you can read or reuse — but
+  isopod owns and parses it and does NOT run it (see the file's header).
   View it with 'isopod config <name>'. Edit a value, or pass flags below, then run
   'isopod reconfigure <name>'. isopod snapshots the box (preserving your workspace
   and installed packages), then recreates the container with the new settings.

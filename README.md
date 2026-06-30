@@ -229,7 +229,9 @@ isopod reconfigure web --expose 5173 --memory 8g   # or edit config.yaml, then:
 isopod reconfigure web
 ```
 
-The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — a YAML file that's deliberately readable, but **isopod-owned and not a runnable compose file** (a working box also needs the per-box SSH key, pinned host key, and workspace that compose can't reproduce). On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box.
+The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — and it's written as a **real, valid Compose service** (engine-correct: podman gets `security_opt: mask=…`, docker gets `tmpfs`/`/dev/null` binds), so you can read, copy, or adapt it elsewhere. But **isopod owns and parses it; it does not launch boxes from it** — a working box also needs the per-box SSH key, pinned host key, and cloned workspace that Compose can't set up, so `docker compose up` on it gives a bare container. isopod reads a few fields back on `reconfigure` (`ports`, `mem_limit`, `cpus`, `x-isopod-color`); the rest is a managed reference.
+
+On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box.
 
 ## FAQ
 

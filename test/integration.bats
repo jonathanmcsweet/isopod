@@ -206,15 +206,18 @@ EOF
 }
 
 # ---- config / reconfigure ----------------------------------------------------
-@test "create writes a readable per-box config.yaml" {
+@test "create writes a per-box config.yaml shaped like a Compose service" {
   run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --memory 4g --color teal
   assert_success
   cfg="$ISOPOD_CONFIG_DIR/boxes/demo/config.yaml"
   [ -f "$cfg" ]
   run cat "$cfg"
-  assert_output --partial "REFERENCE ONLY"
-  assert_output --partial "memory: 4g"
-  assert_output --partial "- 3001:3000"
+  assert_output --partial "REFERENCE Compose file"
+  assert_output --partial "services:"
+  assert_output --partial "container_name: isopod-demo"
+  assert_output --partial "mem_limit: 4g"
+  assert_output --partial '- "127.0.0.1:3001:3000"'
+  assert_output --partial "security_opt:"   # masks rendered into the reference
 }
 
 @test "config prints the box's config.yaml" {
@@ -222,7 +225,7 @@ EOF
   run "$ISOPOD_ROOT/isopod" config demo
   assert_success
   assert_output --partial "isopod reconfigure demo"
-  assert_output --partial "color:"
+  assert_output --partial "x-isopod-color:"
 }
 
 @test "reconfigure snapshots the box and recreates it with new settings" {
@@ -237,8 +240,8 @@ EOF
   run grep '^memory=8g$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
   assert_success
   run cat "$ISOPOD_CONFIG_DIR/boxes/demo/config.yaml"
-  assert_output --partial "memory: 8g"
-  assert_output --partial "- 5173:5173"
+  assert_output --partial "mem_limit: 8g"
+  assert_output --partial '- "127.0.0.1:5173:5173"'
 }
 
 @test "reconfigure errors on an unknown box" {

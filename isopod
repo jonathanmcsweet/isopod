@@ -183,49 +183,89 @@ meta_set() { # meta_set <name> <key> <value> — replace or append a meta line
   mv "$tmp" "$f"
 }
 
-# Per-box config.yaml — a readable, isopod-owned mirror of the reconfigurable
-# settings (see share/box-config.yaml). Rendered from meta; the user edits it and
-# `isopod reconfigure` reads it back.
+# Per-box config.yaml — a real, valid Compose service describing the box, kept as
+# a readable reference (see share/box-config.yaml). isopod owns it: it is rendered
+# from meta and a few fields are read back by `isopod reconfigure`. isopod does
+# NOT launch boxes from it (see the file's header for why).
 box_config_file() { printf '%s/config.yaml' "$(box_dir "$1")"; }
 
+# Render the box's hardening as engine-correct Compose YAML (indented 4 spaces),
+# derived from the same hardening_run_args as the live `run` flags so the two
+# can't drift: podman -> security_opt mask=...; docker -> tmpfs + /dev/null binds.
+render_hardening_compose() { # render_hardening_compose <engine>
+  local engine="$1" i=0 x runtime=""
+  local -a flags=() sopts=() tmpfs=() vols=()
+  mapfile -t flags < <(hardening_run_args "$engine")
+  while [ "$i" -lt "${#flags[@]}" ]; do
+    case "${flags[$i]}" in
+      --security-opt) sopts+=("${flags[$((i + 1))]}") && i=$((i + 2)) ;;
+      --tmpfs) tmpfs+=("${flags[$((i + 1))]}") && i=$((i + 2)) ;;
+      -v) vols+=("${flags[$((i + 1))]}") && i=$((i + 2)) ;;
+      --runtime) runtime="${flags[$((i + 1))]}" && i=$((i + 2)) ;;
+      *) i=$((i + 1)) ;;
+    esac
+  done
+  [ -n "$runtime" ] && printf '    runtime: %s\n' "$runtime"
+  if [ "${#sopts[@]}" -gt 0 ]; then
+    printf '    security_opt:\n'
+    for x in "${sopts[@]}"; do printf '      - %s\n' "$x"; done
+  fi
+  if [ "${#tmpfs[@]}" -gt 0 ]; then
+    printf '    tmpfs:\n'
+    for x in "${tmpfs[@]}"; do printf '      - %s\n' "$x"; done
+  fi
+  if [ "${#vols[@]}" -gt 0 ]; then
+    printf '    volumes:\n'
+    for x in "${vols[@]}"; do printf '      - %s\n' "$x"; done
+  fi
+}
+
 write_box_config() { # write_box_config <name>
-  local name="$1" image created color memory cpus expose expose_yaml e
+  local name="$1" image created color memory cpus expose engine e
+  local limits_block="" ports_block="" hardening_block=""
   image=$(meta_get "$name" image || true)
   created=$(meta_get "$name" created || true)
   color=$(meta_get "$name" color || true)
   memory=$(meta_get "$name" memory || true)
   cpus=$(meta_get "$name" cpus || true)
   expose=$(meta_get "$name" expose || true)
-  expose_yaml="expose: []"
+  engine=$(meta_get "$name" engine || true)
+  [ -n "$memory" ] && limits_block+="    mem_limit: $memory"$'\n'
+  [ -n "$cpus" ] && limits_block+="    cpus: \"$cpus\""$'\n'
   if [ -n "$expose" ]; then
-    expose_yaml="expose:"
-    local IFS=,
-    for e in $expose; do expose_yaml+=$'\n'"  - $e"; done
+    ports_block="    ports:"$'\n'
+    # split on commas without changing IFS (a leaked IFS=, would break the
+    # whitespace-split read in hardening_run_args, called below).
+    # shellcheck disable=SC2086
+    for e in ${expose//,/ }; do ports_block+="      - \"127.0.0.1:$e\""$'\n'; done
   fi
-  # All of the above are consumed by the template via render_tmpl (invisible to
-  # the linter); name them here so they don't read as unused.
-  : "$image" "$created" "$color" "$memory" "$cpus" "$expose_yaml"
+  hardening_block=$(render_hardening_compose "$engine")
+  [ -n "$hardening_block" ] && hardening_block+=$'\n'
+  # Consumed by the template via render_tmpl (invisible to the linter).
+  : "$image" "$created" "$color" "$limits_block" "$ports_block" "$hardening_block"
   render_tmpl box-config.yaml >"$(box_config_file "$name")"
 }
 
-# Read a scalar value from a box's config.yaml (surrounding double-quotes stripped).
+# Read a scalar service field from a box's config.yaml (indentation-tolerant,
+# surrounding double-quotes stripped).
 config_get() { # config_get <name> <key>
   local f v
   f="$(box_config_file "$1")"
   [ -f "$f" ] || return 1
-  v=$(sed -n "s/^$2: *//p" "$f" | head -1)
+  v=$(sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" "$f" | head -1)
   v="${v%\"}"
   v="${v#\"}"
   printf '%s' "$v"
 }
 
-# Read the expose list from a box's config.yaml (one HOSTPORT:CONTAINERPORT/line).
-# It's the only YAML list in the file, so its `- item` lines are unambiguous.
+# Read the forwarded ports from a box's config.yaml as HOSTPORT:CONTAINERPORT, one
+# per line. Ports are the `- "127.0.0.1:H:C"` list items (the loopback prefix
+# distinguishes them from security_opt/tmpfs/volume list items).
 config_expose() { # config_expose <name>
   local f
   f="$(box_config_file "$1")"
   [ -f "$f" ] || return 0
-  sed -n 's/^[[:space:]]*-[[:space:]]*//p' "$f"
+  sed -n 's/^[[:space:]]*-[[:space:]]*"127\.0\.0\.1:\(.*\)"[[:space:]]*$/\1/p' "$f"
 }
 
 valid_name() {
@@ -1308,9 +1348,9 @@ cmd_reconfigure() {
   # with any flags overriding individual fields.
   [ -f "$(box_config_file "$name")" ] || write_box_config "$name"
   local d_memory d_cpus d_color
-  d_memory=$(config_get "$name" memory || true)
+  d_memory=$(config_get "$name" mem_limit || true)
   d_cpus=$(config_get "$name" cpus || true)
-  d_color=$(config_get "$name" color || true)
+  d_color=$(config_get "$name" x-isopod-color || true)
   local -a d_expose=()
   mapfile -t d_expose < <(config_expose "$name")
   [ "$memory_set" = 1 ] && d_memory="$memory"
