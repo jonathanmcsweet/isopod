@@ -1178,56 +1178,40 @@ flatpak_app() { # flatpak_app <app-id> -> sets IDE_CMD if installed
   return 1
 }
 
+# Resolve an IDE name to a launch command via the share/ide-targets table:
+# try its PATH binaries, then a macOS app path, then flatpak ids — in that order.
+# A name not in the table falls back to running it as a bare PATH binary.
 find_ide_bin() { # find_ide_bin <app> -> sets IDE_CMD, returns 0/1
-  local app="$1" b mac
+  local app="$1" f="$ISOPOD_SHARE/ide-targets"
   IDE_CMD=()
-  case "$app" in
-    codium | vscodium)
-      for b in codium vscodium codium-insiders; do
-        have "$b" && {
-          IDE_CMD=("$b")
-          return 0
-        }
-      done
-      mac="/Applications/VSCodium.app/Contents/Resources/app/bin/codium"
-      [ -x "$mac" ] && {
-        IDE_CMD=("$mac")
+  [ -f "$f" ] || die "missing IDE target table: $f (is your isopod install complete?)"
+  local aliases bins macpath flatpaks b id
+  local -a blist flist
+  while read -r aliases bins macpath flatpaks; do
+    case "$aliases" in '' | '#'*) continue ;; esac # skip blanks and comments
+    case ",$aliases," in *",$app,"*) ;; *) continue ;; esac
+    IFS=',' read -ra blist <<<"$bins"
+    for b in "${blist[@]}"; do
+      have "$b" && {
+        IDE_CMD=("$b")
         return 0
       }
-      flatpak_app com.vscodium.codium && return 0
-      flatpak_app com.vscodium.codium-insiders && return 0
-      ;;
-    cursor)
-      have cursor && {
-        IDE_CMD=(cursor)
-        return 0
-      }
-      mac="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
-      [ -x "$mac" ] && {
-        IDE_CMD=("$mac")
-        return 0
-      }
-      ;;
-    code | vscode)
-      have code && {
-        IDE_CMD=(code)
-        return 0
-      }
-      flatpak_app com.visualstudio.code && return 0
-      ;;
-    windsurf)
-      have windsurf && {
-        IDE_CMD=(windsurf)
-        return 0
-      }
-      ;;
-    *)
-      have "$app" && {
-        IDE_CMD=("$app")
-        return 0
-      }
-      ;;
-  esac
+    done
+    [ "$macpath" != "-" ] && [ -x "$macpath" ] && {
+      IDE_CMD=("$macpath")
+      return 0
+    }
+    if [ "$flatpaks" != "-" ]; then
+      IFS=',' read -ra flist <<<"$flatpaks"
+      for id in "${flist[@]}"; do flatpak_app "$id" && return 0; done
+    fi
+    return 1 # matched this target but nothing is installed for it
+  done <"$f"
+  # Not a known target: try the literal name as a PATH binary.
+  have "$app" && {
+    IDE_CMD=("$app")
+    return 0
+  }
   return 1
 }
 
