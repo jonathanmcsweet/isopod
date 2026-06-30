@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="1.0.0"
+ISOPOD_VERSION="1.1.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -29,6 +29,9 @@ ISOPOD_SHARE="${ISOPOD_SHARE:-$ISOPOD_DIR/share}"
 # The sandbox base image, defined as a standard Dockerfile (built by docker and
 # podman alike). Override the path with ISOPOD_DOCKERFILE.
 ISOPOD_DOCKERFILE="${ISOPOD_DOCKERFILE:-$ISOPOD_SHARE/Dockerfile}"
+# The box entrypoint, COPYed into the base image. Hashed into the image tag so
+# editing it forces a rebuild, like the Dockerfile. Override alongside it.
+ISOPOD_ENTRYPOINT="${ISOPOD_ENTRYPOINT:-$ISOPOD_SHARE/isopod-entrypoint}"
 # Shipped, read-only hardening baseline (do not edit — package upgrades replace
 # it). Advanced: point at a different baseline with ISOPOD_HARDENING_CONF.
 HARDENING_CONF="${ISOPOD_HARDENING_CONF:-$ISOPOD_DIR/security/hardening.conf}"
@@ -41,7 +44,7 @@ USER_SSH_CONFIG="$HOME/.ssh/config"
 # no-runtime). Lives in the user's config dir so it survives package upgrades.
 USER_HARDENING_CONF="$CONFIG_DIR/hardening.conf"
 DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
-IMAGE_LAYER_VERSION="1" # bump to force image rebuild when Dockerfile changes
+IMAGE_LAYER_VERSION="2" # bump to force image rebuild when Dockerfile changes
 CONTAINER_USER="dev"
 WORKSPACE="/home/dev/workspace"
 
@@ -282,18 +285,19 @@ valid_port() { # valid_port <n> -> true for a 1-65535 TCP port number
 # ---------------------------------------------------------------------------
 # The image is defined by a standard Dockerfile (share/Dockerfile), built the
 # same way by docker and podman. The base image and in-box user are passed as
-# build args. The cache key hashes the Dockerfile content + those args, so an
-# edit to the Dockerfile forces a one-time rebuild on its own (IMAGE_LAYER_VERSION
-# remains only as a manual force-rebuild override).
+# build args. The cache key hashes the Dockerfile and entrypoint content + those
+# args, so an edit to either forces a one-time rebuild on its own
+# (IMAGE_LAYER_VERSION remains only as a manual force-rebuild override).
 image_exists() { # image_exists <tag>
   "$ENGINE" image exists "$1" 2>/dev/null || "$ENGINE" image inspect "$1" >/dev/null 2>&1
 }
 
 image_tag_for() { # image_tag_for <base-image>
   [ -f "$ISOPOD_DOCKERFILE" ] || die "missing Dockerfile: $ISOPOD_DOCKERFILE"
+  [ -f "$ISOPOD_ENTRYPOINT" ] || die "missing entrypoint: $ISOPOD_ENTRYPOINT"
   local hash
   hash=$({
-    cat "$ISOPOD_DOCKERFILE"
+    cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT"
     printf '%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION"
   } | cksum | awk '{print $1}')
   printf 'localhost/isopod-base:%s' "$hash"
@@ -318,9 +322,10 @@ build_image() { # build_image <base-image> -> echoes tag
   info "Building sandbox base image from $base (one-time)..." >&2
   local -a extra_build=()
   mapfile -t extra_build < <(engine_build_extra)
-  # No COPY in the base Dockerfile, so build from an empty context.
+  # Minimal build context: just the entrypoint the Dockerfile COPYs in.
   local ctx
   ctx=$(mktemp -d "${TMPDIR:-/tmp}/isopod-ctx-XXXXXX")
+  cp "$ISOPOD_ENTRYPOINT" "$ctx/isopod-entrypoint"
   if ! "$ENGINE" build "${extra_build[@]}" \
     --build-arg "ISOPOD_BASE=$base" --build-arg "ISOPOD_USER=$CONTAINER_USER" \
     -t "$tag" -f "$ISOPOD_DOCKERFILE" "$ctx" >&2; then
@@ -610,6 +615,15 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   RUN_ARGS=(run -d --name "$(ctr_name "$name")" --hostname "$name"
   --label "isopod=true" --label "isopod.name=$name"
   -p "$publish" --pids-limit 4096)
+  # Bootstrap consumed by the box entrypoint, so no host `exec` is needed to make
+  # the box reachable (see share/Dockerfile). The box's PUBLIC key for
+  # authorized_keys — never a secret, so its presence in the container env /
+  # `inspect` is fine. BOX_SUDO (1/0) is set by create only; when unset (e.g.
+  # reconfigure) the entrypoint leaves the box's existing sudo policy untouched.
+  local pubfile
+  pubfile="$(box_dir "$name")/id_ed25519.pub"
+  [ -f "$pubfile" ] && RUN_ARGS+=(-e "ISOPOD_AUTHORIZED_KEY=$(cat "$pubfile")")
+  [ -n "${BOX_SUDO:-}" ] && RUN_ARGS+=(-e "ISOPOD_SUDO=$BOX_SUDO")
   [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
   [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
   # Anti-fingerprinting hardening from the hardening profile.
@@ -776,6 +790,10 @@ cmd_create() {
   local publish="127.0.0.1::22"
   [ -n "$port" ] && publish="127.0.0.1:$port:22"
 
+  # Passwordless sudo on by default (1), off with --no-sudo (0). The box
+  # entrypoint applies this from the run env; see build_run_args.
+  local BOX_SUDO
+  [ "$no_sudo" -eq 0 ] && BOX_SUDO=1 || BOX_SUDO=0
   build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${expose_specs[@]}"
 
   info "Starting container ($ENGINE)..."
@@ -799,21 +817,11 @@ cmd_create() {
   } >"$(box_dir "$name")/meta"
   write_box_config "$name"
 
-  # sudo policy + authorized key, injected at runtime (root inside the box
-  # only — which, under rootless podman, is just your own unprivileged UID
-  # on the host)
+  # The box entrypoint has already applied the sudo policy and authorized key
+  # from the run env (see build_run_args / share/Dockerfile), so the box is
+  # reachable over SSH without any host-side `exec`.
   local ctr
   ctr=$(ctr_name "$name")
-  if [ "$no_sudo" -eq 0 ]; then
-    "$ENGINE" exec "$ctr" sh -c \
-      "printf '%s\n' '$CONTAINER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$CONTAINER_USER && chmod 440 /etc/sudoers.d/$CONTAINER_USER"
-  fi
-  "$ENGINE" exec -i "$ctr" sh -c \
-    "install -d -m 700 -o $CONTAINER_USER -g $CONTAINER_USER /home/$CONTAINER_USER/.ssh \
-     && cat > /home/$CONTAINER_USER/.ssh/authorized_keys \
-     && chown $CONTAINER_USER:$CONTAINER_USER /home/$CONTAINER_USER/.ssh/authorized_keys \
-     && chmod 600 /home/$CONTAINER_USER/.ssh/authorized_keys" \
-    <"$(box_dir "$name")/id_ed25519.pub"
 
   ensure_ssh_include
   write_ssh_include
