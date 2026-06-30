@@ -29,6 +29,8 @@ case "$cmd" in
   exec)    exit 0 ;;
   cp)      exit 0 ;;
   inspect) echo "running" ;;                # state status
+  commit)  exit 0 ;;                        # snapshot for reconfigure
+  rmi)     exit 0 ;;                         # drop old snapshot
   start|stop) exit 0 ;;
   rm)      exit 0 ;;
   *)       exit 0 ;;
@@ -201,6 +203,48 @@ EOF
   run "$ISOPOD_ROOT/isopod" create demo --dockerfile /no/such/Dockerfile
   assert_failure
   assert_output --partial "--dockerfile not found"
+}
+
+# ---- config / reconfigure ----------------------------------------------------
+@test "create writes a readable per-box config.yaml" {
+  run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --memory 4g --color teal
+  assert_success
+  cfg="$ISOPOD_CONFIG_DIR/boxes/demo/config.yaml"
+  [ -f "$cfg" ]
+  run cat "$cfg"
+  assert_output --partial "REFERENCE ONLY"
+  assert_output --partial "memory: 4g"
+  assert_output --partial "- 3001:3000"
+}
+
+@test "config prints the box's config.yaml" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" config demo
+  assert_success
+  assert_output --partial "isopod reconfigure demo"
+  assert_output --partial "color:"
+}
+
+@test "reconfigure snapshots the box and recreates it with new settings" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" reconfigure demo --memory 8g --expose 5173
+  assert_success
+  # snapshot to a per-box image, then recreate from it with the new flags
+  assert_stub_called "podman commit isopod-demo localhost/isopod-box-demo:"
+  assert_stub_called "podman run .*--memory 8g"
+  assert_stub_called 'podman run .*-p 127\.0\.0\.1:5173:5173'
+  # records updated in both meta and config.yaml
+  run grep '^memory=8g$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/config.yaml"
+  assert_output --partial "memory: 8g"
+  assert_output --partial "- 5173:5173"
+}
+
+@test "reconfigure errors on an unknown box" {
+  run "$ISOPOD_ROOT/isopod" reconfigure ghost --memory 4g
+  assert_failure
+  assert_output --partial "no such sandbox"
 }
 
 @test "fetch requires a box name" {

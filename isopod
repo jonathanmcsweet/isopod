@@ -174,6 +174,60 @@ meta_get() { # meta_get <name> <key>
   sed -n "s/^$2=//p" "$f" | head -1
 }
 
+meta_set() { # meta_set <name> <key> <value> — replace or append a meta line
+  local f tmp
+  f="$(box_dir "$1")/meta"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/isopod-meta-XXXXXX")"
+  grep -v "^$2=" "$f" 2>/dev/null >"$tmp" || true
+  printf '%s=%s\n' "$2" "$3" >>"$tmp"
+  mv "$tmp" "$f"
+}
+
+# Per-box config.yaml — a readable, isopod-owned mirror of the reconfigurable
+# settings (see share/box-config.yaml). Rendered from meta; the user edits it and
+# `isopod reconfigure` reads it back.
+box_config_file() { printf '%s/config.yaml' "$(box_dir "$1")"; }
+
+write_box_config() { # write_box_config <name>
+  local name="$1" image created color memory cpus expose expose_yaml e
+  image=$(meta_get "$name" image || true)
+  created=$(meta_get "$name" created || true)
+  color=$(meta_get "$name" color || true)
+  memory=$(meta_get "$name" memory || true)
+  cpus=$(meta_get "$name" cpus || true)
+  expose=$(meta_get "$name" expose || true)
+  expose_yaml="expose: []"
+  if [ -n "$expose" ]; then
+    expose_yaml="expose:"
+    local IFS=,
+    for e in $expose; do expose_yaml+=$'\n'"  - $e"; done
+  fi
+  # All of the above are consumed by the template via render_tmpl (invisible to
+  # the linter); name them here so they don't read as unused.
+  : "$image" "$created" "$color" "$memory" "$cpus" "$expose_yaml"
+  render_tmpl box-config.yaml >"$(box_config_file "$name")"
+}
+
+# Read a scalar value from a box's config.yaml (surrounding double-quotes stripped).
+config_get() { # config_get <name> <key>
+  local f v
+  f="$(box_config_file "$1")"
+  [ -f "$f" ] || return 1
+  v=$(sed -n "s/^$2: *//p" "$f" | head -1)
+  v="${v%\"}"
+  v="${v#\"}"
+  printf '%s' "$v"
+}
+
+# Read the expose list from a box's config.yaml (one HOSTPORT:CONTAINERPORT/line).
+# It's the only YAML list in the file, so its `- item` lines are unambiguous.
+config_expose() { # config_expose <name>
+  local f
+  f="$(box_config_file "$1")"
+  [ -f "$f" ] || return 0
+  sed -n 's/^[[:space:]]*-[[:space:]]*//p' "$f"
+}
+
 valid_name() {
   [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,40}$ ]]
 }
@@ -506,6 +560,31 @@ hardening_run_args() { # hardening_run_args <engine>
   fi
 }
 
+# Assemble the `$ENGINE run` argument list for a box into the global RUN_ARGS
+# array (bash can't return arrays). Shared by create and reconfigure so the two
+# can't drift. Hardening masks are read fresh from the profile each time.
+RUN_ARGS=()
+build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [host:ctr expose...]
+  local name="$1" image="$2" publish="$3" memory="$4" cpus="$5"
+  shift 5
+  RUN_ARGS=(run -d --name "$(ctr_name "$name")" --hostname "$name"
+  --label "isopod=true" --label "isopod.name=$name"
+  -p "$publish" --pids-limit 4096)
+  [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
+  [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
+  # Anti-fingerprinting hardening from the hardening profile.
+  local -a hard_args=()
+  mapfile -t hard_args < <(hardening_run_args "$ENGINE")
+  [ "${#hard_args[@]}" -gt 0 ] && RUN_ARGS+=("${hard_args[@]}")
+  # Loopback-only app port publishings (from --expose / config.yaml).
+  local spec
+  for spec in "$@"; do [ -n "$spec" ] && RUN_ARGS+=(-p "127.0.0.1:$spec"); done
+  # ISOPOD_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
+  # shellcheck disable=SC2206
+  [ -n "${ISOPOD_RUN_ARGS:-}" ] && RUN_ARGS+=($ISOPOD_RUN_ARGS)
+  RUN_ARGS+=("$image")
+}
+
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
@@ -608,7 +687,7 @@ cmd_create() {
   # 'PORT' (host port = container port) or 'HOSTPORT:CONTAINERPORT'. Bound to
   # 127.0.0.1 only, matching the SSH binding — a box never listens on all host
   # interfaces unless you opt in with ISOPOD_RUN_ARGS.
-  local -a expose_args=() expose_specs=()
+  local -a expose_specs=()
   local spec host_p ctr_p
   for spec in "${exposes[@]:-}"; do
     [ -z "$spec" ] && continue
@@ -618,7 +697,6 @@ cmd_create() {
     esac
     valid_port "$host_p" && valid_port "$ctr_p" ||
       die "invalid --expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
-    expose_args+=(-p "127.0.0.1:$host_p:$ctr_p")
     expose_specs+=("$host_p:$ctr_p")
   done
 
@@ -658,24 +736,10 @@ cmd_create() {
   local publish="127.0.0.1::22"
   [ -n "$port" ] && publish="127.0.0.1:$port:22"
 
-  local -a run_args=(run -d --name "$(ctr_name "$name")" --hostname "$name"
-  --label "isopod=true" --label "isopod.name=$name"
-  -p "$publish" --pids-limit 4096)
-  [ -n "$memory" ] && run_args+=(--memory "$memory")
-  [ -n "$cpus" ] && run_args+=(--cpus "$cpus")
-  # Anti-fingerprinting hardening from security/hardening.conf.
-  local -a hard_args=()
-  mapfile -t hard_args < <(hardening_run_args "$ENGINE")
-  [ "${#hard_args[@]}" -gt 0 ] && run_args+=("${hard_args[@]}")
-  # Loopback-only app port publishings from --expose.
-  [ "${#expose_args[@]}" -gt 0 ] && run_args+=("${expose_args[@]}")
-  # ISOPOD_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
-  # shellcheck disable=SC2206
-  [ -n "${ISOPOD_RUN_ARGS:-}" ] && run_args+=($ISOPOD_RUN_ARGS)
-  run_args+=("$tag")
+  build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${expose_specs[@]}"
 
   info "Starting container ($ENGINE)..."
-  "$ENGINE" "${run_args[@]}" >/dev/null
+  "$ENGINE" "${RUN_ARGS[@]}" >/dev/null
 
   local hostport
   hostport=$(resolve_port "$name") || die "could not determine published SSH port"
@@ -686,11 +750,14 @@ cmd_create() {
     printf 'color=%s\n' "$hex"
     printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'port=%s\n' "$hostport"
+    printf 'memory=%s\n' "$memory"
+    printf 'cpus=%s\n' "$cpus"
     printf 'expose=%s\n' "$(
       IFS=,
       printf '%s' "${expose_specs[*]:-}"
     )"
   } >"$(box_dir "$name")/meta"
+  write_box_config "$name"
 
   # sudo policy + authorized key, injected at runtime (root inside the box
   # only — which, under rootless podman, is just your own unprivileged UID
@@ -1183,6 +1250,146 @@ cmd_stop() {
   info "stopped '$name'"
 }
 
+# Print a box's config.yaml (the readable record of its reconfigurable settings).
+cmd_config() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: isopod config <name>"
+  require_box "$name"
+  [ -f "$(box_config_file "$name")" ] || write_box_config "$name"
+  cat "$(box_config_file "$name")"
+}
+
+# Apply changed run settings to an existing box. Container run-config (ports,
+# memory, cpus, masks) can't be changed in place, so we snapshot the box to an
+# image (preserving its workspace + installed packages), then recreate from that
+# image with the new flags. Identity (SSH key, host key, color, ssh_config) is
+# preserved. Desired settings come from config.yaml; flags override it.
+cmd_reconfigure() {
+  local name="" memory="" cpus="" color="" memory_set=0 cpus_set=0 color_set=0 expose_set=0
+  local -a exposes=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
+    case "$1" in
+      --memory)
+        memory="$2" memory_set=1
+        shift 2
+        ;;
+      --cpus)
+        cpus="$2" cpus_set=1
+        shift 2
+        ;;
+      --color)
+        color="$2" color_set=1
+        shift 2
+        ;;
+      --expose)
+        exposes+=("$2") expose_set=1
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      -*) die "unknown option for reconfigure: $1" ;;
+      *)
+        [ -z "$name" ] && name="$1" || die "unexpected argument: $1"
+        shift
+        ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: isopod reconfigure <name> [--memory|--cpus|--color|--expose ...]"
+  require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  acquire_lock
+
+  # config.yaml is the source of truth (synthesize it for pre-feature boxes),
+  # with any flags overriding individual fields.
+  [ -f "$(box_config_file "$name")" ] || write_box_config "$name"
+  local d_memory d_cpus d_color
+  d_memory=$(config_get "$name" memory || true)
+  d_cpus=$(config_get "$name" cpus || true)
+  d_color=$(config_get "$name" color || true)
+  local -a d_expose=()
+  mapfile -t d_expose < <(config_expose "$name")
+  [ "$memory_set" = 1 ] && d_memory="$memory"
+  [ "$cpus_set" = 1 ] && d_cpus="$cpus"
+  [ "$color_set" = 1 ] && d_color="$color"
+  [ "$expose_set" = 1 ] && d_expose=("${exposes[@]}")
+
+  # validate + normalize the exposes
+  local -a expose_specs=()
+  local spec host_p ctr_p
+  for spec in "${d_expose[@]:-}"; do
+    [ -z "$spec" ] && continue
+    case "$spec" in
+      *:*) host_p="${spec%%:*}" ctr_p="${spec##*:}" ;;
+      *) host_p="$spec" ctr_p="$spec" ;;
+    esac
+    valid_port "$host_p" && valid_port "$ctr_p" ||
+      die "invalid expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
+    expose_specs+=("$host_p:$ctr_p")
+  done
+
+  # resolve color to a hex (keep the current one if unset)
+  local hex
+  hex=$(meta_get "$name" color || true)
+  if [ -n "$d_color" ]; then
+    if [[ "$d_color" =~ ^#?[0-9a-fA-F]{6}$ ]]; then
+      hex="#${d_color#\#}"
+    else
+      hex=$(preset_color "$d_color") || die "unknown color '$d_color' (use a preset or '#rrggbb')"
+    fi
+  fi
+
+  local ctr
+  ctr=$(ctr_name "$name")
+  "$ENGINE" inspect "$ctr" >/dev/null 2>&1 || die "container for '$name' is missing; recreate the box"
+
+  # Snapshot the box so the recreate keeps the workspace + installed packages.
+  local snap old_img
+  old_img=$(meta_get "$name" image || true)
+  snap="localhost/isopod-box-$name:r$(date -u +%Y%m%d%H%M%S)"
+  info "Snapshotting '$name' (preserves your workspace and installed packages)..."
+  "$ENGINE" commit "$ctr" "$snap" >/dev/null || die "could not snapshot the box"
+
+  # Recreate from the snapshot with the new flags, reusing the box's SSH port.
+  local port
+  port=$(meta_get "$name" port)
+  "$ENGINE" rm -f "$ctr" >/dev/null 2>&1 || true
+  build_run_args "$name" "$snap" "127.0.0.1:$port:22" "$d_memory" "$d_cpus" "${expose_specs[@]}"
+  info "Recreating the container with the new settings ($ENGINE)..."
+  if ! "$ENGINE" "${RUN_ARGS[@]}" >/dev/null; then
+    die "recreate failed — your snapshot is saved as '$snap'"
+  fi
+
+  # Refresh runtime state and the box's records.
+  local hostport
+  hostport=$(resolve_port "$name") || die "could not determine published SSH port"
+  meta_set "$name" image "$snap"
+  meta_set "$name" port "$hostport"
+  meta_set "$name" memory "$d_memory"
+  meta_set "$name" cpus "$d_cpus"
+  meta_set "$name" color "$hex"
+  meta_set "$name" expose "$(
+    IFS=,
+    printf '%s' "${expose_specs[*]:-}"
+  )"
+  write_ssh_include
+  scan_host_key "$name" >/dev/null 2>&1 || true
+  wait_for_ssh "$name" || warn "box recreated but SSH didn't authenticate yet (check: isopod info $name)"
+  apply_color "$name" "$hex" || warn "could not apply window color (the box is fine without it)"
+  write_box_config "$name"
+
+  # Drop the previous snapshot image (never the shared base).
+  case "$old_img" in
+    localhost/isopod-box-"$name":*) "$ENGINE" rmi "$old_img" >/dev/null 2>&1 || true ;;
+  esac
+
+  info "reconfigured '$name' — see: isopod info $name"
+}
+
 cmd_shell() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod shell <name>"
@@ -1412,6 +1619,8 @@ main() {
     shell | sh) cmd_shell "$@" ;;
     start) cmd_start "$@" ;;
     stop) cmd_stop "$@" ;;
+    reconfigure | reconfig) cmd_reconfigure "$@" ;;
+    config) cmd_config "$@" ;;
     export) cmd_export "$@" ;;
     fetch) cmd_fetch "$@" ;;
     remap) cmd_remap "$@" ;;

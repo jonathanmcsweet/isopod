@@ -1,0 +1,25 @@
+# isopod box '$name' — configuration (REFERENCE ONLY; not a runnable compose file).
+#
+# isopod reads and writes this file. It is deliberately YAML so it's easy to read,
+# but it is NOT docker-compose and you cannot 'compose up' it: a working box also
+# needs the per-box SSH key, pinned host key, sudo policy, and workspace that
+# isopod sets up separately, which compose can't reproduce. This file documents
+# and controls the box; isopod owns and parses it.
+#
+# Edit a value below, then run:   isopod reconfigure $name
+# isopod recreates the container with the new settings while preserving your
+# workspace and anything you installed. Fingerprint masks come from your hardening
+# profile (not here); the base image is a managed snapshot — to change the base,
+# create a new box.
+#
+#   image:   $image
+#   created: $created
+
+# --memory limit, e.g. 4g (blank = unlimited)
+memory: $memory
+# --cpus limit, e.g. 2 (blank = unlimited)
+cpus: $cpus
+# IDE window tint: a preset name or #rrggbb (quoted — a bare # is a YAML comment)
+color: "$color"
+# host<-container TCP forwards on 127.0.0.1, as HOSTPORT:CONTAINERPORT
+$expose_yaml

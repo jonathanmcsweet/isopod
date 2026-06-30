@@ -222,6 +222,23 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   assert_output "dev"
 }
 
+@test "live: reconfigure preserves the workspace and applies a new port" {
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
+  bssh -- sh -c 'echo keep-me > /home/dev/workspace/marker.txt'
+  run "$ISOPOD_ROOT/isopod" reconfigure "$BOX" --expose 18082:8080
+  assert_success
+  # the workspace file survived the snapshot+recreate
+  run bssh -o ConnectTimeout=10 -- cat /home/dev/workspace/marker.txt
+  assert_output "keep-me"
+  # the newly-added forward is live
+  bssh -- sh -c 'cd /home/dev/workspace && echo reconf-ok > index.html &&
+                 setsid python3 -m http.server 8080 >/dev/null 2>&1 < /dev/null & sleep 1'
+  run bash -c 'for i in $(seq 1 10); do
+                 curl -fsS http://127.0.0.1:18082/ && exit 0; sleep 0.5; done; exit 1'
+  assert_success
+  assert_output --partial "reconf-ok"
+}
+
 @test "live: rm destroys the container" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   "$ISOPOD_ROOT/isopod" rm "$BOX" --force

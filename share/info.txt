@@ -7,4 +7,5 @@ forwards  : $forwards
 workspace : $WORKSPACE
 color     : $(meta_get "$name" color || true)
 created   : $(meta_get "$name" created || true)
+config    : $(box_config_file "$name")    (edit, then: isopod reconfigure $name)
 key       : $(box_dir "$name")/id_ed25519

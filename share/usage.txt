@@ -8,6 +8,8 @@ Usage:
   isopod shell <name>                 Open a shell inside the sandbox
   isopod start <name>                 Start a stopped sandbox
   isopod stop <name>                  Stop a running sandbox
+  isopod config <name>                Show a box's editable config (config.yaml)
+  isopod reconfigure <name> [opts]    Apply new run settings to an existing box
   isopod export <name> [dest]         Copy the workspace OUT of the sandbox
   isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
   isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
@@ -43,6 +45,20 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
   --no-sudo             Do not give the in-box user passwordless sudo
   --port <n>            Fixed host port for SSH (default: random free port,
                         bound to 127.0.0.1 only)
+
+Reconfiguring a box (change run settings without starting over):
+  Every box has an editable config at $CONFIG_DIR/boxes/<name>/config.yaml
+  (a readable YAML reference — isopod owns it; it is NOT a runnable compose file).
+  View it with 'isopod config <name>'. Edit a value, or pass flags below, then run
+  'isopod reconfigure <name>'. isopod snapshots the box (preserving your workspace
+  and installed packages), then recreates the container with the new settings.
+
+Options for reconfigure (or edit config.yaml; each accepts '--opt value' and '--opt=value'):
+  --expose <spec>       Replace the box's forwarded ports (repeatable; same form
+                        as create's --expose)
+  --memory <size>       New memory limit, e.g. 8g (blank clears it)
+  --cpus <n>            New CPU limit, e.g. 4 (blank clears it)
+  --color <preset|hex>  Re-tint the IDE window
 
 Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--opt=value'):
   --name <new name>     New author/committer name to write. Defaults to

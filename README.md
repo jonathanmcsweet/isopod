@@ -217,7 +217,19 @@ isopod create web --repo <url> --expose 3001:3000   # box :3000 -> localhost:300
 isopod create web --repo <url> --expose 8080         # same port on both sides
 ```
 
-Port mappings are fixed at create time (engine port mappings can't be added to a running container) and are restored across stop/start. `isopod info <name>` lists them. In the VSCodium Remote-SSH window, ports a server opens are also auto-forwarded by the IDE.
+Port mappings are set at create time (engine port mappings can't be added to a *running* container) and restored across stop/start. `isopod info <name>` lists them. To add or change ports later without starting over, use `isopod reconfigure` (below). In the VSCodium Remote-SSH window, ports a server opens are also auto-forwarded by the IDE.
+
+### Changing a box after create (`reconfigure`)
+
+A container's run settings — ports, memory, cpus, fingerprint masks — can't be edited in place; the engine bakes them in at creation. So every box has a readable config you can change, and isopod re-applies it for you:
+
+```sh
+isopod config web                       # view the box's config.yaml
+isopod reconfigure web --expose 5173 --memory 8g   # or edit config.yaml, then:
+isopod reconfigure web
+```
+
+The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — a YAML file that's deliberately readable, but **isopod-owned and not a runnable compose file** (a working box also needs the per-box SSH key, pinned host key, and workspace that compose can't reproduce). On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box.
 
 ## FAQ
 
