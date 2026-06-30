@@ -358,16 +358,24 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   assert_output --partial "already exists"
 }
 
-@test "create with --no-sudo does not install a sudoers entry" {
+@test "create with --no-sudo tells the box entrypoint to drop sudo" {
   run "$ISOPOD_ROOT/isopod" create demo --no-sudo --color teal
   assert_success
-  assert_stub_not_called "sudoers"
+  assert_stub_called "run .*ISOPOD_SUDO=0"
+  assert_stub_not_called "ISOPOD_SUDO=1"
 }
 
 @test "create defaults to giving passwordless sudo" {
   run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
-  assert_stub_called "sudoers"
+  assert_stub_called "run .*ISOPOD_SUDO=1"
+}
+
+@test "create passes the box public key to the entrypoint (no exec inject)" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called "run .*ISOPOD_AUTHORIZED_KEY=ssh-ed25519"
+  assert_stub_not_called "exec .*authorized_keys"
 }
 
 # ---- list / info -------------------------------------------------------------
