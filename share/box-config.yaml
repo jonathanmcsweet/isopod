@@ -1,0 +1,29 @@
+# isopod box '$name' — REFERENCE Compose file. isopod does NOT run this.
+#
+# This is a real, valid Compose service describing the box, kept so you can read
+# it, copy it, or adapt it elsewhere. But isopod launches boxes with podman/docker
+# 'run' directly, NOT from this file — a working box also needs a generated SSH
+# key, a pinned host key, sudo, and your cloned workspace, none of which Compose
+# sets up. A 'compose up' on this gives you a bare container without those.
+#
+# isopod reads a few fields back when you run 'isopod reconfigure $name':
+#   ports (your --expose forwards), mem_limit, cpus, and x-isopod-color.
+# Everything else (image, security_opt/masks, pids_limit, labels) is managed by
+# isopod — editing it here has no effect. Fingerprint masks come from your
+# hardening profile. The image is a managed snapshot; to change the base image,
+# create a new box.
+#
+# Edit a reconfigurable value, then run:   isopod reconfigure $name
+#
+#   created: $created
+
+services:
+  $name:
+    container_name: $(ctr_name "$name")
+    hostname: $name
+    image: $image
+    labels:
+      isopod: "true"
+      isopod.name: "$name"
+    pids_limit: 4096
+${limits_block}${ports_block}${hardening_block}    x-isopod-color: "$color"
