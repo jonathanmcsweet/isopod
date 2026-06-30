@@ -62,8 +62,10 @@ exit 0
 EOF
   chmod +x "$STUB_DIR/ssh-keyscan"
 
-  # ssh: used by wait_for_ssh (BatchMode true) — succeed immediately.
+  # ssh: used by wait_for_ssh (BatchMode true) and every box op — succeed.
   make_stub ssh 0
+  # scp: used by copy-in / export to move files over SSH.
+  make_stub scp 0
   make_stub flatpak 1   # no flatpak by default
 }
 
@@ -117,11 +119,11 @@ EOF
   assert_output --partial "ForwardAgent no"
 }
 
-@test "create with --copy issues a cp into the container, not a mount" {
+@test "create with --copy scps into the container, not a mount" {
   mkdir -p "$TEST_TMP/src"; echo hi > "$TEST_TMP/src/file.txt"
   run "$ISOPOD_ROOT/isopod" create demo --copy "$TEST_TMP/src" --color blue
   assert_success
-  assert_stub_called "podman cp $TEST_TMP/src isopod-demo:"
+  assert_stub_called "scp .* -r $TEST_TMP/src dev@127.0.0.1:/home/dev/workspace/src"
   # crucially, no bind mount flag should ever appear in the run command
   refute_output --partial "-v "
   assert_stub_not_called 'podman run .*--volume'
@@ -132,7 +134,7 @@ EOF
   mkdir -p "$TEST_TMP/src"; echo hi > "$TEST_TMP/src/file.txt"
   run "$ISOPOD_ROOT/isopod" create demo --copy="$TEST_TMP/src" --color blue
   assert_success
-  assert_stub_called "podman cp $TEST_TMP/src isopod-demo:"
+  assert_stub_called "scp .* -r $TEST_TMP/src dev@127.0.0.1:/home/dev/workspace/src"
 }
 
 @test "create applies Tier 1 fingerprint masks from the hardening profile" {
@@ -345,10 +347,10 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   assert_output --partial "Real Name <real@me.com>"
 }
 
-@test "create with --repo clones inside the box" {
+@test "create with --repo clones inside the box over ssh" {
   run "$ISOPOD_ROOT/isopod" create demo --repo https://example.com/r.git --color blue
   assert_success
-  assert_stub_called "podman exec .*git clone"
+  assert_stub_called "ssh .*git clone"
 }
 
 @test "create refuses to clobber an existing box" {
