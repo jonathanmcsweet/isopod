@@ -14,7 +14,7 @@ repos:
         args: ["-S", "warning"]
         # Matches the lint scope in test/run.sh. .bats files use non-standard
         # syntax shellcheck can't parse, so they're intentionally excluded.
-        files: '^(isopod|install\.sh|verify-host-isolation\.sh|test/(run|packaging|brew-formula)\.sh)$'
+        files: '^(isopod|share/isopod-entrypoint|install\.sh|verify-host-isolation\.sh|test/(run|packaging|brew-formula)\.sh)$'
 
   - repo: https://github.com/scop/pre-commit-shfmt
     rev: v3.13.1-1
@@ -23,7 +23,7 @@ repos:
         args: ["-w", "-i", "2", "-ci"]
         # Pure bash/sh only — shfmt can't parse .bats (@test) or the zsh
         # completion (completions/_isopod).
-        files: '^(isopod|install\.sh|verify-host-isolation\.sh|completions/isopod\.bash|test/(run|packaging|brew-formula)\.sh|test/helper\.bash)$'
+        files: '^(isopod|share/isopod-entrypoint|install\.sh|verify-host-isolation\.sh|completions/isopod\.bash|test/(run|packaging|brew-formula)\.sh|test/helper\.bash)$'
 
   # GitHub Actions: static lint of workflow files, on commit. Self-provisions via
   # Go (no system install). Already scoped to ^.github/workflows/ by the hook.

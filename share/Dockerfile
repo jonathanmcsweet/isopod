@@ -45,18 +45,12 @@ RUN printf '%s\n' \
  && grep -q 'Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config \
       || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
 
-# Entrypoint: regenerate host keys on first boot so every box is unique, then
-# run sshd in the foreground as PID 1.
-RUN printf '%s\n' \
-      '#!/bin/sh' \
-      'if [ ! -f /etc/ssh/.isopod-host-keys ]; then' \
-      '  rm -f /etc/ssh/ssh_host_*' \
-      '  ssh-keygen -A >/dev/null' \
-      '  touch /etc/ssh/.isopod-host-keys' \
-      'fi' \
-      'mkdir -p /run/sshd' \
-      'exec /usr/sbin/sshd -D -e' \
-      > /usr/local/bin/isopod-entrypoint \
+# Entrypoint: shipped as share/isopod-entrypoint and COPYed in (not generated
+# inline) so it stays an independently lintable script. It runs the bootstrap
+# (host keys, authorized key, sudo policy) before sshd; see that file. The
+# in-box user is baked into /etc/isopod-user for the entrypoint to read.
+COPY isopod-entrypoint /usr/local/bin/isopod-entrypoint
+RUN printf '%s\n' "$ISOPOD_USER" > /etc/isopod-user \
  && chmod +x /usr/local/bin/isopod-entrypoint
 EXPOSE 22
 CMD ["/usr/local/bin/isopod-entrypoint"]
