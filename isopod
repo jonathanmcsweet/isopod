@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="1.1.0"
+ISOPOD_VERSION="1.2.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -47,6 +47,10 @@ DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
 IMAGE_LAYER_VERSION="2" # bump to force image rebuild when Dockerfile changes
 CONTAINER_USER="dev"
 WORKSPACE="/home/dev/workspace"
+# Default guest memory when a Tier 3 microVM runtime is active and the user gave
+# no --memory (a microVM boots a fixed-size guest; without this it would be
+# starved). Override with ISOPOD_MICROVM_MEMORY or an explicit --memory.
+MICROVM_DEFAULT_MEMORY="${ISOPOD_MICROVM_MEMORY:-2g}"
 
 # ---------------------------------------------------------------------------
 # small helpers
@@ -446,6 +450,12 @@ scan_host_key() { # scan_host_key <name>
 # Connect to a box using its own key/port/known_hosts explicitly, so internal
 # SSH never depends on ~/.ssh/config resolution (which OpenSSH derives from the
 # passwd database, not $HOME — important for hermetic tests and odd setups).
+#
+# A remote command passed here runs non-interactively, so it gets sshd's PATH
+# (the system default), NOT the PATH your ~/.bashrc would build. Built-in flows
+# only need tools on the system PATH (git, python3 in /usr/bin). A box op that
+# depends on a tool you added to PATH from a shell rc file will not see it —
+# install such tools system-wide, or run them yourself from `isopod shell`.
 box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
   local name="$1"
   shift
@@ -482,6 +492,20 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
     -o StrictHostKeyChecking=yes \
     -o ForwardAgent=no -o ForwardX11=no \
     "${opts[@]}" "$CONTAINER_USER@127.0.0.1" "${rcmd[@]}"
+}
+
+# Stream a tar archive between host and box over SSH. File transfer uses tar
+# (not scp) so it preserves what `$ENGINE cp` did — mtimes, modes, symlinks, and
+# special files — instead of dereferencing symlinks and resetting timestamps the
+# way scp would. Going over SSH (not `$ENGINE cp`) also means it reaches the
+# workload under any runtime, including a microVM. Callers pipe a tar stream:
+#   tar -C src -cf - item | box_tar_in  <name> <dest-dir>      (host -> box)
+#   box_tar_out <name> <src-dir> | tar -C dest -xpf -          (box  -> host)
+box_tar_in() { # box_tar_in <name> <dest-dir>   (reads a tar stream on stdin)
+  box_ssh "$1" -- tar -C "$2" -xpf -
+}
+box_tar_out() { # box_tar_out <name> <src-dir>  (writes a tar stream to stdout)
+  box_ssh "$1" -- tar -C "$2" -cf - .
 }
 
 wait_for_ssh() { # wait until we can actually authenticate
@@ -526,13 +550,16 @@ auto_color() { # rotate presets based on how many boxes exist
 # Write/merge .vscode/settings.json inside the box so every IDE window
 # attached to this box is tinted. Lives in the container, not on the host.
 # The merge logic lives in lib/apply_color.py; we stream it into the box over
-# stdin so nothing is left behind on the container filesystem.
+# SSH stdin so nothing is left behind on the container filesystem, and so it
+# reaches the workload under any runtime (a microVM included). sshd does not
+# import the client environment, so the box-specific values are passed inline
+# with `env` on the remote command.
 apply_color() { # apply_color <name> <hexcolor>
   local name="$1" hex="$2" script="$ISOPOD_LIB/apply_color.py"
   [ -f "$script" ] || die "missing helper: $script (is your isopod install complete?)"
-  "$ENGINE" exec -i -u "$CONTAINER_USER" \
-    -e "ISOPOD_COLOR=$hex" -e "ISOPOD_NAME=$name" -e "ISOPOD_WS=$WORKSPACE" \
-    "$(ctr_name "$name")" python3 - <"$script"
+  box_ssh "$name" -- \
+    env "ISOPOD_COLOR=$hex" "ISOPOD_NAME=$name" "ISOPOD_WS=$WORKSPACE" \
+    python3 - <"$script"
 }
 
 # Translate the hardening profile into `$ENGINE run` flags, printed one per line
@@ -603,6 +630,48 @@ hardening_run_args() { # hardening_run_args <engine>
     done
     [ -n "$joined" ] && printf '%s\n' "--security-opt" "mask=$joined"
   fi
+}
+
+# The runtime isopod will run boxes under, resolved the same way as the box
+# flags: ISOPOD_RUNTIME wins, else the last `runtime`/`no-runtime` across the
+# shipped baseline and the user override. Echoes nothing when no runtime is set.
+active_runtime() {
+  if [ -n "${ISOPOD_RUNTIME:-}" ]; then
+    printf '%s' "$ISOPOD_RUNTIME"
+    return 0
+  fi
+  local f key val r=""
+  for f in "$HARDENING_CONF" "$USER_HARDENING_CONF"; do
+    [ -f "$f" ] || continue
+    while read -r key val _; do
+      case "$key" in
+        runtime) r="$val" ;;
+        no-runtime) r="" ;;
+      esac
+    done <"$f"
+  done
+  printf '%s' "$r"
+}
+
+# Tier of a runtime from the share/runtimes table: 2 (syscall sandbox) or 3
+# (microVM). Returns 1 (no output) when the runtime is unlisted or the table is
+# missing, so callers treat it as "tier unknown".
+runtime_tier() { # runtime_tier <name>
+  local want="$1" f="$ISOPOD_SHARE/runtimes" name tier
+  [ -n "$want" ] && [ -f "$f" ] || return 1
+  while read -r name tier _; do
+    case "$name" in '' | '#'*) continue ;; esac
+    [ "$name" = "$want" ] && {
+      printf '%s' "$tier"
+      return 0
+    }
+  done <"$f"
+  return 1
+}
+
+# True when the configured runtime is a Tier 3 microVM (its own guest kernel).
+is_microvm_runtime() {
+  [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
 }
 
 # Assemble the `$ENGINE run` argument list for a box into the global RUN_ARGS
@@ -790,6 +859,13 @@ cmd_create() {
   local publish="127.0.0.1::22"
   [ -n "$port" ] && publish="127.0.0.1:$port:22"
 
+  # A Tier 3 microVM runtime boots a fixed-size guest; if the user gave no
+  # --memory, size it so the guest isn't starved.
+  if [ -z "$memory" ] && is_microvm_runtime; then
+    memory="$MICROVM_DEFAULT_MEMORY"
+    info "microVM runtime active — defaulting --memory to $memory (override with --memory)"
+  fi
+
   # Passwordless sudo on by default (1), off with --no-sudo (0). The box
   # entrypoint applies this from the run env; see build_run_args.
   local BOX_SUDO
@@ -829,14 +905,14 @@ cmd_create() {
   scan_host_key "$name" || die "sshd in the container never came up (check: $ENGINE logs $ctr)"
   wait_for_ssh "$name" || die "could not authenticate to the box over SSH"
 
-  # populate the workspace
-  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" mkdir -p "$WORKSPACE"
+  # populate the workspace (over SSH, so it works under any runtime)
+  box_ssh "$name" -- mkdir -p "$WORKSPACE"
   if [ -n "$repo" ]; then
     info "Cloning $repo inside the box..."
     local -a clone=(git clone)
     [ -n "$branch" ] && clone+=(--branch "$branch")
     clone+=("$repo" "$WORKSPACE")
-    "$ENGINE" exec -u "$CONTAINER_USER" -w "/home/$CONTAINER_USER" "$ctr" "${clone[@]}" ||
+    box_ssh "$name" -- "${clone[@]}" ||
       warn "git clone failed inside the box — the sandbox was still created.
          Fix and retry from inside:  isopod shell $name   then: git clone ... $WORKSPACE
          (private repo? use an https token URL, or copy a deploy key in with copy-in)"
@@ -857,17 +933,18 @@ cmd_create() {
 do_copy_in() { # do_copy_in <name> <path>...
   local name="$1"
   shift
-  local ctr
-  ctr=$(ctr_name "$name")
-  "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" mkdir -p "$WORKSPACE"
-  local p base
+  # Stream each item in as a tar archive over SSH: the in-box user runs the
+  # extraction (so files arrive owned by it), tar preserves mtimes/modes/symlinks
+  # like `$ENGINE cp` did, and it reaches the workload under any runtime.
+  box_ssh "$name" -- mkdir -p "$WORKSPACE"
+  local p rp base
   for p in "$@"; do
     [ -e "$p" ] || die "path does not exist: $p"
-    base=$(basename "$(realpath "$p")")
+    rp=$(realpath "$p")
+    base=$(basename "$rp")
     info "Copying $p -> $WORKSPACE/$base (one-time copy, not a mount)"
-    "$ENGINE" cp "$p" "$ctr:$WORKSPACE/$base"
+    tar -C "$(dirname "$rp")" -cf - "$base" | box_tar_in "$name" "$WORKSPACE"
   done
-  "$ENGINE" exec "$ctr" chown -R "$CONTAINER_USER:$CONTAINER_USER" "$WORKSPACE"
 }
 
 cmd_copy_in() {
@@ -887,7 +964,12 @@ cmd_export() {
   dest="${dest:-./isopod-$name-export}"
   [ -e "$dest" ] && die "destination already exists: $dest"
   info "Copying $WORKSPACE out of the box to $dest ..."
-  "$ENGINE" cp "$(ctr_name "$name"):$WORKSPACE" "$dest"
+  # Stream the workspace out as a tar archive (preserves mtimes/modes/symlinks).
+  mkdir -p "$dest"
+  box_tar_out "$name" "$WORKSPACE" | tar -C "$dest" -xpf - || {
+    rm -rf "$dest"
+    die "export failed (is '$name' running? try: isopod start $name)"
+  }
   info "Done: $dest"
 }
 
@@ -931,30 +1013,42 @@ cmd_fetch() {
   acquire_lock # refresh_port may rewrite the shared ssh_config
   refresh_port "$name"
   target="${target:-.}"
-  local ctr
-  ctr=$(ctr_name "$name")
 
   # Locate the git repo inside the box: $WORKSPACE itself, or — if the workspace
   # holds a single git subfolder (e.g. a repo cloned into a named dir) — that one.
+  # Run over SSH (sh -s reads the probe from stdin, so the remote shell never
+  # re-parses it) and pass $WORKSPACE in as an env var the box expands.
   local repo="$inbox_path"
   if [ -z "$repo" ]; then
-    repo=$("$ENGINE" exec -u "$CONTAINER_USER" "$ctr" sh -c '
-      ws="'"$WORKSPACE"'"
-      if git -C "$ws" rev-parse --show-toplevel >/dev/null 2>&1; then
-        git -C "$ws" rev-parse --show-toplevel; exit 0; fi
-      n=0; hit=""
-      for d in "$ws"/*/; do
-        if git -C "$d" rev-parse --show-toplevel >/dev/null 2>&1; then n=$((n+1)); hit="$d"; fi
-      done
-      [ "$n" = 1 ] && { git -C "$hit" rev-parse --show-toplevel; exit 0; }
-      exit 1' 2>/dev/null) ||
+    repo=$(
+      box_ssh "$name" -- WORKSPACE="$WORKSPACE" sh -s 2>/dev/null <<'BOXSH'
+ws="$WORKSPACE"
+if git -C "$ws" rev-parse --show-toplevel >/dev/null 2>&1; then
+  git -C "$ws" rev-parse --show-toplevel
+  exit 0
+fi
+n=0
+hit=""
+for d in "$ws"/*/; do
+  if git -C "$d" rev-parse --show-toplevel >/dev/null 2>&1; then
+    n=$((n + 1))
+    hit="$d"
+  fi
+done
+[ "$n" = 1 ] && {
+  git -C "$hit" rev-parse --show-toplevel
+  exit 0
+}
+exit 1
+BOXSH
+    ) ||
       die "no git repo found in the box under $WORKSPACE — pass --path <in-box-repo>"
   fi
 
   if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     # Target is a git repo: fetch straight from the box over SSH into <name>/*.
-    # The repo-detection exec above already proved the box is up, so re-pin its
-    # host key for the current port — keeps known_hosts valid if it changed ports.
+    # The repo-detection above already proved the box is up, so re-pin its host
+    # key for the current port — keeps known_hosts valid if it changed ports.
     local top port key kh
     scan_host_key "$name" >/dev/null 2>&1 || true
     top=$(git -C "$target" rev-parse --show-toplevel)
@@ -978,16 +1072,19 @@ cmd_fetch() {
     printf '\nCheck one out with:\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
   else
     # Target is not a git repo: drop a portable bundle for manual use — the one
-    # artifact git-over-SSH can't produce, so this path still bundles in the box.
-    local bundle_box="/tmp/isopod-$name.bundle" out="$target"
+    # artifact git-over-SSH can't produce. Stream it straight out of the box to
+    # stdout (no temp file, no cp), so it works under any runtime. `git bundle
+    # create -` (stdout) needs git >= 2.36 in the box; the default base has it,
+    # so this only matters for an unusually old custom --dockerfile base.
+    local out="$target"
     [ "$out" = "." ] && out="./isopod-$name.bundle"
     [ -d "$out" ] && out="${out%/}/isopod-$name.bundle"
     [ -e "$out" ] && die "destination already exists: $out (remove it or pick another path)"
     info "Bundling $repo inside the box..."
-    "$ENGINE" exec -u "$CONTAINER_USER" "$ctr" git -C "$repo" bundle create "$bundle_box" --branches --tags >/dev/null ||
+    box_ssh "$name" -- git -C "$repo" bundle create - --branches --tags >"$out" || {
+      rm -f "$out"
       die "git bundle failed in the box (does $repo have any commits?)"
-    "$ENGINE" cp "$ctr:$bundle_box" "$out"
-    "$ENGINE" exec "$ctr" rm -f "$bundle_box" 2>/dev/null || true
+    }
     info "'$target' is not a git repo — wrote a bundle instead: $out"
     printf '\nUse it from any clone:\n  git -C /path/to/clone fetch %s "refs/heads/*:refs/remotes/%s/*"\nor create a fresh repo from it:\n  git clone %s my-%s\n' "$out" "$name" "$out" "$name"
   fi
@@ -1172,7 +1269,9 @@ cmd_remap() {
     if [ -z "$old_email" ]; then
       if [ -d "$(box_dir "$name")" ]; then
         detect_engine "$(meta_get "$name" engine || true)"
-        old_email=$("$ENGINE" exec -u "$CONTAINER_USER" "$(ctr_name "$name")" \
+        # -n: this probe never needs stdin, so don't let ssh touch the stdin the
+        # confirmation prompt below reads from.
+        old_email=$(box_ssh "$name" -n -- \
           git -C "$WORKSPACE" config --get user.email 2>/dev/null | tr -d '\r') || true
         [ -n "$old_email" ] && info "Detected box identity from '$name': <$old_email>"
       fi
@@ -1442,8 +1541,12 @@ cmd_shell() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod shell <name>"
   require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
-  exec "$ENGINE" exec -it -u "$CONTAINER_USER" -w "$WORKSPACE" "$(ctr_name "$name")" bash
+  # Interactive shell over SSH (-t for a tty), landing in the workspace. Like
+  # every other box op, this goes through SSH so it enters the workload under
+  # any runtime — including a microVM, where the engine's exec would not. Plain
+  # `bash` (not `bash -l`) keeps the old non-login behavior: it sources ~/.bashrc,
+  # matching what `engine exec ... bash` did before.
+  exec box_ssh "$name" -t -- "cd '$WORKSPACE' 2>/dev/null; exec bash"
 }
 
 # Resolved IDE launch command (array, since Flatpak needs 'flatpak run <id>')
@@ -1624,22 +1727,37 @@ cmd_doctor() {
     if find_ide_bin "$app"; then printf '  [ok]      IDE: %-9s (%s)\n' "$app" "${IDE_CMD[*]}"; fi
   done
 
-  # Anti-fingerprinting profile
+  # Anti-fingerprinting profile + sandboxed runtime (Tier 2 syscall sandbox /
+  # Tier 3 microVM).
   if [ -f "$HARDENING_CONF" ]; then
     printf '  [ok]      hardening profile (%s)\n' "$HARDENING_CONF"
-    local rt
-    rt="${ISOPOD_RUNTIME:-$(awk '$1=="runtime"{print $2}' "$HARDENING_CONF" 2>/dev/null | tail -1)}"
+    local rt tier label
+    rt="$(active_runtime)"
     if [ -n "$rt" ]; then
+      tier="$(runtime_tier "$rt" 2>/dev/null || true)"
+      case "$tier" in
+        2) label="Tier 2 (syscall sandbox, shared kernel)" ;;
+        3) label="Tier 3 (microVM, separate kernel)" ;;
+        *) label="custom runtime (tier unknown)" ;;
+      esac
       if have "$rt" || { have podman && podman info 2>/dev/null | grep -q "$rt"; }; then
-        printf '  [ok]      Tier 2 runtime: %s\n' "$rt"
+        printf '  [ok]      sandboxed runtime: %s — %s\n' "$rt" "$label"
       else
-        printf '  [warn]    Tier 2 runtime "%s" not found on host — install/register it or boxes will fail to start\n' "$rt"
+        printf '  [warn]    runtime "%s" not found on host — install/register it or boxes will fail to start\n' "$rt"
+      fi
+      if [ "$tier" = 3 ] && [ ! -e /dev/kvm ]; then
+        printf '  [warn]    /dev/kvm absent — the microVM runtime "%s" needs it (KVM / nested virt unavailable here)\n' "$rt"
       fi
     else
-      printf '  [--]      Tier 2 runtime: off (Tier 1 masks active; see security/hardening.conf)\n'
+      printf '  [--]      sandboxed runtime: off (Tier 1 masks active; see security/hardening.conf)\n'
     fi
   else
     printf '  [warn]    hardening profile missing (%s) — boxes start WITHOUT fingerprint masks\n' "$HARDENING_CONF"
+  fi
+  if [ -e /dev/kvm ]; then
+    printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes (kata, krun) available\n'
+  else
+    printf '  [--]      /dev/kvm absent — Tier 3 microVM runtimes unavailable (Tier 1/2 still work)\n'
   fi
   have podman || have docker || {
     printf '\nInstall podman (recommended) or docker.\n'

@@ -26,3 +26,32 @@ gVisor hides the **CPU identity**, **kernel build string**, and **host boot
 epoch / boot id** that a plain shared-kernel container otherwise leaks (see
 [What still can't be mitigated](../README.md#what-still-cant-be-mitigated)). Only a
 true VM boundary closes the timing channels too.
+
+## microVM runtimes (Kata, krun) — Tier 3
+
+For the strongest boundary, isopod can run each box in a **microVM** — a
+lightweight VM with its own guest kernel and a hardware (KVM) boundary to the
+host. This is the answer to "containers share the host kernel": a kernel exploit
+or container escape is contained by the VM. Enable it through the **same**
+`runtime` directive as gVisor — isopod treats any runtime as a drop-in:
+
+- **krun** (libkrun, Podman-native): `ISOPOD_RUNTIME=krun isopod create …`
+- **Kata Containers** (pluggable Firecracker / Cloud Hypervisor / QEMU backend):
+  `ISOPOD_RUNTIME=kata isopod create …`
+
+Because isopod brings a box up entirely over SSH (no `engine exec`/`cp`), every
+operation — clone, copy-in, export, fetch, shell — enters the guest correctly
+under a microVM.
+
+**What you must do on the host**:
+
+- Have **`/dev/kvm`** (bare metal or a KVM-enabled VM; nested virt is often off
+  in cloud CI). `isopod doctor` reports whether it is present.
+- Install and register the runtime with your engine, the same way as `runsc`
+  above (`containers.conf` for Podman, `daemon.json` for Docker).
+
+When a Tier 3 runtime is active and you pass no `--memory`, isopod sizes the
+guest with a default (2g; override with `--memory` or `ISOPOD_MICROVM_MEMORY`),
+since a microVM boots a fixed-size guest. The Tier 1 fingerprint masks become
+largely redundant under a microVM — the guest has its own `/proc` and `/sys`, so
+they are left on but cost nothing.

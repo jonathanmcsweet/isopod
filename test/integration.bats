@@ -62,8 +62,17 @@ exit 0
 EOF
   chmod +x "$STUB_DIR/ssh-keyscan"
 
-  # ssh: used by wait_for_ssh (BatchMode true) — succeed immediately.
-  make_stub ssh 0
+  # ssh: used by wait_for_ssh (BatchMode true) and every box op — succeed.
+  # Drain any piped stdin (e.g. a tar stream from copy-in) so the writer does
+  # not get SIGPIPE under `set -o pipefail`; skip when stdin is a tty so
+  # non-piped calls never block.
+  cat >"$STUB_DIR/ssh" <<'EOF'
+#!/usr/bin/env bash
+echo "ssh $*" >> "$STUB_LOG"
+[ -t 0 ] || cat >/dev/null 2>&1 || true
+exit 0
+EOF
+  chmod +x "$STUB_DIR/ssh"
   make_stub flatpak 1   # no flatpak by default
 }
 
@@ -117,11 +126,12 @@ EOF
   assert_output --partial "ForwardAgent no"
 }
 
-@test "create with --copy issues a cp into the container, not a mount" {
+@test "create with --copy tars into the container, not a mount" {
   mkdir -p "$TEST_TMP/src"; echo hi > "$TEST_TMP/src/file.txt"
   run "$ISOPOD_ROOT/isopod" create demo --copy "$TEST_TMP/src" --color blue
   assert_success
-  assert_stub_called "podman cp $TEST_TMP/src isopod-demo:"
+  # files stream in over ssh as a tar archive extracted in the workspace
+  assert_stub_called "ssh .*tar -C /home/dev/workspace -xpf -"
   # crucially, no bind mount flag should ever appear in the run command
   refute_output --partial "-v "
   assert_stub_not_called 'podman run .*--volume'
@@ -132,7 +142,7 @@ EOF
   mkdir -p "$TEST_TMP/src"; echo hi > "$TEST_TMP/src/file.txt"
   run "$ISOPOD_ROOT/isopod" create demo --copy="$TEST_TMP/src" --color blue
   assert_success
-  assert_stub_called "podman cp $TEST_TMP/src isopod-demo:"
+  assert_stub_called "ssh .*tar -C /home/dev/workspace -xpf -"
 }
 
 @test "create applies Tier 1 fingerprint masks from the hardening profile" {
@@ -147,6 +157,29 @@ EOF
   ISOPOD_RUNTIME=runsc run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   assert_stub_called 'podman run .*--runtime runsc'
+  # Tier 2 shares the host kernel — no microVM memory default.
+  assert_stub_not_called 'podman run .*--memory'
+}
+
+@test "create defaults --memory for a Tier 3 microVM runtime" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called 'podman run .*--runtime krun'
+  assert_stub_called 'podman run .*--memory 2g'
+}
+
+@test "explicit --memory overrides the microVM default" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --memory 8g --color teal
+  assert_success
+  assert_stub_called 'podman run .*--memory 8g'
+  assert_stub_not_called 'podman run .*--memory 2g'
+}
+
+@test "ISOPOD_MICROVM_MEMORY overrides the microVM memory default" {
+  ISOPOD_MICROVM_MEMORY=4g ISOPOD_RUNTIME=krun \
+    run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called 'podman run .*--memory 4g'
 }
 
 @test "create builds the base image from share/Dockerfile with build args" {
@@ -345,10 +378,10 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   assert_output --partial "Real Name <real@me.com>"
 }
 
-@test "create with --repo clones inside the box" {
+@test "create with --repo clones inside the box over ssh" {
   run "$ISOPOD_ROOT/isopod" create demo --repo https://example.com/r.git --color blue
   assert_success
-  assert_stub_called "podman exec .*git clone"
+  assert_stub_called "ssh .*git clone"
 }
 
 @test "create refuses to clobber an existing box" {

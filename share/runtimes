@@ -1,0 +1,19 @@
+# isopod runtime tiers — how `isopod doctor` classifies the configured runtime
+# (the hardening.conf `runtime` directive / ISOPOD_RUNTIME) and whether
+# `isopod create` sizes a default --memory for it.
+#
+#   tier 2  syscall sandbox, shared host kernel, no /dev/kvm needed (e.g. gVisor)
+#   tier 3  microVM, separate guest kernel, needs /dev/kvm (e.g. Kata, krun)
+#
+# Columns: <runtime-name> <tier>. The name matches what you pass to --runtime
+# (and to the `runtime` directive / ISOPOD_RUNTIME). Unlisted runtimes still
+# work; doctor just cannot name their tier and create skips the memory default.
+runsc         2
+runsc-kvm     2
+kata          3
+kata-runtime  3
+kata-qemu     3
+kata-fc       3
+kata-clh      3
+krun          3
+crun-vm       3
