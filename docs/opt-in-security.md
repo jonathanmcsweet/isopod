@@ -43,12 +43,49 @@ Because isopod brings a box up entirely over SSH (no `engine exec`/`cp`), every
 operation — clone, copy-in, export, fetch, shell — enters the guest correctly
 under a microVM.
 
-**What you must do on the host**:
+### What you must do on the host
 
-- Have **`/dev/kvm`** (bare metal or a KVM-enabled VM; nested virt is often off
-  in cloud CI). `isopod doctor` reports whether it is present.
-- Install and register the runtime with your engine, the same way as `runsc`
-  above (`containers.conf` for Podman, `daemon.json` for Docker).
+Both engines need **`/dev/kvm`** (bare metal or a KVM-enabled VM; nested virt is
+often off in cloud CI) and a microVM runtime **registered under the name you
+pass to `ISOPOD_RUNTIME`**. `isopod doctor` reports `/dev/kvm` and whether the
+runtime is found. Package names and binary paths vary by distro — doctor is the
+check that it's wired up.
+
+**Podman + krun** (lightest path — krun is a [crun](https://github.com/containers/crun)
+handler backed by [libkrun](https://github.com/containers/libkrun), so it's
+Podman-native):
+
+Fedora example (more distros to come):
+```sh
+sudo dnf install -y crun-krun        # Fedora (recent releases, or the slp Copr)
+sudo usermod -aG kvm "$USER"          # rootless access to /dev/kvm (re-login after)
+
+mkdir -p ~/.config/containers         # register a runtime named "krun"
+cat >> ~/.config/containers/containers.conf <<'EOF'
+[engine.runtimes]
+krun = ["/usr/bin/crun-krun"]
+EOF
+```
+
+Then `ISOPOD_RUNTIME=krun isopod create …`.
+
+**Podman or Docker + Kata Containers** (boots a microVM via Firecracker / Cloud
+Hypervisor / QEMU; works with either engine). Install Kata (distro package or the
+project's `kata-deploy`), then register it under the name `kata`:
+
+- **Podman** — in `~/.config/containers/containers.conf` (or `/etc/containers/…`):
+  ```ini
+  [engine.runtimes]
+  kata = ["/usr/bin/kata-runtime"]
+  ```
+- **Docker** — in `/etc/docker/daemon.json`, then `sudo systemctl restart docker`:
+  ```json
+  { "runtimes": { "kata": { "path": "/usr/bin/kata-runtime" } } }
+  ```
+
+Then `ISOPOD_RUNTIME=kata isopod create …`. **Docker's microVM path is Kata** —
+krun is a crun/Podman handler, so with Docker use Kata (or switch to Podman for
+krun).
 
 When a Tier 3 runtime is active and you pass no `--memory`, isopod sizes the
 guest with a default (2g; override with `--memory` or `ISOPOD_MICROVM_MEMORY`),

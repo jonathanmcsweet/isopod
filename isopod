@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="1.2.0"
+ISOPOD_VERSION="1.2.1"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -1016,32 +1016,14 @@ cmd_fetch() {
 
   # Locate the git repo inside the box: $WORKSPACE itself, or — if the workspace
   # holds a single git subfolder (e.g. a repo cloned into a named dir) — that one.
-  # Run over SSH (sh -s reads the probe from stdin, so the remote shell never
-  # re-parses it) and pass $WORKSPACE in as an env var the box expands.
+  # lib/find_box_repo.sh runs the probe; stream it into the box over SSH (sh -s
+  # reads it from stdin, so the remote shell never re-parses it) and pass
+  # $WORKSPACE in as an env var the box expands.
   local repo="$inbox_path"
   if [ -z "$repo" ]; then
-    repo=$(
-      box_ssh "$name" -- WORKSPACE="$WORKSPACE" sh -s 2>/dev/null <<'BOXSH'
-ws="$WORKSPACE"
-if git -C "$ws" rev-parse --show-toplevel >/dev/null 2>&1; then
-  git -C "$ws" rev-parse --show-toplevel
-  exit 0
-fi
-n=0
-hit=""
-for d in "$ws"/*/; do
-  if git -C "$d" rev-parse --show-toplevel >/dev/null 2>&1; then
-    n=$((n + 1))
-    hit="$d"
-  fi
-done
-[ "$n" = 1 ] && {
-  git -C "$hit" rev-parse --show-toplevel
-  exit 0
-}
-exit 1
-BOXSH
-    ) ||
+    local finder="$ISOPOD_LIB/find_box_repo.sh"
+    [ -f "$finder" ] || die "missing helper: $finder (is your isopod install complete?)"
+    repo=$(box_ssh "$name" -- WORKSPACE="$WORKSPACE" sh -s 2>/dev/null <"$finder") ||
       die "no git repo found in the box under $WORKSPACE — pass --path <in-box-repo>"
   fi
 
