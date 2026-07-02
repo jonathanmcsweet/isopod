@@ -55,6 +55,7 @@ check that it's wired up.
 handler backed by [libkrun](https://github.com/containers/libkrun), so it's
 Podman-native):
 
+Fedora example (more distros to come):
 ```sh
 sudo dnf install -y crun-krun        # Fedora (recent releases, or the slp Copr)
 sudo usermod -aG kvm "$USER"          # rootless access to /dev/kvm (re-login after)
