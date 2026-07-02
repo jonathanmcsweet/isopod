@@ -151,10 +151,11 @@ Runtime state lives separately under `~/.config/isopod`:
 ```
 ~/.config/isopod/
 ├── ssh_config              # generated; Include'd from ~/.ssh/config
-└── containers/<name>/
-    ├── id_ed25519(.pub)    # this container's dedicated client keypair
-    ├── known_hosts         # this container's pinned host key
-    └── meta                # engine, image, port, color, created
+└── boxes/<name>/
+    ├── id_ed25519(.pub)    # this box's dedicated client keypair
+    ├── known_hosts         # this box's pinned (trust-on-first-use) host key
+    ├── config.yaml         # readable, reconfigurable settings (Compose-shaped)
+    └── meta                # engine, image, base, sudo, port, color, created, memory, cpus, expose
 ```
 
-Deleting a container removes its container, its keys, and its SSH config entry. The base image (`localhost/isopod-base:*`) is built from [`share/Dockerfile`](../share/Dockerfile), shared across containers, and rebuilt automatically when that Dockerfile changes.
+Deleting a box (`isopod rm`) removes its container, its keys, its SSH config entry, and its snapshot images. Shared base images (`localhost/isopod-base:*`) and `--dockerfile` images (`localhost/isopod-user:*`) are left in place; reclaim unreferenced ones with `isopod gc`. The base image is built from [`share/Dockerfile`](../share/Dockerfile), shared across boxes, and rebuilt automatically when that Dockerfile changes.

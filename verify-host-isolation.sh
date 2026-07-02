@@ -103,14 +103,20 @@ echo
 
 # --- 3. Host filesystem reachability ---------------------------------------
 echo "--- 3. Host filesystem probes ---"
-# These host paths should NOT be readable/visible from inside the box.
-for probe in "$HOST_HOME/.ssh/id_rsa" "$HOST_HOME/.aws/credentials" \
+# A SAMPLE of host paths that should NOT be readable/visible from inside the box.
+# Not exhaustive — it covers the common credential stores; absence of a flag here
+# means these specific paths didn't leak, not that nothing could.
+for probe in \
+  "$HOST_HOME/.ssh/id_rsa" "$HOST_HOME/.ssh/id_ed25519" \
+  "$HOST_HOME/.aws/credentials" "$HOST_HOME/.config/gcloud" \
+  "$HOST_HOME/.kube/config" "$HOST_HOME/.docker/config.json" \
+  "$HOST_HOME/.gnupg" "$HOST_HOME/.netrc" "$HOST_HOME/.npmrc" \
   "$HOST_HOME/.config/isopod" "/etc/machine-id-host"; do
   if run_in_box test -e "$probe"; then
     flag "host path is visible inside the box: $probe"
   fi
 done
-note "checked common host secret paths — none visible unless flagged above"
+note "checked a sample of common host secret paths — none visible unless flagged above"
 
 # Bind-mount detection: isopod should have NO host bind mounts.
 BOX_MOUNTS="$(run_in_box cat /proc/mounts)"
@@ -158,6 +164,46 @@ else
     fi
   done
   note "inspected extension-host env for host fingerprints"
+fi
+echo
+
+# --- 6. Hardware fingerprint via the /sys device tree ----------------------
+# The Tier-1 masks close the /sys *alias* dirs that common tools read (lsblk,
+# lspci, ip). But /sys/devices/ is not namespaced and is only partially masked,
+# so a determined reader can still recover PCI/USB/disk identity by walking it
+# directly. Probe it here so a PASS can't be faked by masking only the aliases.
+# On the plain mask tier this is EXPECTED to find data; a Tier 2/3 runtime
+# (runsc/kata/krun) presents a synthetic /sys and is what actually closes it.
+echo "--- 6. Hardware fingerprint via the /sys device tree ---"
+
+# PCI vendor/device IDs straight from the device tree (masking /sys/bus/pci does
+# not hide these — the tree is the real source the alias points into).
+PCI_IDS="$(run_in_box sh -c 'cat /sys/devices/pci*/*/vendor /sys/devices/pci*/*/device 2>/dev/null | head -6 | tr "\n" " "')"
+# Drive model/serial via the block + nvme device nodes under /sys/devices.
+DRIVE_ID="$(run_in_box sh -c '
+  cat /sys/devices/pci*/*/nvme/*/serial /sys/devices/pci*/*/*/nvme/*/serial 2>/dev/null
+  find /sys/devices -maxdepth 9 -path "*/block/*/device/model" -exec cat {} \; 2>/dev/null
+' | tr -d "\r" | grep -v "^[[:space:]]*$" | head -4 | tr "\n" " ")"
+
+fp_seen=0
+if [[ -n "${PCI_IDS// /}" ]]; then
+  fp_seen=1
+  note "PCI topology readable via /sys/devices (sample IDs: $PCI_IDS)"
+fi
+if [[ -n "${DRIVE_ID// /}" ]]; then
+  fp_seen=1
+  note "drive model/serial readable via /sys/devices ($DRIVE_ID)"
+fi
+
+if [[ "$fp_seen" -eq 1 ]]; then
+  if [[ "$strict" -eq 1 ]]; then
+    flag "host hardware identity is readable through /sys/devices (--strict). Run the box under a Tier 2/3 runtime to close the device tree."
+  else
+    note "device tree is readable — EXPECTED on the plain mask tier; use a Tier 2/3"
+    note "runtime (runsc/kata/krun) to present a synthetic /sys. Not counted as a leak."
+  fi
+else
+  note "no PCI/drive identity readable via /sys/devices (a sandboxed runtime is likely active — good)"
 fi
 echo
 

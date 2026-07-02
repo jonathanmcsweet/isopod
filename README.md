@@ -67,9 +67,9 @@ The container cannot see the host filesystem at all. Files cross the boundary in
 4. `isopod fetch` git history copied back to your local machine
 5. `git push` to your remote server
 
-We have some mitigations for a snooping AI agent fingerprinting your host machine from the container. It sees the container's hostname, a generic Linux environment, and the container's network identity — and isopod masks the host-revealing `/proc`/`/sys` paths it would otherwise read (drive serials, board model, MACs, boot UUIDs — see [Fingerprint hardening](#fingerprint-hardening)). Additional details:
+We have some mitigations for a snooping AI agent fingerprinting your host machine from the container. It sees the container's hostname, a generic Linux environment, and the container's network identity — and isopod masks the host-revealing `/proc`/`/sys` paths that common tools read (boot UUIDs, board model, and the `lsblk`/`lspci`/`ip` views — see [Fingerprint hardening](#fingerprint-hardening)). That closes the *common* read paths, not the whole `/sys` device tree; a sandboxed runtime closes the rest. Additional details:
 
-- SSH is bound to `127.0.0.1` only and uses a dedicated per-container ed25519 keypair with the container's host key pinned. Password auth and root login are disabled in the container's sshd.
+- SSH is bound to `127.0.0.1` only and uses a dedicated per-container ed25519 keypair. The container's host key is pinned on first use (trust-on-first-use); if an already-pinned box ever presents a different key, isopod flags it. Password auth and root login are disabled in the container's sshd.
 - **SSH agent forwarding and X11 forwarding are explicitly disabled** in the generated config, so an agent inside the container cannot borrow your SSH agent to authenticate as you elsewhere.
 - With rootless Podman (the recommended engine), even "root" inside the container is just your unprivileged user on the host, remapped.
 
@@ -78,7 +78,7 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 ### What it does NOT protect against
 
-- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless youv'e created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. 
+- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless you've created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. (Reconnaissance in the *other* direction — a rogue agent scanning your **local network**, the host, or cloud metadata — can be blocked with host-enforced [network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny), while keeping published ports and public internet working.)
 
 - **A misbehaving agent inside the container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above — but anything inside the container (including data you copied in) is fully exposed to it. If you don't need in-container package installs, create the container with **`--no-sudo`** to drop that privilege. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
 
@@ -92,38 +92,46 @@ A container shares the host's kernel and hardware, so by default a process insid
 
 ### What's implemented
 
-Every container hides the host-revealing paths below. Podman gets a single `--security-opt mask=…`; Docker (which has no mask flag) gets an empty `tmpfs` per directory and a `/dev/null` bind per file.
+Every container masks the host-revealing paths below — the ones common discovery tools (`lsblk`, `lspci`, `ip`, DMI readers) actually read. Podman gets a single `--security-opt mask=…` covering files and directories. Docker gets an empty `tmpfs` per directory; it **cannot** mask `/proc` files — runc rejects bind mounts onto arbitrary `/proc` paths — so `/proc/cmdline` and `/proc/modules` stay readable on Docker (isopod warns at create). Use rootless podman or a Tier 2/3 runtime to close those on Docker.
 
 | Masked path | Data it obfuscates |
 |---|---|
-| `/proc/cmdline` | host boot args — **LUKS volume UUID, root-fs UUID, OS image / ostree hash** |
-| `/proc/modules` | loaded host kernel modules (VPNs like WireGuard, DisplayLink, Bluetooth…) |
+| `/proc/cmdline` *(podman)* | host boot args — **LUKS volume UUID, root-fs UUID, OS image / ostree hash** |
+| `/proc/modules` *(podman)* | loaded host kernel modules (VPNs like WireGuard, DisplayLink, Bluetooth…) |
 | `/sys/class/dmi`, `/sys/devices/virtual/dmi`, `/sys/firmware` | SMBIOS: **board model, vendor, BIOS version/date** |
-| `/sys/bus/pci` | full host PCI topology (NVMe, Wi-Fi, USB4/Thunderbolt controllers) |
-| `/sys/bus/usb` | attached peripherals **with serial numbers** (keyboard, mouse, NIC, dongles) |
-| `/sys/class/net` | interface names and **MAC addresses** |
-| `/sys/block`, `/sys/class/nvme` | disk models and **factory drive serial numbers** |
+| `/sys/bus/pci` | the `lspci` view of host PCI topology (NVMe, Wi-Fi, USB4/Thunderbolt controllers) |
+| `/sys/bus/usb` | the tool-visible list of attached peripherals (keyboard, mouse, NIC, dongles) |
+| `/sys/class/net` | the box's own interface name/MAC (host NICs are already hidden by the box's netns) |
+| `/sys/block`, `/sys/class/block`, `/sys/class/nvme` | the `lsblk` view of disk models and factory serial numbers |
 | `/sys/class/hwmon`, `/sys/class/thermal`, `/sys/class/drm` | sensor/thermal/GPU identity (a board signature) |
 
-Verify from inside a container: after hardening, `cat /proc/cmdline` and `lsblk -o NAME,SERIAL` come back empty/blank.
+Verify from inside a container: after hardening, `cat /proc/cmdline` (podman) and `lsblk -o NAME,SERIAL` come back empty/blank.
+
+> **These masks close the *alias* directories, not the whole device tree.** `/sys/devices/` is not namespaced, and only its DMI subtree is masked — so a reader walking `/sys/devices/.../serial` or `/sys/devices/pci*/*/vendor` directly can still recover PCI/USB/disk identity (`grep -r . /sys/devices` disproves any "serials are hidden" reading). Masking the whole tree is impractical (dynamic paths; it also holds CPU/cgroup data tools need). To actually close it, run the box under a **Tier 2/3 runtime** (`runsc`/`kata`/`krun`), which presents a synthetic `/sys`. `verify-host-isolation.sh` probes the device tree directly so it can't be fooled by masking only the aliases.
 
 > isopod launches containers with `podman run`/`docker run`, not Compose, so the profile above is the live source of truth. If you prefer Compose, [`security/compose.yaml`](security/compose.yaml) expresses the same masks in `podman compose`/`docker compose` form as a reference — it is not executed by the CLI.
 
 > isopod deliberately does **not** add `--cap-drop=ALL`, `--read-only`, or `--security-opt no-new-privileges` here: the container runs `sshd` and gives agents passwordless `sudo apt install` for toolchains, all of which those flags would break. The isolation guarantees in [The isolation model](#the-isolation-model) (no mounts, loopback-only SSH, rootless userns) remain the primary boundary; the masks above are defense-in-depth against *fingerprinting* specifically.
 
 ### Opt-in Security Features
-See **[docs/opt-in-security.md](docs/opt-in-security.md)** for how to enable and configure them.
+Off by default (they need host-side setup) — see **[docs/opt-in-security.md](docs/opt-in-security.md)** for how to enable and configure them:
+
+- **gVisor (`runsc`)** — a syscall-virtualizing runtime that hides CPU/kernel/boot identity.
+- **microVM runtimes (Kata, krun)** — a per-box guest kernel behind a KVM boundary.
+- **Network egress isolation (`egress lan-deny`)** — a host firewall that stops a rogue agent from mapping your LAN, the host, cloud metadata, or internal DNS, while keeping published ports and public internet working.
 
 ### What still can't be mitigated
 
 Even with every mask on, a **plain shared-kernel container cannot hide these** — the app reads them straight from the CPU or the shared kernel, with no file to mask:
 
 - **CPU identity** — model, family, stepping, **microcode**, feature flags, via the `CPUID` instruction. (Masking `/proc/cpuinfo` doesn't stop `CPUID` and breaks build tools, so isopod leaves it readable.)
-- **Kernel build string** — `uname -r` always returns the host kernel version.
+- **Kernel build string** — `uname -r` (a syscall, no file to mask) always returns the host kernel version; `/proc/version` adds the build host/toolchain string.
+- **Host RAM size** — `/proc/meminfo` (masking it breaks build tools and most memory-aware programs, so it's left readable).
+- **The `/sys` device tree** — PCI/USB/NVMe/disk identity under `/sys/devices/` (only its DMI subtree is masked; see the note above). Not namespaced, so a plain container can read it directly.
 - **Host boot epoch / boot id** — `/proc/stat`'s `btime` and `/proc/sys/kernel/random/boot_id` are a single value per host boot, identical in every container on that host. (`btime` is left unmasked because masking `/proc/stat` breaks `top`/`htop` and most monitoring.)
 - **Timing side channels** — `RDTSC` and clock-skew fingerprints.
 
-A **Tier 3 microVM runtime** (Kata or krun) does close these — the box runs on its own guest kernel behind a hardware boundary, so `uname`, boot id, and the timing channels reflect the VM, not the host. See [docs/opt-in-security.md](docs/opt-in-security.md#microvm-runtimes-kata-krun--tier-3).
+A **Tier 2 runtime** (gVisor `runsc`) already presents a synthetic `/proc`/`/sys`, closing the device tree, `/proc/version`, and boot id. A **Tier 3 microVM runtime** (Kata or krun) also closes `uname`, RAM/CPU identity, and the timing channels — the box runs on its own guest kernel behind a hardware boundary. See [docs/opt-in-security.md](docs/opt-in-security.md#microvm-runtimes-kata-krun--tier-3).
 
 Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a Tier 3 microVM runtime (or a full VM); isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
 ## Requirements
@@ -148,10 +156,10 @@ Every container also becomes a plain SSH host: `ssh isopod-myproj` works from an
 
 Two ways out, for two situations:
 
-Both run over the box's SSH connection, so the box must be **running** (`isopod start <name>` if not). `export` and `copy-in` move files as a tar stream, preserving timestamps, modes, and symlinks.
+Both run over the box's SSH connection, so the box must be **running** (`isopod start <name>` if not). They move files as a tar stream over SSH. `copy-in` (host → box) preserves timestamps, modes, and symlinks. `export` (box → host) preserves timestamps and symlinks but **sanitizes modes** — it treats the box's archive as untrusted, so it drops setuid/setgid bits and forces ownership to you (`--no-same-owner`, no `-p`), since a compromised box controls that stream.
 
 - **`isopod export <name> [dest]`** copies the container's whole working tree (including its `.git`) to a fresh host directory. It will not write into an existing path so the export shape stays predictable.
-- **`isopod fetch <name> [target-repo]`** brings only **committed git history** across, the clean way — no file merges, no clobbering your working tree:
+- **`isopod fetch <name> [target-repo]`** brings only **committed git history** across, the clean way — no file merges, no overwriting your working tree:
 
   ```sh
   cd ~/code/myproj          # an existing clone on your host
@@ -193,6 +201,10 @@ Both run over the box's SSH connection, so the box must be **running** (`isopod 
 `ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata`, `krun`; needs `/dev/kvm`).
 `ISOPOD_MICROVM_MEMORY` — default guest memory when a Tier 3 microVM runtime is active and no `--memory` is given (default `2g`). 
 `ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
+
+`ISOPOD_SSH_WAIT_TRIES` — how many 1s attempts `create`/`start` make waiting for sshd before giving up (default `30`).
+
+[Network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny) (`egress lan-deny`) has its own overrides: `ISOPOD_EGRESS` (`lan-deny`|off), `ISOPOD_EGRESS_NET`, `ISOPOD_EGRESS_SUBNET`, `ISOPOD_EGRESS_GATEWAY`, `ISOPOD_EGRESS_DNS`, `ISOPOD_EGRESS_RULESET` (the network/firewall parameters), and `ISOPOD_EGRESS_ALLOW_UNLOADED=1` to start a box even when the host firewall isn't loaded yet (otherwise `create` fails closed).
 
 ## Customizing the container
 
@@ -238,7 +250,7 @@ isopod reconfigure web --expose 5173 --memory 8g   # or edit config.yaml, then:
 isopod reconfigure web
 ```
 
-The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — and it's written as a **real, valid Compose service** (engine-correct: podman gets `security_opt: mask=…`, docker gets `tmpfs`/`/dev/null` binds), so you can read, copy, or adapt it elsewhere. But **isopod owns and parses it; it does not launch boxes from it** — a working box also needs the per-box SSH key, pinned host key, and cloned workspace that Compose can't set up, so `docker compose up` on it gives a bare container. isopod reads a few fields back on `reconfigure` (`ports`, `mem_limit`, `cpus`, `x-isopod-color`); the rest is a managed reference.
+The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — and it's written as a **real, valid Compose service** (engine-correct: podman gets `security_opt: mask=…`, docker gets `tmpfs` directory masks — it can't mask `/proc` files), so you can read, copy, or adapt it elsewhere. But **isopod owns and parses it; it does not launch boxes from it** — a working box also needs the per-box SSH key, pinned host key, and cloned workspace that Compose can't set up, so `docker compose up` on it gives a bare container. isopod reads a few fields back on `reconfigure` (`ports`, `mem_limit`, `cpus`, `x-isopod-color`); the rest is a managed reference.
 
 On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box.
 
@@ -261,7 +273,7 @@ RUN_LIVE=1 test/run.sh   # also runs live end-to-end tests against real podman/d
 
 Contributing? Install the ShellCheck + shfmt [pre-commit hooks](docs/development.md) first (`pip install pre-commit && pre-commit install`) so linting and formatting run on every commit.
 
-CI runs on both GitLab and GitHub, kept in lockstep with the same three jobs — a `lint` job (shellcheck + bash syntax + python), a `test` job (stubbed + interactive, runs anywhere), and a manual `live` job that needs a podman-capable runner:
+CI runs on both GitLab and GitHub with the same core jobs — a `lint` job (shellcheck + bash syntax + python), a `test` job (stubbed + interactive, runs anywhere), and a manual `live` job that needs a podman-capable runner. GitHub additionally runs a `brew-formula` job that installs isopod through the Homebrew tap formula built from the checkout:
 
 - **GitLab CI/CD** (`.gitlab-ci.yml`) — should run identically under [`gitlab-ci-local`](https://github.com/firecow/gitlab-ci-local) for debugging pipelines on your own machine before pushing.
 

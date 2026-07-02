@@ -1,0 +1,73 @@
+#!/usr/sbin/nft -f
+#
+# security/egress-host.nft — HOST-side egress firewall for isopod "egress lan-deny"
+# boxes. Rendered by "isopod egress apply" (the network's subnet is substituted in)
+# and loaded into the HOST network namespace — so a rogue agent inside a box, even
+# with root and passwordless sudo, cannot flush or edit it.
+#
+# What it enforces, for traffic a box INITIATES:
+#   - drop  -> RFC1918 (the LAN), 169.254/16 (link-local + cloud metadata), CGNAT
+#   - drop  -> the host itself (reached on the bridge gateway IP)
+#   - drop  -> multicast/broadcast (mDNS / SSDP / LLMNR device discovery)
+#   - allow -> the public internet + public DNS (apt / pip / git keep working)
+#
+# It leaves host-INITIATED published ports (SSH, --expose) fully working: those are
+# reply traffic, matched by "ct state established,related", while a scan is a NEW
+# box-initiated flow. Direction — not topology — is what separates the two.
+#
+# DNS reconnaissance is closed by pairing this with a pinned public --dns (set by
+# the isopod script): the drops below make the host's LAN / forwarding resolver
+# (which knows your internal PTRs and split-horizon names) unreachable, so a rogue
+# agent cannot enumerate the network over DNS.
+#
+# The isopod egress network is IPv4-only by design: a box has no IPv6 route, so
+# there is no v6 path to slip around these v4 rules. If you deliberately make the
+# network dual-stack, also load the commented ip6 rules below.
+#
+# NOT persistent across reboot / firewalld reload / engine restart. Re-run
+# "sudo isopod egress apply" after those, or include this file from
+# /etc/nftables.conf. "isopod doctor" and "isopod egress status" report whether it
+# is currently loaded.
+
+# Idempotent reload: ensure the table exists, drop it, then define it fresh, so a
+# re-apply never stacks duplicate chains.
+add table inet isopod
+delete table inet isopod
+
+table inet isopod {
+	# Private / link-local / metadata / CGNAT destinations a box may not reach.
+	set lan4 {
+		type ipv4_addr
+		flags interval
+		elements = {
+			10.0.0.0/8,
+			172.16.0.0/12,
+			192.168.0.0/16,
+			169.254.0.0/16,
+			100.64.0.0/10
+		}
+	}
+
+	# Box -> anything routed off the bridge (LAN, internet, cloud metadata).
+	# Only traffic sourced FROM an isopod box is considered; everything else
+	# short-circuits to the accept policy so host networking is untouched.
+	chain forward {
+		type filter hook forward priority -5; policy accept;
+		ip saddr != $ISOPOD_EGRESS_SUBNET accept
+		ct state established,related accept
+		ip daddr @lan4 drop
+		ip daddr 224.0.0.0/4 drop
+		ip daddr 255.255.255.255 drop
+		# ip6 daddr { ::1, fe80::/10, fc00::/7, fec0::/10, ff00::/8 } drop  # dual-stack only
+	}
+
+	# Box -> the HOST itself, reached on the bridge gateway IP. This is the INPUT
+	# hook, not forward: a FORWARD-only ruleset would leave host services bound to
+	# 0.0.0.0 (and the engine's DNS on the gateway) reachable from a box.
+	chain input {
+		type filter hook input priority -5; policy accept;
+		ip saddr != $ISOPOD_EGRESS_SUBNET accept
+		ct state established,related accept
+		ct state new drop
+	}
+}

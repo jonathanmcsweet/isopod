@@ -21,6 +21,10 @@ ARG ISOPOD_USER=dev
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Essentials: sshd (remote access) plus git and common CLI tooling.
+# Package versions are intentionally NOT pinned: this is a disposable dev-sandbox
+# base, not a release artifact, so it tracks the base image's current security
+# updates rather than freezing (and needing constant bumping). Reproducibility is
+# not a goal here; pin ISOPOD_BASE to a digest if you need a fixed base.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       openssh-server sudo git curl wget ca-certificates \
