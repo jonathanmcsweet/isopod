@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="1.2.1"
+ISOPOD_VERSION="1.5.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -52,6 +52,17 @@ WORKSPACE="/home/dev/workspace"
 # starved). Override with ISOPOD_MICROVM_MEMORY or an explicit --memory.
 MICROVM_DEFAULT_MEMORY="${ISOPOD_MICROVM_MEMORY:-2g}"
 
+# Network egress isolation (hardening `egress lan-deny`). Boxes are placed on this
+# dedicated fixed-subnet bridge so the host firewall (security/egress-host.nft) can
+# target them, and DNS is pinned to a PUBLIC resolver so a box cannot use the host's
+# internal/forwarding resolver for reconnaissance. Enforced on the engine at run
+# time (an in-box agent cannot undo it). See the README "Network egress isolation".
+ISOPOD_EGRESS_NET="${ISOPOD_EGRESS_NET:-isopod0}"
+ISOPOD_EGRESS_SUBNET="${ISOPOD_EGRESS_SUBNET:-10.88.7.0/24}"
+ISOPOD_EGRESS_GATEWAY="${ISOPOD_EGRESS_GATEWAY:-10.88.7.1}"
+ISOPOD_EGRESS_DNS="${ISOPOD_EGRESS_DNS:-1.1.1.1}"
+ISOPOD_EGRESS_RULESET="${ISOPOD_EGRESS_RULESET:-$ISOPOD_DIR/security/egress-host.nft}"
+
 # ---------------------------------------------------------------------------
 # small helpers
 # ---------------------------------------------------------------------------
@@ -70,12 +81,31 @@ die() {
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Read stdin and echo a short, stable hex digest. Used for image cache tags,
+# where a collision would reuse a stale image. sha256 (truncated) instead of
+# cksum/CRC-32 so unrelated inputs can't share a tag. Portable: sha256sum on
+# Linux, `shasum -a 256` on macOS.
+sha_hex() {
+  if have sha256sum; then sha256sum; else shasum -a 256; fi | awk '{print substr($1, 1, 16)}'
+}
+
 # Render a text template from share/ $vars and $(...) inside it resolve against
 # the caller's locals/globals (bash dynamic
 # scope). A sentinel byte protects trailing newlines (command substitution
 # strips them) so separators like the blank line between ssh_config hosts survive.
-render_tmpl() { # render_tmpl <file-under-share>
-  local f="$ISOPOD_SHARE/$1" body
+#
+# SECURITY INVARIANT: the template body is evaluated as a bash heredoc, so any
+# $var or $(...) in a template executes. Templates may therefore interpolate
+# ONLY values that are validated or isopod-controlled — a box name (checked by
+# valid_name, no shell metacharacters), engine/meta-derived fields, or fixed
+# strings. NEVER route an unvalidated user value (a raw repo URL, arbitrary file
+# path, or free-form string) into a template, or it becomes a code-injection
+# vector. Keep new template variables within this invariant.
+render_tmpl() { # render_tmpl <file-under-share | /abs/path>
+  # A relative name resolves under share/; an absolute path is used as-is (so
+  # templates elsewhere, e.g. security/egress-host.nft, can be rendered too).
+  local f="$1" body
+  [ "${f#/}" = "$f" ] && f="$ISOPOD_SHARE/$f"
   [ -f "$f" ] || die "missing template: $f (is your isopod install complete?)"
   body=$(
     cat "$f"
@@ -101,6 +131,9 @@ acquire_lock() {
   mkdir -p "$CONFIG_DIR"
   local lock="$CONFIG_DIR/.lock" tries=0 owner
   while ! mkdir "$lock" 2>/dev/null; do
+    # A racer that reads pid in the brief window after the owner's mkdir but
+    # before it writes pid (below) sees an empty owner: it does NOT reclaim
+    # (the [ -n "$owner" ] guard), it just spins and retries — benign.
     owner=$(cat "$lock/pid" 2>/dev/null || true)
     if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
       rm -rf "$lock"
@@ -178,7 +211,9 @@ meta_get() { # meta_get <name> <key>
   local f
   f="$(box_dir "$1")/meta"
   [ -f "$f" ] || return 1
-  sed -n "s/^$2=//p" "$f" | head -1
+  # Exact key match via awk (not a sed regex), so a key with regex
+  # metacharacters can never be misinterpreted. Value may contain '='.
+  awk -F= -v k="$2" '$1==k{sub(/^[^=]*=/, ""); print; exit}' "$f"
 }
 
 meta_set() { # meta_set <name> <key> <value> — replace or append a meta line
@@ -259,7 +294,16 @@ config_get() { # config_get <name> <key>
   local f v
   f="$(box_config_file "$1")"
   [ -f "$f" ] || return 1
-  v=$(sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" "$f" | head -1)
+  # Exact key match on the token before the first ':' (awk, not a sed regex), so
+  # a key with regex metacharacters is safe. Strips indentation, the surrounding
+  # whitespace, and one layer of double-quotes — matching the old behavior.
+  v=$(awk -v k="$2" '
+    { l = $0; sub(/^[[:space:]]+/, "", l)
+      p = index(l, ":"); if (p == 0) next
+      if (substr(l, 1, p - 1) == k) {
+        val = substr(l, p + 1); sub(/^[[:space:]]+/, "", val); sub(/[[:space:]]+$/, "", val)
+        print val; exit
+      } }' "$f")
   v="${v%\"}"
   v="${v#\"}"
   printf '%s' "$v"
@@ -284,6 +328,14 @@ valid_port() { # valid_port <n> -> true for a 1-65535 TCP port number
   [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
+valid_memory() { # valid_memory <v> -> integer + optional b/k/m/g unit (engine form)
+  [[ "$1" =~ ^[0-9]+[bBkKmMgG]?$ ]]
+}
+
+valid_cpus() { # valid_cpus <v> -> a positive (optionally fractional) CPU count
+  [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "$1" != 0 && "$1" != 0.0 ]]
+}
+
 # ---------------------------------------------------------------------------
 # image build (share/Dockerfile)
 # ---------------------------------------------------------------------------
@@ -303,7 +355,7 @@ image_tag_for() { # image_tag_for <base-image>
   hash=$({
     cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT"
     printf '%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION"
-  } | cksum | awk '{print $1}')
+  } | sha_hex)
   printf 'localhost/isopod-base:%s' "$hash"
 }
 
@@ -347,7 +399,24 @@ build_user_image() { # build_user_image <dockerfile-path> -> echoes tag
   local df="$1" ctx tag
   [ -f "$df" ] || die "--dockerfile not found: $df"
   ctx=$(dirname "$df")
-  tag="localhost/isopod-user:$(cksum <"$df" | awk '{print $1}')"
+  # Tag from the Dockerfile AND its build context, so a changed COPY/ADD source
+  # (with the Dockerfile itself unchanged) busts the cache instead of silently
+  # reusing a stale image. Hash each context file's path + contents in a stable
+  # order, excluding .git. Bounded by context size (the engine tars it anyway).
+  tag="localhost/isopod-user:$(
+    {
+      cat "$df"
+      (
+        cd "$ctx" || exit
+        find . -path ./.git -prune -o -type f -print0 |
+          LC_ALL=C sort -z |
+          while IFS= read -r -d '' f; do
+            printf '%s\0' "$f"
+            cat "$f"
+          done
+      )
+    } | sha_hex
+  )"
   if image_exists "$tag"; then
     printf '%s' "$tag"
     return 0
@@ -373,14 +442,17 @@ ensure_ssh_include() {
   local line="Include \"$SSH_INCLUDE_FILE\""
   if ! grep -qsF "$SSH_INCLUDE_FILE" "$USER_SSH_CONFIG"; then
     # Include must appear before any Host block to apply globally; prepend.
+    # Write a sibling temp in ~/.ssh and rename it into place, so a crash or
+    # full disk mid-write can never truncate the user's real ssh config — the
+    # one file you least want to damage. The rename is atomic within the dir.
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp "$HOME/.ssh/.isopod-config.XXXXXX") || die "could not write to ~/.ssh"
     {
       printf '# isopod sandboxes\n%s\n\n' "$line"
       cat "$USER_SSH_CONFIG"
     } >"$tmp"
-    cat "$tmp" >"$USER_SSH_CONFIG"
-    rm -f "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$USER_SSH_CONFIG"
     info "Added '$line' to ~/.ssh/config"
   fi
 }
@@ -431,19 +503,36 @@ refresh_port() { # refresh stored port + ssh config if the mapping changed
   fi
 }
 
+# Pin the box's SSH host key. This is trust-on-first-use: the very first scan
+# (at create) is trusted blindly. A box's key is fixed at first boot and persists
+# across start/stop/reconfigure, and a recreated box gets a fresh box dir (hence
+# an empty known_hosts), so an already-pinned box should never present a
+# different key. If one does, warn loudly instead of silently re-pinning — that
+# is the honest signal that the loopback port may have been taken over. isopod
+# still adopts the new key so the tool keeps working; the warning is the alert.
 scan_host_key() { # scan_host_key <name>
-  local name="$1" port kh tries=0
+  local name="$1" port kh tmp tries=0 max="${ISOPOD_SSH_WAIT_TRIES:-30}"
   port=$(meta_get "$name" port)
   kh="$(box_dir "$name")/known_hosts"
-  : >"$kh"
-  while [ $tries -lt 30 ]; do
-    if ssh-keyscan -p "$port" -T 3 127.0.0.1 2>/dev/null >"$kh" && [ -s "$kh" ]; then
+  tmp="$kh.scan"
+  while [ $tries -lt "$max" ]; do
+    if ssh-keyscan -p "$port" -T 3 127.0.0.1 2>/dev/null >"$tmp" && [ -s "$tmp" ]; then
+      # Compare only the key material (type + blob), not the leading [host]:port
+      # field, which legitimately changes when the box gets a new published port.
+      if [ -s "$kh" ] &&
+        [ "$(awk '{print $2, $3}' "$kh" | sort -u)" != "$(awk '{print $2, $3}' "$tmp" | sort -u)" ]; then
+        warn "SSH host key for box '$name' CHANGED since it was pinned.
+     Expected only if you recreated the box. If you did not, another process may have
+     taken over its loopback port — stop and investigate. isopod is adopting the new key."
+      fi
+      mv "$tmp" "$kh"
       chmod 600 "$kh"
       return 0
     fi
     tries=$((tries + 1))
     sleep 1
   done
+  rm -f "$tmp"
   return 1
 }
 
@@ -509,8 +598,8 @@ box_tar_out() { # box_tar_out <name> <src-dir>  (writes a tar stream to stdout)
 }
 
 wait_for_ssh() { # wait until we can actually authenticate
-  local name="$1" tries=0
-  while [ $tries -lt 30 ]; do
+  local name="$1" tries=0 max="${ISOPOD_SSH_WAIT_TRIES:-30}"
+  while [ $tries -lt "$max" ]; do
     if box_ssh "$name" -o ConnectTimeout=3 -o BatchMode=yes -- true 2>/dev/null; then
       return 0
     fi
@@ -540,11 +629,16 @@ preset_color() {
   return 1
 }
 
-auto_color() { # rotate presets based on how many boxes exist
-  local presets=(teal blue purple magenta orange green amber red gray) n=0
-  local d
-  for d in "$BOXES_DIR"/*/; do [ -d "$d" ] && n=$((n + 1)); done
-  preset_color "${presets[$((n % ${#presets[@]}))]}"
+auto_color() { # auto_color <name> -> a preset derived from the name (stable)
+  local name="$1"
+  local presets=(teal blue purple magenta orange green amber red gray)
+  # Derive the color from a hash of the name, not a live box count: a given name
+  # always gets the same color, and creating/deleting other boxes never shifts
+  # it (a count-based index could collide with a still-existing box).
+  local h idx
+  h=$(printf '%s' "$name" | sha_hex | cut -c1-6)
+  idx=$((16#$h % ${#presets[@]}))
+  preset_color "${presets[$idx]}"
 }
 
 # Write/merge .vscode/settings.json inside the box so every IDE window
@@ -574,18 +668,26 @@ apply_color() { # apply_color <name> <hexcolor>
 #
 # The two engines mask differently:
 #   podman — a single `--security-opt mask=a:b:c` covers both files and dirs.
-#   docker — no mask flag, so dirs get an empty `--tmpfs` and files a `/dev/null`
-#            bind mount.
+#   docker — no mask flag, so dirs get an empty `--tmpfs`. Docker/runc REFUSES a
+#            bind mount onto an arbitrary /proc file (only a fixed allowlist is
+#            permitted), so file masks (/proc/cmdline, /proc/modules) can't be
+#            applied there — they are skipped and build_run_args warns once.
 # Missing baseline is non-fatal: the box is still created, just without masks.
-hardening_run_args() { # hardening_run_args <engine>
-  local engine="$1"
+
+# Parsed hardening profile. Bash can't return arrays, so parse_hardening sets
+# these globals for both hardening_run_args (the formatter) and build_run_args
+# (which warns about masks Docker can't apply). Returns 1 if no profile exists.
+HARD_RUNTIME=""
+HARD_MASKS=()
+HARD_FMASKS=()
+parse_hardening() {
+  HARD_RUNTIME=""
+  HARD_MASKS=()
+  HARD_FMASKS=()
   local -a conf_files=()
   [ -f "$HARDENING_CONF" ] && conf_files+=("$HARDENING_CONF")
   [ -f "$USER_HARDENING_CONF" ] && conf_files+=("$USER_HARDENING_CONF")
-  if [ "${#conf_files[@]}" -eq 0 ]; then
-    warn "hardening profile not found ($HARDENING_CONF); creating box without fingerprint masks"
-    return 0
-  fi
+  [ "${#conf_files[@]}" -eq 0 ] && return 1
 
   local runtime="" key path kind line conf m
   local -a masks=() fmasks=() keep=()
@@ -610,22 +712,38 @@ hardening_run_args() { # hardening_run_args <engine>
           for m in "${fmasks[@]:-}"; do [ -n "$m" ] && [ "$m" != "$path" ] && keep+=("$m"); done
           fmasks=("${keep[@]:-}")
           ;;
+        egress | no-egress) ;; # network egress isolation, resolved by active_egress
         *) warn "hardening profile: ignoring unknown directive '$key'" ;;
       esac
     done <"$conf"
   done
 
   # env var wins over the profile so it can be toggled per invocation.
-  runtime="${ISOPOD_RUNTIME:-$runtime}"
-  [ -n "$runtime" ] && printf '%s\n' "--runtime" "$runtime"
+  HARD_RUNTIME="${ISOPOD_RUNTIME:-$runtime}"
+  # Copy into the globals, dropping any empty slots an unmask left behind, so
+  # callers can trust "${#HARD_FMASKS[@]}" as a real count.
+  for m in "${masks[@]:-}"; do [ -n "$m" ] && HARD_MASKS+=("$m"); done
+  for m in "${fmasks[@]:-}"; do [ -n "$m" ] && HARD_FMASKS+=("$m"); done
+  return 0
+}
 
+hardening_run_args() { # hardening_run_args <engine>
+  local engine="$1"
+  if ! parse_hardening; then
+    warn "hardening profile not found ($HARDENING_CONF); creating box without fingerprint masks"
+    return 0
+  fi
+
+  [ -n "$HARD_RUNTIME" ] && printf '%s\n' "--runtime" "$HARD_RUNTIME"
+
+  local p
   if [ "$engine" = "docker" ]; then
-    local p
-    for p in "${masks[@]:-}"; do [ -n "$p" ] && printf '%s\n' "--tmpfs" "$p"; done
-    for p in "${fmasks[@]:-}"; do [ -n "$p" ] && printf '%s\n' "-v" "/dev/null:$p:ro"; done
+    for p in "${HARD_MASKS[@]:-}"; do [ -n "$p" ] && printf '%s\n' "--tmpfs" "$p"; done
+    # File masks intentionally omitted on Docker (runc rejects /proc binds);
+    # build_run_args surfaces the one-time warning.
   else
-    local p joined=""
-    for p in "${masks[@]:-}" "${fmasks[@]:-}"; do
+    local joined=""
+    for p in "${HARD_MASKS[@]:-}" "${HARD_FMASKS[@]:-}"; do
       [ -n "$p" ] && joined="${joined:+$joined:}$p"
     done
     [ -n "$joined" ] && printf '%s\n' "--security-opt" "mask=$joined"
@@ -674,6 +792,153 @@ is_microvm_runtime() {
   [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
 }
 
+# ---------------------------------------------------------------------------
+# network egress isolation (`egress lan-deny`)
+# ---------------------------------------------------------------------------
+# Resolve the egress mode the same way as active_runtime: ISOPOD_EGRESS wins,
+# else the last `egress`/`no-egress` across the baseline and the user override.
+# Echoes "lan-deny" or "" (off). `off` in the profile means the same as unset.
+active_egress() {
+  local r="${ISOPOD_EGRESS:-}"
+  if [ -z "$r" ]; then
+    local f key val _
+    for f in "$HARDENING_CONF" "$USER_HARDENING_CONF"; do
+      [ -f "$f" ] || continue
+      while read -r key val _; do
+        case "$key" in
+          egress) r="$val" ;;
+          no-egress) r="" ;;
+        esac
+      done <"$f"
+    done
+  fi
+  [ "$r" = off ] && r=""
+  printf '%s' "$r"
+}
+
+# True when the engine places boxes on a HOST-namespace bridge, which is where
+# the security/egress-host.nft rules take effect. Rootful podman (netavark) and
+# rootful docker qualify. A rootless engine routes the box through a userspace
+# stack (pasta/slirp4netns) with no host bridge, so host firewall rules never see
+# the box's traffic and `egress lan-deny` cannot be enforced.
+egress_can_enforce() { # egress_can_enforce <engine>
+  case "$1" in
+    podman) [ "$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" = false ] ;;
+    docker)
+      # Docker has no boolean rootless field; SecurityOptions is a list whose
+      # entries look like 'name=seccomp,profile=default' or 'name=rootless'.
+      # Match the exact 'name=rootless' token (one entry per line) rather than a
+      # bare 'rootless' substring, which could match a profile path.
+      ! docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null |
+        grep -qx 'name=rootless'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Ensure the dedicated egress bridge exists, with a fixed subnet the host firewall
+# can target and inter-box traffic disabled (docker ICC off; podman relies on the
+# ruleset's intra-subnet drop). Idempotent. v4-only on purpose: no IPv6 route means
+# no IPv6 egress path for a box to slip around the v4 rules.
+# Warn if a pre-existing egress network's subnet(s) don't include the one the host
+# firewall targets — otherwise the rules would silently not match the box's IP and
+# the box would be unprotected. Best effort: stays quiet when the subnet can't be
+# read (empty), so a format-string quirk degrades to no false alarm, not noise.
+egress_check_subnet() { # egress_check_subnet <engine> <subnets>
+  local engine="$1" subnets="$2"
+  [ -n "${subnets// /}" ] || return 0
+  case " $subnets " in
+    *" $ISOPOD_EGRESS_SUBNET "*) : ;;
+    *) warn "network '$ISOPOD_EGRESS_NET' exists with subnet(s) [${subnets% }] but the egress
+       firewall targets $ISOPOD_EGRESS_SUBNET — they must match or the LAN block will not apply.
+       Recreate it ('$engine network rm $ISOPOD_EGRESS_NET') or set ISOPOD_EGRESS_SUBNET." ;;
+  esac
+}
+
+ensure_egress_network() { # ensure_egress_network <engine>
+  local engine="$1" subnets=""
+  # Already present? Confirm its subnet matches the firewall's, then reuse it.
+  if [ "$engine" = docker ]; then
+    if docker network inspect "$ISOPOD_EGRESS_NET" >/dev/null 2>&1; then
+      subnets=$(docker network inspect "$ISOPOD_EGRESS_NET" \
+        --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true)
+      egress_check_subnet "$engine" "$subnets"
+      return 0
+    fi
+  else
+    if "$engine" network exists "$ISOPOD_EGRESS_NET" 2>/dev/null; then
+      subnets=$("$engine" network inspect "$ISOPOD_EGRESS_NET" \
+        --format '{{range .Subnets}}{{.Subnet}} {{end}}' 2>/dev/null || true)
+      egress_check_subnet "$engine" "$subnets"
+      return 0
+    fi
+  fi
+  info "Creating dedicated egress network '$ISOPOD_EGRESS_NET' ($ISOPOD_EGRESS_SUBNET)..."
+  if [ "$engine" = docker ]; then
+    docker network create --subnet "$ISOPOD_EGRESS_SUBNET" --gateway "$ISOPOD_EGRESS_GATEWAY" \
+      -o com.docker.network.bridge.enable_icc=false "$ISOPOD_EGRESS_NET" >/dev/null ||
+      die "could not create docker network '$ISOPOD_EGRESS_NET'"
+  else
+    podman network create --subnet "$ISOPOD_EGRESS_SUBNET" --gateway "$ISOPOD_EGRESS_GATEWAY" \
+      "$ISOPOD_EGRESS_NET" >/dev/null ||
+      die "could not create podman network '$ISOPOD_EGRESS_NET'"
+  fi
+}
+
+# Is the host egress firewall loaded? 0 = loaded, 1 = not loaded, 2 = unknown
+# (nft missing, or reading it needs root we don't have — a false "not loaded"
+# would be misleading, so we report unknown instead).
+egress_rules_loaded() {
+  have nft || return 2
+  local err
+  err=$(nft list table inet isopod 2>&1 >/dev/null) && return 0
+  case "$err" in
+    *"permission denied"* | *"Operation not permitted"* | *"not permitted"*) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Preflight for a box that will run under `egress lan-deny`: the engine must be
+# able to enforce it, the dedicated network must exist, and the host firewall
+# should already be loaded. Called before build_run_args in create/reconfigure.
+# Fails CLOSED — refuses to create a box that asked for `egress lan-deny` but
+# would not actually get it, rather than starting a silently unprotected box.
+# Two ways it can be unenforceable, both fatal by default:
+#   - rootless engine (no host bridge to filter), and
+#   - the host firewall is definitively NOT loaded (nft present, table absent).
+# The "cannot confirm" case (need root to read nftables) stays a warning, since
+# refusing there would break the normal setup where root loaded the rules and an
+# unprivileged `isopod create` can't read them. Set ISOPOD_EGRESS_ALLOW_UNLOADED=1
+# to downgrade the not-loaded case to a warning (start on the bridge anyway).
+egress_preflight() { # egress_preflight <engine>
+  [ "$(active_egress)" = "lan-deny" ] || return 0
+  local engine="$1"
+  if ! egress_can_enforce "$engine"; then
+    die "egress lan-deny needs a rootful engine (host-bridge networking); '$engine' here is rootless.
+     A rootless engine routes boxes through a userspace stack with no host bridge, so the
+     firewall cannot be enforced. Use a rootful podman/docker, or remove the 'egress' directive."
+  fi
+  ensure_egress_network "$engine"
+  local rc=0
+  egress_rules_loaded || rc=$?
+  case "$rc" in
+    1)
+      if [ "${ISOPOD_EGRESS_ALLOW_UNLOADED:-0}" = 1 ]; then
+        warn "egress firewall NOT loaded — starting on '$ISOPOD_EGRESS_NET' WITHOUT the LAN block
+       (ISOPOD_EGRESS_ALLOW_UNLOADED=1). Load it with:  sudo isopod egress apply"
+      else
+        die "egress lan-deny is configured but the host firewall is NOT loaded, so the box would
+     start on '$ISOPOD_EGRESS_NET' without the LAN/host/metadata block actually in effect.
+     Load it once (needs root):  sudo isopod egress apply
+     Then retry. To start anyway (bridge only, no LAN block): ISOPOD_EGRESS_ALLOW_UNLOADED=1"
+      fi
+      ;;
+    2) warn "cannot confirm the egress firewall is loaded (need root to read nftables). If you have
+       not run it, load it with:  sudo isopod egress apply   — verify:  sudo isopod egress status" ;;
+  esac
+  return 0
+}
+
 # Assemble the `$ENGINE run` argument list for a box into the global RUN_ARGS
 # array (bash can't return arrays). Shared by create and reconfigure so the two
 # can't drift. Hardening masks are read fresh from the profile each time.
@@ -693,12 +958,38 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   pubfile="$(box_dir "$name")/id_ed25519.pub"
   [ -f "$pubfile" ] && RUN_ARGS+=(-e "ISOPOD_AUTHORIZED_KEY=$(cat "$pubfile")")
   [ -n "${BOX_SUDO:-}" ] && RUN_ARGS+=(-e "ISOPOD_SUDO=$BOX_SUDO")
+  # Harden a --no-sudo box: with sudo removed there is no legitimate setuid
+  # escalation to preserve, so block privilege gains (setuid binaries, newgrp).
+  # On create the choice is in BOX_SUDO; on reconfigure (BOX_SUDO unset) read the
+  # persisted meta. Absent/1 => sudo box => no flag, matching pre-feature boxes.
+  local box_sudo="${BOX_SUDO:-}"
+  [ -n "$box_sudo" ] || box_sudo="$(meta_get "$name" sudo 2>/dev/null || true)"
+  [ "$box_sudo" = 0 ] && RUN_ARGS+=(--security-opt no-new-privileges)
   [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
   [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
   # Anti-fingerprinting hardening from the hardening profile.
   local -a hard_args=()
   mapfile -t hard_args < <(hardening_run_args "$ENGINE")
   [ "${#hard_args[@]}" -gt 0 ] && RUN_ARGS+=("${hard_args[@]}")
+  # Docker/runc can't bind-mask /proc files; hardening_run_args skipped them.
+  # Warn once here (not inside that function, which also renders the reference
+  # Compose file) so the user knows those paths stay readable on Docker.
+  if [ "$ENGINE" = docker ] && parse_hardening && [ "${#HARD_FMASKS[@]}" -gt 0 ]; then
+    warn "Docker can't mask these host-info files (runc blocks /proc bind mounts): ${HARD_FMASKS[*]}
+     — they stay readable inside the box. Use rootless podman, or a Tier 2/3 runtime
+     (runsc/kata/krun), to close them. Directory masks (/sys/*) are applied normally."
+  fi
+  # Network egress isolation (`egress lan-deny`): put the box on the dedicated
+  # bridge the host firewall targets, pin DNS to a public resolver so the box
+  # cannot query the host's internal/forwarding resolver for reconnaissance, and
+  # drop the raw-socket / net-admin caps so it cannot craft scan packets or
+  # re-route around the rules. All host-enforced at run time — the box can't undo
+  # them. Preflight (create/reconfigure) has already verified the engine can
+  # enforce this and created the network.
+  if [ "$(active_egress)" = "lan-deny" ]; then
+    RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --dns "$ISOPOD_EGRESS_DNS"
+      --cap-drop NET_RAW --cap-drop NET_ADMIN)
+  fi
   # Loopback-only app port publishings (from --expose / config.yaml).
   local spec
   for spec in "$@"; do [ -n "$spec" ] && RUN_ARGS+=(-p "127.0.0.1:$spec"); done
@@ -790,6 +1081,20 @@ cmd_create() {
   # rewrite below all read/write shared state and must not race another create.
   acquire_lock
   [ -d "$(box_dir "$name")" ] && die "sandbox '$name' already exists (isopod rm $name to delete)"
+  # Validate --port the way --expose is validated, and reject a port another box
+  # already publishes (the engine would otherwise fail with an opaque bind error).
+  if [ -n "$port" ]; then
+    valid_port "$port" || die "invalid --port '$port' (use a 1-65535 TCP port)"
+    local pd pother
+    for pd in "$BOXES_DIR"/*/; do
+      [ -d "$pd" ] || continue
+      pother=$(basename "$pd")
+      [ "$(meta_get "$pother" port 2>/dev/null || true)" = "$port" ] &&
+        die "--port $port is already used by box '$pother'"
+    done
+  fi
+  [ -n "$memory" ] && { valid_memory "$memory" || die "invalid --memory '$memory' (e.g. 512m, 2g)"; }
+  [ -n "$cpus" ] && { valid_cpus "$cpus" || die "invalid --cpus '$cpus' (a positive number, e.g. 1 or 1.5)"; }
   if [ -n "$repo" ] && [ "${#copies[@]}" -gt 0 ]; then
     die "use either --repo or --copy, not both (you can 'isopod copy-in' later)"
   fi
@@ -826,7 +1131,7 @@ cmd_create() {
   # resolve color
   local hex=""
   if [ -z "$color" ]; then
-    hex=$(auto_color)
+    hex=$(auto_color "$name")
   elif [[ "$color" =~ ^#?[0-9a-fA-F]{6}$ ]]; then
     hex="#${color#\#}"
   else
@@ -870,6 +1175,9 @@ cmd_create() {
   # entrypoint applies this from the run env; see build_run_args.
   local BOX_SUDO
   [ "$no_sudo" -eq 0 ] && BOX_SUDO=1 || BOX_SUDO=0
+  # Verify the engine can enforce egress isolation and set up its network before
+  # the box starts (no-op unless `egress lan-deny` is configured).
+  egress_preflight "$ENGINE"
   build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${expose_specs[@]}"
 
   info "Starting container ($ENGINE)..."
@@ -883,6 +1191,7 @@ cmd_create() {
     printf 'base=%s\n' "$base"
     printf 'color=%s\n' "$hex"
     printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'sudo=%s\n' "$BOX_SUDO"
     printf 'port=%s\n' "$hostport"
     printf 'memory=%s\n' "$memory"
     printf 'cpus=%s\n' "$cpus"
@@ -937,11 +1246,19 @@ do_copy_in() { # do_copy_in <name> <path>...
   # extraction (so files arrive owned by it), tar preserves mtimes/modes/symlinks
   # like `$ENGINE cp` did, and it reaches the workload under any runtime.
   box_ssh "$name" -- mkdir -p "$WORKSPACE"
-  local p rp base
+  local p rp base sb
+  local -a seen_bases=()
   for p in "$@"; do
     [ -e "$p" ] || die "path does not exist: $p"
     rp=$(realpath "$p")
     base=$(basename "$rp")
+    # Two sources sharing a basename land on the same $WORKSPACE/<base> and the
+    # later one wins — warn rather than silently overwrite.
+    for sb in "${seen_bases[@]:-}"; do
+      [ "$sb" = "$base" ] &&
+        warn "another --copy source already maps to '$WORKSPACE/$base' — overwriting it"
+    done
+    seen_bases+=("$base")
     info "Copying $p -> $WORKSPACE/$base (one-time copy, not a mount)"
     tar -C "$(dirname "$rp")" -cf - "$base" | box_tar_in "$name" "$WORKSPACE"
   done
@@ -964,9 +1281,13 @@ cmd_export() {
   dest="${dest:-./isopod-$name-export}"
   [ -e "$dest" ] && die "destination already exists: $dest"
   info "Copying $WORKSPACE out of the box to $dest ..."
-  # Stream the workspace out as a tar archive (preserves mtimes/modes/symlinks).
+  # Stream the workspace out as a tar archive (preserves mtimes/symlinks). The
+  # box may be compromised, so treat its archive as untrusted on the host: drop
+  # `-p` (don't honor box-controlled mode bits, incl. setuid/setgid) and force
+  # ownership to the extracting user with --no-same-owner. Modern GNU tar also
+  # refuses absolute paths / `..`; bsdtar (macOS) differs, so we stay explicit.
   mkdir -p "$dest"
-  box_tar_out "$name" "$WORKSPACE" | tar -C "$dest" -xpf - || {
+  box_tar_out "$name" "$WORKSPACE" | tar -C "$dest" --no-same-owner -xf - || {
     rm -rf "$dest"
     die "export failed (is '$name' running? try: isopod start $name)"
   }
@@ -1032,7 +1353,7 @@ cmd_fetch() {
     # The repo-detection above already proved the box is up, so re-pin its host
     # key for the current port — keeps known_hosts valid if it changed ports.
     local top port key kh
-    scan_host_key "$name" >/dev/null 2>&1 || true
+    scan_host_key "$name" >/dev/null || true # keeps stderr: a key-change warning must show
     top=$(git -C "$target" rev-parse --show-toplevel)
     port=$(meta_get "$name" port)
     key="$(box_dir "$name")/id_ed25519"
@@ -1193,13 +1514,9 @@ cmd_remap() {
   local top
   top=$(git -C "$target" rev-parse --show-toplevel)
 
-  # New identity defaults so 'isopod remap <box>' just works in the common case
-  # (rewrite the box's throwaway identity -> your real one). Precedence:
-  #   explicit --name/--email  >  ISOPOD_GIT_NAME/EMAIL  >  host git config.
-  [ -n "$new_name" ] || new_name="${ISOPOD_GIT_NAME:-$(git -C "$top" config user.name 2>/dev/null || true)}"
-  [ -n "$new_email" ] || new_email="${ISOPOD_GIT_EMAIL:-$(git -C "$top" config user.email 2>/dev/null || true)}"
-  [ -n "$new_name" ] || die "no new author name — pass --name, set ISOPOD_GIT_NAME, or set git config user.name"
-  [ -n "$new_email" ] || die "no new author email — pass --email, set ISOPOD_GIT_EMAIL, or set git config user.email"
+  # NOTE: the new-identity defaults + "no new author" checks live in the
+  # single-pair branch below ONLY. A --remap-file run supplies every identity
+  # from the file, so it must not require a host git identity to be set.
 
   # The box's commits live under refs/remotes/<name>/* after `isopod fetch`.
   local -a boxrefs=()
@@ -1333,15 +1650,29 @@ cmd_remap() {
 
 cmd_list() {
   detect_engine
-  printf '%-18s %-10s %-22s %-9s %s\n' NAME STATUS SSH PORT COLOR
-  local d name status port color
+  # Two passes so the NAME/SSH columns size to the actual data instead of a fixed
+  # width that long box names would overflow.
+  local d name status port color ssh
+  local -a names=() statuses=() sshs=() ports=() colors=()
+  local nw=4 sw=3 # min widths for the "NAME" and "SSH" headers
   for d in "$BOXES_DIR"/*/; do
     [ -d "$d" ] || continue
     name=$(basename "$d")
-    status=$("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || printf 'missing')
+    ssh=$(ctr_name "$name")
+    status=$("$ENGINE" inspect -f '{{.State.Status}}' "$ssh" 2>/dev/null || printf 'missing')
     port=$(meta_get "$name" port || printf '?')
     color=$(meta_get "$name" color || printf '-')
-    printf '%-18s %-10s %-22s %-9s %s\n' "$name" "$status" "$(ctr_name "$name")" "$port" "$color"
+    names+=("$name") statuses+=("$status") sshs+=("$ssh") ports+=("$port") colors+=("$color")
+    [ "${#name}" -gt "$nw" ] && nw=${#name}
+    [ "${#ssh}" -gt "$sw" ] && sw=${#ssh}
+  done
+  local fmt="%-${nw}s  %-10s  %-${sw}s  %-9s  %s\n"
+  # shellcheck disable=SC2059
+  printf "$fmt" NAME STATUS SSH PORT COLOR
+  local i
+  for i in "${!names[@]}"; do
+    # shellcheck disable=SC2059
+    printf "$fmt" "${names[$i]}" "${statuses[$i]}" "${sshs[$i]}" "${ports[$i]}" "${colors[$i]}"
   done
 }
 
@@ -1366,7 +1697,7 @@ cmd_start() {
   acquire_lock # refresh_port may rewrite the shared ssh_config
   "$ENGINE" start "$(ctr_name "$name")" >/dev/null
   refresh_port "$name"
-  scan_host_key "$name" >/dev/null 2>&1 || true
+  scan_host_key "$name" >/dev/null || true # keeps stderr: a key-change warning must show
   info "started '$name' (ssh $(ctr_name "$name"))"
 }
 
@@ -1460,6 +1791,8 @@ cmd_reconfigure() {
       die "invalid expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
     expose_specs+=("$host_p:$ctr_p")
   done
+  [ -n "$d_memory" ] && { valid_memory "$d_memory" || die "invalid memory '$d_memory' (e.g. 512m, 2g)"; }
+  [ -n "$d_cpus" ] && { valid_cpus "$d_cpus" || die "invalid cpus '$d_cpus' (a positive number, e.g. 1 or 1.5)"; }
 
   # resolve color to a hex (keep the current one if unset)
   local hex
@@ -1475,6 +1808,10 @@ cmd_reconfigure() {
   local ctr
   ctr=$(ctr_name "$name")
   "$ENGINE" inspect "$ctr" >/dev/null 2>&1 || die "container for '$name' is missing; recreate the box"
+
+  # Re-check egress enforcement + network before recreating (the profile may have
+  # changed since create; no-op unless `egress lan-deny` is configured).
+  egress_preflight "$ENGINE"
 
   # Snapshot the box so the recreate keeps the workspace + installed packages.
   local snap old_img
@@ -1506,7 +1843,7 @@ cmd_reconfigure() {
     printf '%s' "${expose_specs[*]:-}"
   )"
   write_ssh_include
-  scan_host_key "$name" >/dev/null 2>&1 || true
+  scan_host_key "$name" >/dev/null || true # keeps stderr: a key-change warning must show
   wait_for_ssh "$name" || warn "box recreated but SSH didn't authenticate yet (check: isopod info $name)"
   apply_color "$name" "$hex" || warn "could not apply window color (the box is fine without it)"
   write_box_config "$name"
@@ -1523,12 +1860,24 @@ cmd_shell() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod shell <name>"
   require_box "$name"
+  detect_engine "$(meta_get "$name" engine || true)"
+  acquire_lock # may start the box and refresh the shared ssh_config
+  # Start a stopped box first (like `isopod code`), so `shell` on a stopped box
+  # gives a working session instead of a raw SSH connection error.
+  local status
+  status=$("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || true)
+  [ "$status" = "running" ] || cmd_start "$name"
+  refresh_port "$name"
+  # Release the lock before the (possibly long) interactive session so other
+  # isopod commands aren't blocked meanwhile; the on-exit trap releases it too.
+  release_lock
   # Interactive shell over SSH (-t for a tty), landing in the workspace. Like
   # every other box op, this goes through SSH so it enters the workload under
   # any runtime — including a microVM, where the engine's exec would not. Plain
-  # `bash` (not `bash -l`) keeps the old non-login behavior: it sources ~/.bashrc,
-  # matching what `engine exec ... bash` did before.
-  exec box_ssh "$name" -t -- "cd '$WORKSPACE' 2>/dev/null; exec bash"
+  # `bash` (not `bash -l`) sources ~/.bashrc, matching the old `engine exec` shell.
+  # box_ssh is a shell function, so it can't be `exec`'d — call it and let its
+  # exit status propagate as this command's.
+  box_ssh "$name" -t -- "cd '$WORKSPACE' 2>/dev/null; exec bash"
 }
 
 # Resolved IDE launch command (array, since Flatpak needs 'flatpak run <id>')
@@ -1644,11 +1993,15 @@ Flatpak users: 'flatpak list | grep -i ${app}' to confirm the app ID is installe
     fi
   fi
 
-  local uri
+  local uri ide_log
   uri="vscode-remote://ssh-remote+$(ctr_name "$name")$WORKSPACE"
+  ide_log="$(box_dir "$name")/ide-launch.log"
   info "Opening $app -> $uri"
-  "${IDE_CMD[@]}" --folder-uri "$uri" >/dev/null 2>&1 &
+  # Capture the IDE's own output to a per-box log rather than /dev/null, so a
+  # silent launch failure is at least inspectable afterwards.
+  "${IDE_CMD[@]}" --folder-uri "$uri" >"$ide_log" 2>&1 &
   disown || true
+  info "(if the window doesn't open, check the launch log: $ide_log)"
   render_tmpl code-note.txt
 }
 
@@ -1681,9 +2034,144 @@ cmd_rm() {
   fi
   acquire_lock # serialize the box-dir removal + ssh_config rewrite
   "$ENGINE" rm -f "$(ctr_name "$name")" >/dev/null 2>&1 || true
+  # Drop this box's snapshot images too (reconfigure leaves localhost/isopod-box-<name>:*),
+  # so they don't accumulate. Exact-prefix match (awk index, not a regex) so box
+  # 'a' never matches box 'ab'; the trailing ':' pins the boundary. The shared
+  # base image (localhost/isopod-base:*) is left alone — use `isopod gc` for that.
+  local img
+  while IFS= read -r img; do
+    [ -n "$img" ] && "$ENGINE" rmi -f "$img" >/dev/null 2>&1 || true
+  done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
+    awk -v p="localhost/isopod-box-$name:" 'index($0, p) == 1')
   rm -rf "$(box_dir "$name")"
   write_ssh_include
   info "removed '$name'"
+}
+
+# Reclaim isopod-managed images no box still references: base images
+# (localhost/isopod-base:*), --dockerfile user images (localhost/isopod-user:*),
+# and any orphaned snapshots (localhost/isopod-box-*:*). "Referenced" means a
+# box's meta still points at it via `image` or `base`. Safe: a removed base
+# image is simply rebuilt on the next create.
+cmd_gc() {
+  local force=0 dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
+    case "$1" in
+      --force | -f)
+        force=1
+        shift
+        ;;
+      --dry-run | -n)
+        dry=1
+        shift
+        ;;
+      -h | --help)
+        printf 'usage: isopod gc [--dry-run] [--force]\n'
+        printf '  Remove isopod-managed images that no box still references.\n'
+        return 0
+        ;;
+      *) die "unknown option for gc: $1" ;;
+    esac
+  done
+  detect_engine
+  # Collect the images every existing box still depends on.
+  local -A ref=()
+  local d name k v
+  for d in "$BOXES_DIR"/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    for k in image base; do
+      v=$(meta_get "$name" "$k" 2>/dev/null || true)
+      [ -n "$v" ] && ref["$v"]=1
+    done
+  done
+  # Any isopod-managed image not in that set is a candidate for removal.
+  local img
+  local -a victims=()
+  while IFS= read -r img; do
+    [ -n "$img" ] || continue
+    case "$img" in
+      localhost/isopod-base:* | localhost/isopod-user:* | localhost/isopod-box-*:*)
+        [ -n "${ref[$img]:-}" ] || victims+=("$img")
+        ;;
+    esac
+  done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+  if [ "${#victims[@]}" -eq 0 ]; then
+    info "nothing to collect — no unreferenced isopod images."
+    return 0
+  fi
+  printf 'Unreferenced isopod images:\n'
+  printf '  %s\n' "${victims[@]}"
+  if [ "$dry" -eq 1 ]; then
+    info "(dry run — nothing removed; re-run without --dry-run to delete)"
+    return 0
+  fi
+  if [ "$force" -ne 1 ]; then
+    printf 'Remove these %d image(s)? [y/N] ' "${#victims[@]}"
+    local ans
+    read -r ans
+    case "$ans" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
+  fi
+  for img in "${victims[@]}"; do
+    if "$ENGINE" rmi "$img" >/dev/null 2>&1; then info "removed $img"; else
+      warn "could not remove $img (still in use?)"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# egress — manage the host-side network firewall for `egress lan-deny` boxes
+# ---------------------------------------------------------------------------
+cmd_egress() {
+  local action="${1:-status}"
+  case "$action" in
+    status | "")
+      printf 'isopod egress\n\n'
+      local mode
+      mode="$(active_egress)"
+      printf '  mode:      %s\n' "${mode:-off}"
+      printf '  network:   %s (%s), gateway %s\n' "$ISOPOD_EGRESS_NET" "$ISOPOD_EGRESS_SUBNET" "$ISOPOD_EGRESS_GATEWAY"
+      printf '  dns:       %s (public resolver — box cannot query the host/LAN resolver)\n' "$ISOPOD_EGRESS_DNS"
+      printf '  ruleset:   %s\n' "$ISOPOD_EGRESS_RULESET"
+      local rc=0
+      egress_rules_loaded || rc=$?
+      case "$rc" in
+        0) printf '  firewall:  loaded (table inet isopod)\n' ;;
+        1) printf '  firewall:  NOT loaded — run: sudo isopod egress apply\n' ;;
+        2) printf '  firewall:  unknown (need root to read nftables; try: sudo isopod egress status)\n' ;;
+      esac
+      ;;
+    apply)
+      [ -f "$ISOPOD_EGRESS_RULESET" ] || die "missing ruleset: $ISOPOD_EGRESS_RULESET"
+      have nft || die "nft (nftables) not found — install nftables to apply the egress firewall"
+      local rendered
+      rendered="$(render_tmpl "$ISOPOD_EGRESS_RULESET")"
+      info "Loading isopod egress firewall into the host network namespace..."
+      if [ "$(id -u)" -eq 0 ]; then
+        printf '%s\n' "$rendered" | nft -f - || die "nft failed to load the ruleset"
+      elif have sudo; then
+        printf '%s\n' "$rendered" | sudo nft -f - || die "nft failed to load the ruleset (via sudo)"
+      else
+        die "loading nft rules needs root — re-run as root, or install sudo"
+      fi
+      info "egress firewall loaded (table inet isopod)."
+      warn "not persistent across reboot / firewalld reload — re-run 'sudo isopod egress apply' after
+       those, or include $ISOPOD_EGRESS_RULESET from /etc/nftables.conf."
+      ;;
+    rules | show)
+      render_tmpl "$ISOPOD_EGRESS_RULESET"
+      ;;
+    -h | --help | help)
+      printf 'usage: isopod egress [status|apply|rules]\n'
+      printf '  status  egress mode, network, and whether the host firewall is loaded\n'
+      printf '  apply   load the host firewall (needs root; run once, and after reboot/firewalld reload)\n'
+      printf '  rules   print the rendered nftables ruleset that apply would load\n'
+      ;;
+    *) die "unknown egress action: $action (try: isopod egress status|apply|rules)" ;;
+  esac
 }
 
 cmd_doctor() {
@@ -1695,6 +2183,18 @@ cmd_doctor() {
       ok=0
     fi
   done
+  # git (fetch/remap) and a history-rewrite backend (remap). Not core — create,
+  # code, and shell work without them — so a miss is a warning, not a failure.
+  if have git; then printf '  [ok]      git (needed by fetch, remap)\n'; else
+    printf '  [warn]    git not found — isopod fetch/remap need it\n'
+  fi
+  if have git-filter-repo; then
+    printf '  [ok]      git-filter-repo (remap backend)\n'
+  elif have python3; then
+    printf '  [ok]      python3 (remap fallback backend)\n'
+  else
+    printf '  [warn]    no remap backend — install git-filter-repo or python3 for isopod remap\n'
+  fi
   if have podman; then
     if podman info >/dev/null 2>&1; then
       printf '  [ok]      podman (working)\n'
@@ -1736,6 +2236,32 @@ cmd_doctor() {
   else
     printf '  [warn]    hardening profile missing (%s) — boxes start WITHOUT fingerprint masks\n' "$HARDENING_CONF"
   fi
+
+  # Network egress isolation (host firewall; `egress lan-deny`).
+  if [ "$(active_egress)" = "lan-deny" ]; then
+    printf '  [ok]      egress isolation: lan-deny (boxes on %s; LAN/host/metadata/internal-DNS blocked)\n' "$ISOPOD_EGRESS_NET"
+    local eng seen=0
+    for eng in podman docker; do
+      have "$eng" && "$eng" info >/dev/null 2>&1 || continue
+      seen=1
+      if egress_can_enforce "$eng"; then
+        printf '  [ok]      %s can enforce egress (rootful — host bridge)\n' "$eng"
+      else
+        printf '  [warn]    %s is ROOTLESS — cannot enforce egress lan-deny; such boxes fail preflight\n' "$eng"
+      fi
+    done
+    [ "$seen" = 1 ] || printf '  [warn]    no working engine to check egress enforcement against\n'
+    local erc=0
+    egress_rules_loaded || erc=$?
+    case "$erc" in
+      0) printf '  [ok]      egress firewall loaded (table inet isopod)\n' ;;
+      1) printf '  [warn]    egress firewall NOT loaded — run: sudo isopod egress apply\n' ;;
+      2) printf '  [--]      egress firewall status unknown (need root; try: sudo isopod egress status)\n' ;;
+    esac
+  else
+    printf '  [--]      egress isolation: off (boxes can reach your LAN; enable with `egress lan-deny` in hardening.conf)\n'
+  fi
+
   if [ -e /dev/kvm ]; then
     printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes (kata, krun) available\n'
   else
@@ -1774,6 +2300,8 @@ main() {
     remap) cmd_remap "$@" ;;
     copy-in) cmd_copy_in "$@" ;;
     rm | remove | delete) cmd_rm "$@" ;;
+    gc) cmd_gc "$@" ;;
+    egress) cmd_egress "$@" ;;
     doctor) cmd_doctor "$@" ;;
     version | --version | -v) printf 'isopod %s\n' "$ISOPOD_VERSION" ;;
     help | --help | -h) usage ;;

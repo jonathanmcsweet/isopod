@@ -22,7 +22,7 @@ if [ ! -f /etc/ssh/.isopod-host-keys ]; then
 fi
 
 # Authorized key. Append-if-absent, so reboots and reconfigure stay idempotent
-# and never clobber a key the user added inside the box.
+# and never overwrite a key the user added inside the box.
 if [ -n "${ISOPOD_AUTHORIZED_KEY:-}" ]; then
   install -d -m 700 -o "$iso_u" -g "$iso_u" "$iso_h/.ssh"
   touch "$iso_h/.ssh/authorized_keys"

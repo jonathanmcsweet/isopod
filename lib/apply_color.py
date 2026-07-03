@@ -12,11 +12,18 @@ Environment:
     ISOPOD_WS     absolute path to the workspace directory
 
 Behavior:
-    * Tolerates simple JSONC (``//`` and ``/* */`` comments, trailing commas).
+    * Tolerates JSONC (``//`` and ``/* */`` comments, trailing commas) with a
+      string-aware scanner, so a ``//`` inside a string value is not mangled.
     * Merges into any existing ``workbench.colorCustomizations`` rather than
       replacing the whole settings file.
     * If the existing file cannot be parsed, backs it up to
       ``settings.json.isopod-backup`` instead of destroying it.
+    * The rewrite is plain JSON (json can't emit comments), so if the original
+      had comments a copy is saved to ``settings.json.isopod-backup`` and a note
+      is printed — the comments are never lost silently.
+    * When the workspace is a git repo, adds ``.vscode/`` to
+      ``.git/info/exclude`` so the isopod-written settings don't show up in
+      ``git status`` (and can't be committed by accident).
 
 Runs on the stock Python 3 already present in the container image.
 """
@@ -92,35 +99,166 @@ def color_customizations(hexv: str) -> dict[str, str]:
     }
 
 
+def _decomment(raw: str) -> tuple[str, bool]:
+    """Strip // and /* */ comments, ignoring string bodies.
+
+    Returns (text_without_comments, had_comment). A hand-rolled scanner rather
+    than a blanket regex, so a ``//`` or ``/*`` inside a JSON string value (e.g. a
+    URL like ``https://…``) is left intact instead of being corrupted.
+    """
+    out: list[str] = []
+    had = False
+    i, n = 0, len(raw)
+    in_str = False
+    while i < n:
+        c = raw[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:  # keep the escaped char verbatim
+                out.append(raw[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+        elif c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+        elif c == "/" and i + 1 < n and raw[i + 1] == "/":
+            had = True
+            i += 2
+            while i < n and raw[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and raw[i + 1] == "*":
+            had = True
+            i += 2
+            while i + 1 < n and not (raw[i] == "*" and raw[i + 1] == "/"):
+                i += 1
+            i += 2  # skip the closing */
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), had
+
+
+def _strip_trailing_commas(s: str) -> str:
+    """Drop a comma that directly precedes a } or ], ignoring string bodies."""
+    out: list[str] = []
+    i, n = 0, len(s)
+    in_str = False
+    while i < n:
+        c = s[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(s[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == ",":
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            if j < n and s[j] in "}]":  # trailing comma — drop it
+                i += 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def strip_jsonc(raw: str) -> str:
     """Remove // and /* */ comments and trailing commas so json can parse it."""
-    raw = re.sub(r"//[^\n]*", "", raw)
-    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
-    raw = re.sub(r",\s*([}\]])", r"\1", raw)
-    return raw
+    cleaned, _ = _decomment(raw)
+    return _strip_trailing_commas(cleaned)
+
+
+def _backup(path: Path) -> None:
+    """Rename ``path`` aside to its .isopod-backup name (best effort)."""
+    try:
+        path.rename(path.with_name(path.name + BACKUP_SUFFIX))
+    except OSError:
+        pass
 
 
 def load_existing(path: Path) -> tuple[dict, str | None]:
     """Load settings from ``path``, tolerating JSONC.
 
-    Returns a (settings_dict, note) tuple. On unreadable or unparseable input,
-    the original file is renamed to ``<path>.isopod-backup`` and an explanatory
-    note string is returned (otherwise note is None).
+    Returns a (settings_dict, note) tuple. On unreadable or unparseable input the
+    original is renamed to ``<path>.isopod-backup`` and a note is returned. If the
+    file parsed but contained comments, we still rewrite it as plain JSON (json
+    can't emit comments), so a COPY of the original is saved to the same backup
+    name and a note returned — the user's comments are preserved and the loss is
+    never silent. Otherwise note is None.
     """
     if not path.exists():
         return {}, None
     try:
-        cleaned = strip_jsonc(path.read_text(encoding="utf-8"))
-        return (json.loads(cleaned) if cleaned.strip() else {}), None
-    except (OSError, ValueError):
-        # OSError: cannot read it; ValueError (incl. JSONDecodeError): cannot
-        # parse it. Either way, preserve the original instead of clobbering it.
-        backup = path.with_name(path.name + BACKUP_SUFFIX)
-        path.rename(backup)
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        _backup(path)
+        return {}, (
+            "note: existing .vscode/settings.json could not be read; "
+            f"backed up to settings.json{BACKUP_SUFFIX}"
+        )
+    cleaned, had_comments = _decomment(raw)
+    cleaned = _strip_trailing_commas(cleaned)
+    try:
+        settings = json.loads(cleaned) if cleaned.strip() else {}
+    except ValueError:
+        _backup(path)
         return {}, (
             "note: existing .vscode/settings.json could not be parsed; "
             f"backed up to settings.json{BACKUP_SUFFIX}"
         )
+    if had_comments:
+        backup = path.with_name(path.name + BACKUP_SUFFIX)
+        try:
+            if not backup.exists():
+                backup.write_text(raw, encoding="utf-8")
+            return settings, (
+                "note: reformatted .vscode/settings.json; JSONC comments were "
+                f"dropped — original saved to settings.json{BACKUP_SUFFIX}"
+            )
+        except OSError:
+            pass
+    return settings, None
+
+
+def exclude_vscode_from_git(ws: Path) -> None:
+    """Add ``.vscode/`` to the repo's ``.git/info/exclude`` if ws is a git repo.
+
+    isopod writes ``.vscode/settings.json`` for window theming; without this the
+    file lands in ``git status`` and is easy to commit by accident. We use
+    ``.git/info/exclude`` (a private, per-clone ignore file) rather than editing
+    the tracked ``.gitignore``. No-op when the workspace isn't a standard repo,
+    or when ``.git`` is a file (a worktree/submodule pointer) rather than a dir.
+    """
+    git_dir = ws / ".git"
+    if not git_dir.is_dir():
+        return
+    entry = "/.vscode/"
+    exclude = git_dir / "info" / "exclude"
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        if entry in existing.split():
+            return
+        prefix = "" if existing == "" or existing.endswith("\n") else "\n"
+        with exclude.open("a", encoding="utf-8") as fh:
+            fh.write(f"{prefix}{entry}\n")
+    except OSError:
+        # Best effort — a missing/read-only .git/info is not worth failing over.
+        pass
 
 
 def main() -> int:
@@ -150,6 +288,7 @@ def main() -> int:
     settings["window.title"] = WINDOW_TITLE_TEMPLATE.format(name=name)
 
     path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    exclude_vscode_from_git(Path(ws))
     print(f"applied color #{hexv} to {path}")
     return 0
 

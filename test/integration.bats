@@ -213,6 +213,56 @@ EOF
   assert_output --partial "invalid --expose"
 }
 
+@test "create rejects an out-of-range --port" {
+  run "$ISOPOD_ROOT/isopod" create demo --port 99999 --color teal
+  assert_failure
+  assert_output --partial "invalid --port"
+}
+
+@test "create rejects a non-numeric --port" {
+  run "$ISOPOD_ROOT/isopod" create demo --port ssh --color teal
+  assert_failure
+  assert_output --partial "invalid --port"
+}
+
+@test "create rejects a --port already used by another box" {
+  # Seed a box whose meta claims port 12345, then ask for the same port.
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/other"
+  printf 'port=12345\n' > "$ISOPOD_CONFIG_DIR/boxes/other/meta"
+  run "$ISOPOD_ROOT/isopod" create demo --port 12345 --color teal
+  assert_failure
+  assert_output --partial "already used by box 'other'"
+}
+
+@test "create on Docker warns that /proc file masks can't be applied" {
+  # A docker stub (logs as 'docker'). Select it with --engine docker rather than
+  # by removing the podman stub: a runner may have a real podman on PATH that the
+  # stub only shadows, so unshadowing it would pick the real engine.
+  cat > "$STUB_DIR/docker" <<'EOF'
+#!/usr/bin/env bash
+echo "docker $*" >> "$STUB_LOG"
+cmd="$1"; shift || true
+case "$cmd" in
+  info)    exit 0 ;;
+  image)   exit 1 ;;                        # pretend the base image is missing
+  build)   exit 0 ;;
+  run)     echo "deadbeefcontainerid"; exit 0 ;;
+  port)    echo "127.0.0.1:45678" ;;
+  inspect) echo "running" ;;
+  start|stop|rm|rmi|commit) exit 0 ;;
+  *)       exit 0 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/docker"
+  run "$ISOPOD_ROOT/isopod" create demo --color teal --engine docker
+  assert_success
+  assert_output --partial "Docker can't mask"
+  assert_output --partial "/proc/cmdline"
+  # directory masks are still applied as --tmpfs, and no /proc bind is attempted
+  assert_stub_called "docker run .*--tmpfs /sys/class/net"
+  assert_stub_not_called "docker run .*/dev/null:/proc"
+}
+
 # ---- --dockerfile ------------------------------------------------------------
 @test "create --dockerfile builds the user image and layers the base on it" {
   printf 'FROM debian:bookworm-slim\nRUN true\n' > "$TEST_TMP/Dockerfile"
@@ -378,13 +428,29 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   assert_output --partial "Real Name <real@me.com>"
 }
 
+@test "remap --remap-file works without a host git identity" {
+  # A remap file supplies every identity, so the run must not require the host
+  # repo (or any git config) to carry a user.name/user.email.
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  git -C "$host" config --unset user.name
+  git -C "$host" config --unset user.email
+  printf 'dev@mybox.local -> Real Name <real@me.com>\n' > "$TEST_TMP/remap.txt"
+  run env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    "$ISOPOD_ROOT/isopod" remap mybox "$host" --remap-file "$TEST_TMP/remap.txt" --force
+  assert_success
+  refute_output --partial "no new author"
+  run git -C "$host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "Real Name <real@me.com>"
+}
+
 @test "create with --repo clones inside the box over ssh" {
   run "$ISOPOD_ROOT/isopod" create demo --repo https://example.com/r.git --color blue
   assert_success
   assert_stub_called "ssh .*git clone"
 }
 
-@test "create refuses to clobber an existing box" {
+@test "create refuses to overwrite an existing box" {
   "$ISOPOD_ROOT/isopod" create demo --color teal
   run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_failure
@@ -462,6 +528,28 @@ EOF
   assert_output --partial "could not find 'windsurf'"
 }
 
+# ---- shell -------------------------------------------------------------------
+@test "shell starts a stopped box before connecting" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  # Make the engine report the box as stopped, so shell must start it (like code).
+  cat > "$STUB_DIR/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "podman $*" >> "$STUB_LOG"
+cmd="$1"; shift || true
+case "$cmd" in
+  info) exit 0 ;;
+  inspect) echo "exited" ;;
+  port) echo "127.0.0.1:45678" ;;
+  start|stop|rm) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/podman"
+  run "$ISOPOD_ROOT/isopod" shell demo
+  assert_success
+  assert_stub_called "podman start isopod-demo"
+}
+
 # ---- rm ----------------------------------------------------------------------
 @test "rm --force removes the container, keys, and ssh config entry" {
   "$ISOPOD_ROOT/isopod" create demo --color teal
@@ -512,4 +600,103 @@ EOF
     run cat "$ISOPOD_CONFIG_DIR/ssh_config"
     refute_output --partial "Host isopod-demo"
   fi
+}
+
+# ---- --dockerfile context hashing (§4.1 stale-image fix) ---------------------
+@test "create --dockerfile tag reflects the build context, not just the Dockerfile" {
+  mkdir -p "$TEST_TMP/proj"
+  printf 'FROM debian:bookworm-slim\nCOPY data.txt /data.txt\n' > "$TEST_TMP/proj/Dockerfile"
+  echo one > "$TEST_TMP/proj/data.txt"
+  run "$ISOPOD_ROOT/isopod" create demo --dockerfile "$TEST_TMP/proj/Dockerfile"
+  assert_success
+  local tag1; tag1=$(grep -oE 'localhost/isopod-user:[0-9a-f]+' "$STUB_LOG" | head -1)
+  # Change a COPY'd context file WITHOUT touching the Dockerfile.
+  echo two > "$TEST_TMP/proj/data.txt"
+  : > "$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" create demo2 --dockerfile "$TEST_TMP/proj/Dockerfile"
+  assert_success
+  local tag2; tag2=$(grep -oE 'localhost/isopod-user:[0-9a-f]+' "$STUB_LOG" | head -1)
+  [ -n "$tag1" ] && [ -n "$tag2" ]
+  [ "$tag1" != "$tag2" ] # context change busts the cache tag (no stale reuse)
+}
+
+# ---- no-new-privileges for --no-sudo boxes (§4.7) ----------------------------
+@test "create --no-sudo hardens the box with no-new-privileges" {
+  run "$ISOPOD_ROOT/isopod" create demo --no-sudo --color teal
+  assert_success
+  assert_stub_called 'podman run .*--security-opt no-new-privileges'
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "sudo=0"
+}
+
+@test "a default (sudo) box does not get no-new-privileges" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_not_called 'no-new-privileges'
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "sudo=1"
+}
+
+# ---- --memory / --cpus validation (§5) ---------------------------------------
+@test "create rejects a malformed --memory" {
+  run "$ISOPOD_ROOT/isopod" create demo --memory 2gigs --color teal
+  assert_failure
+  assert_output --partial "invalid --memory"
+}
+
+@test "create rejects a non-numeric --cpus" {
+  run "$ISOPOD_ROOT/isopod" create demo --cpus two --color teal
+  assert_failure
+  assert_output --partial "invalid --cpus"
+}
+
+# ---- gc (§4.10) --------------------------------------------------------------
+@test "gc removes unreferenced isopod images and keeps referenced ones" {
+  # A box that still references one snapshot image and one user base image.
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/keep"
+  printf 'engine=podman\nimage=localhost/isopod-box-keep:r1\nbase=localhost/isopod-user:aaa\n' \
+    > "$ISOPOD_CONFIG_DIR/boxes/keep/meta"
+  cat > "$STUB_DIR/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "podman $*" >> "$STUB_LOG"
+case "$1" in
+  info) exit 0 ;;
+  images)
+    printf '%s\n' \
+      localhost/isopod-box-keep:r1 \
+      localhost/isopod-user:aaa \
+      localhost/isopod-base:orphan \
+      localhost/isopod-user:orphan2 \
+      docker.io/library/debian:bookworm-slim
+    ;;
+  rmi) exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$STUB_DIR/podman"
+  run "$ISOPOD_ROOT/isopod" gc --force
+  assert_success
+  assert_stub_called 'podman rmi localhost/isopod-base:orphan'
+  assert_stub_called 'podman rmi localhost/isopod-user:orphan2'
+  assert_stub_not_called 'podman rmi localhost/isopod-box-keep:r1'
+  assert_stub_not_called 'podman rmi localhost/isopod-user:aaa'
+  assert_stub_not_called 'podman rmi docker.io/library/debian'
+}
+
+@test "gc --dry-run lists but removes nothing" {
+  cat > "$STUB_DIR/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "podman $*" >> "$STUB_LOG"
+case "$1" in
+  info) exit 0 ;;
+  images) printf '%s\n' localhost/isopod-base:orphan ;;
+  rmi) exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$STUB_DIR/podman"
+  run "$ISOPOD_ROOT/isopod" gc --dry-run
+  assert_success
+  assert_output --partial "localhost/isopod-base:orphan"
+  assert_stub_not_called 'podman rmi'
 }

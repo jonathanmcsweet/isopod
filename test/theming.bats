@@ -91,6 +91,34 @@ JSONC
   assert_output "#1a1a1a"
 }
 
+@test "merge excludes .vscode from git when the workspace is a repo" {
+  ws="$TEST_TMP/ws"; mkdir -p "$ws"
+  git init -q "$ws"
+  run run_merge "$ws" "#0f766e" demo
+  assert_success
+  run cat "$ws/.git/info/exclude"
+  assert_output --partial "/.vscode/"
+  # the settings file the merge wrote must now be ignored by git
+  run git -C "$ws" status --porcelain --ignored -- .vscode/settings.json
+  assert_output --partial "!!"
+}
+
+@test "merge is a no-op on the git exclude when the workspace is not a repo" {
+  ws="$TEST_TMP/ws"; mkdir -p "$ws"   # no .git
+  run run_merge "$ws" "#0f766e" demo
+  assert_success
+  [ ! -e "$ws/.git" ]
+}
+
+@test "merge does not duplicate the .vscode exclude entry on re-run" {
+  ws="$TEST_TMP/ws"; mkdir -p "$ws"
+  git init -q "$ws"
+  run_merge "$ws" "#0f766e" demo
+  run_merge "$ws" "#b3261e" demo
+  run grep -c '^/.vscode/$' "$ws/.git/info/exclude"
+  assert_output "1"
+}
+
 # ---- find_ide_bin (native binaries via stubs) --------------------------------
 @test "find_ide_bin finds a native codium on PATH" {
   make_stub codium 0
@@ -157,4 +185,28 @@ EOF
   make_stub myeditor 0
   find_ide_bin myeditor
   assert_equal "${IDE_CMD[*]}" "myeditor"
+}
+
+# ---- JSONC string-awareness (§4.5) & comment preservation (§4.6) -------------
+@test "merge does not strip // inside string values (URLs survive)" {
+  ws="$TEST_TMP/ws"; mkdir -p "$ws/.vscode"
+  printf '{"my.url": "https://example.com/a//b"}' > "$ws/.vscode/settings.json"
+  run run_merge "$ws" "#0f766e" demo
+  assert_success
+  run "$PYTHON3" -c "import json;print(json.load(open('$ws/.vscode/settings.json'))['my.url'])"
+  assert_output "https://example.com/a//b"
+}
+
+@test "merge backs up a commented settings file instead of dropping comments silently" {
+  ws="$TEST_TMP/ws"; mkdir -p "$ws/.vscode"
+  printf '{\n  // team setting\n  "editor.tabSize": 2\n}\n' > "$ws/.vscode/settings.json"
+  run run_merge "$ws" "#0f766e" demo
+  assert_success
+  assert_output --partial "isopod-backup"        # the loss is announced, not silent
+  [ -f "$ws/.vscode/settings.json.isopod-backup" ]
+  run grep -q "// team setting" "$ws/.vscode/settings.json.isopod-backup"  # comment kept in backup
+  assert_success
+  # the merge still applied and preserved the user's value
+  run "$PYTHON3" -c "import json;print(json.load(open('$ws/.vscode/settings.json'))['editor.tabSize'])"
+  assert_output "2"
 }

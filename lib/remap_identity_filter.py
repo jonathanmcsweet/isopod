@@ -74,39 +74,56 @@ def resolve(entries, name, email):
     return generic
 
 
+def copy_exact(src, dst, count):
+    """Copy exactly ``count`` bytes from src to dst in bounded chunks."""
+    remaining = count
+    while remaining > 0:
+        chunk = src.read(min(remaining, 1 << 16))
+        if not chunk:  # truncated stream — nothing more to copy
+            break
+        dst.write(chunk)
+        remaining -= len(chunk)
+
+
 def main():
     path = os.environ["MAILMAP_FILE"]
     with open(path, "rb") as fh:
         entries = parse_mailmap(fh.read())
 
-    buf = sys.stdin.buffer.read()
-    out = bytearray()
-    i, n = 0, len(buf)
-    while i < n:
-        nl = buf.find(b"\n", i)
-        if nl == -1:
-            out += buf[i:]
+    inp = sys.stdin.buffer
+    out = sys.stdout.buffer
+    # Stream line-by-line rather than reading the whole fast-export into memory,
+    # so a repo with a very large history doesn't inflate the process. A
+    # `data <n>` line introduces a counted binary payload copied through verbatim
+    # (this is why identity-looking text inside a commit message is never
+    # rewritten). readline() and read() share one buffer, so mixing them is safe.
+    while True:
+        raw = inp.readline()
+        if not raw:
             break
-        line = buf[i:nl]
-        i = nl + 1
+        if raw.endswith(b"\n"):
+            line, nl = raw[:-1], b"\n"
+        else:
+            line, nl = raw, b""
         if line.startswith(b"data "):
-            cnt = int(line[5:])  # counted payload: copy raw
-            out += line + b"\n" + buf[i : i + cnt]
-            i += cnt
-            continue
-        m = IDENT.match(line)
-        if m:
-            hit = resolve(entries, m.group(2), m.group(3))
-            if hit is not None:
-                new_name, new_email = hit
-                line = b"%s %s <%s> %s" % (
-                    m.group(1),
-                    new_name if new_name is not None else m.group(2),
-                    new_email if new_email is not None else m.group(3),
-                    m.group(4),
-                )
-        out += line + b"\n"
-    sys.stdout.buffer.write(out)
+            body = line[5:]
+            if body.isdigit():  # counted payload: emit header, copy bytes raw
+                out.write(raw)
+                copy_exact(inp, out, int(body))
+                continue
+        else:
+            m = IDENT.match(line)
+            if m:
+                hit = resolve(entries, m.group(2), m.group(3))
+                if hit is not None:
+                    new_name, new_email = hit
+                    line = b"%s %s <%s> %s" % (
+                        m.group(1),
+                        new_name if new_name is not None else m.group(2),
+                        new_email if new_email is not None else m.group(3),
+                        m.group(4),
+                    )
+        out.write(line + nl)
 
 
 if __name__ == "__main__":
