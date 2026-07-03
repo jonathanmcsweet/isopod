@@ -89,4 +89,7 @@ Run `test/run.sh` and keep it green before committing. See the
 
 Project-specific rules — extracting long strings to `share/`, keeping helper
 scripts in `lib/`, Conventional Commits — live in
-[`CLAUDE.md`](../CLAUDE.md). Read it before making structural changes.
+[`AGENTS.md`](../AGENTS.md). Read it before making structural changes.
+(`CLAUDE.md`, `.cursorrules`, `.windsurfrules`, and
+`.github/copilot-instructions.md` are symlinks to it, so every AI agent reads
+the same rules.)
