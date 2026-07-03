@@ -602,7 +602,7 @@ EOF
   fi
 }
 
-# ---- --dockerfile context hashing (§4.1 stale-image fix) ---------------------
+# ---- --dockerfile context hashing ---------------------
 @test "create --dockerfile tag reflects the build context, not just the Dockerfile" {
   mkdir -p "$TEST_TMP/proj"
   printf 'FROM debian:bookworm-slim\nCOPY data.txt /data.txt\n' > "$TEST_TMP/proj/Dockerfile"
@@ -620,7 +620,7 @@ EOF
   [ "$tag1" != "$tag2" ] # context change busts the cache tag (no stale reuse)
 }
 
-# ---- no-new-privileges for --no-sudo boxes (§4.7) ----------------------------
+# ---- no-new-privileges for --no-sudo boxes ----------------------------
 @test "create --no-sudo hardens the box with no-new-privileges" {
   run "$ISOPOD_ROOT/isopod" create demo --no-sudo --color teal
   assert_success
@@ -637,7 +637,7 @@ EOF
   assert_output --partial "sudo=1"
 }
 
-# ---- --memory / --cpus validation (§5) ---------------------------------------
+# ---- --memory / --cpus validation ---------------------------------------
 @test "create rejects a malformed --memory" {
   run "$ISOPOD_ROOT/isopod" create demo --memory 2gigs --color teal
   assert_failure
@@ -650,7 +650,7 @@ EOF
   assert_output --partial "invalid --cpus"
 }
 
-# ---- gc (§4.10) --------------------------------------------------------------
+# ---- gc --------------------------------------------------------------
 @test "gc removes unreferenced isopod images and keeps referenced ones" {
   # A box that still references one snapshot image and one user base image.
   mkdir -p "$ISOPOD_CONFIG_DIR/boxes/keep"
