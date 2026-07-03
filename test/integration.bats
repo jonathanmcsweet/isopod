@@ -235,8 +235,9 @@ EOF
 }
 
 @test "create on Docker warns that /proc file masks can't be applied" {
-  # A docker stub (logs as 'docker') so detect_engine picks docker; remove the
-  # podman stub so docker is the only engine.
+  # A docker stub (logs as 'docker'). Select it with --engine docker rather than
+  # by removing the podman stub: a runner may have a real podman on PATH that the
+  # stub only shadows, so unshadowing it would pick the real engine.
   cat > "$STUB_DIR/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $*" >> "$STUB_LOG"
@@ -253,8 +254,7 @@ case "$cmd" in
 esac
 EOF
   chmod +x "$STUB_DIR/docker"
-  rm -f "$STUB_DIR/podman"   # force docker selection
-  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" create demo --color teal --engine docker
   assert_success
   assert_output --partial "Docker can't mask"
   assert_output --partial "/proc/cmdline"
@@ -602,7 +602,7 @@ EOF
   fi
 }
 
-# ---- --dockerfile context hashing ---------------------
+# ---- --dockerfile context hashing (§4.1 stale-image fix) ---------------------
 @test "create --dockerfile tag reflects the build context, not just the Dockerfile" {
   mkdir -p "$TEST_TMP/proj"
   printf 'FROM debian:bookworm-slim\nCOPY data.txt /data.txt\n' > "$TEST_TMP/proj/Dockerfile"
@@ -620,7 +620,7 @@ EOF
   [ "$tag1" != "$tag2" ] # context change busts the cache tag (no stale reuse)
 }
 
-# ---- no-new-privileges for --no-sudo boxes ----------------------------
+# ---- no-new-privileges for --no-sudo boxes (§4.7) ----------------------------
 @test "create --no-sudo hardens the box with no-new-privileges" {
   run "$ISOPOD_ROOT/isopod" create demo --no-sudo --color teal
   assert_success
@@ -637,7 +637,7 @@ EOF
   assert_output --partial "sudo=1"
 }
 
-# ---- --memory / --cpus validation ---------------------------------------
+# ---- --memory / --cpus validation (§5) ---------------------------------------
 @test "create rejects a malformed --memory" {
   run "$ISOPOD_ROOT/isopod" create demo --memory 2gigs --color teal
   assert_failure
@@ -650,7 +650,7 @@ EOF
   assert_output --partial "invalid --cpus"
 }
 
-# ---- gc --------------------------------------------------------------
+# ---- gc (§4.10) --------------------------------------------------------------
 @test "gc removes unreferenced isopod images and keeps referenced ones" {
   # A box that still references one snapshot image and one user base image.
   mkdir -p "$ISOPOD_CONFIG_DIR/boxes/keep"
