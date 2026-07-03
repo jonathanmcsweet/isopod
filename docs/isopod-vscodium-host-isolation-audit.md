@@ -4,6 +4,8 @@
 **Question:** Can an AI agent extension running in the container see information about the host machine?
 **Verdict:** No — under the isopod configuration, no host-derived information crosses into the container at runtime. The isolation is structural, not behavioral.
 
+> **Valid as of the versions in Scope below — re-audit on upgrade.** VSCodium and the Remote-SSH extension update themselves, and this verdict is pinned to the code audited here. When either updates, re-check the behavioral guarantees; the empirical `verify-host-isolation.sh` probe is the fast way to catch a regression. This audit covers the VSCodium→container channel, not host *hardware* fingerprinting via `/proc`/`/sys` — see the README "Fingerprint hardening" section for that surface and its limits.
+
 ## Scope
 
 Sources audited (all at the versions isopod tracks):

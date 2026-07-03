@@ -14,7 +14,9 @@ Usage:
   isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
   isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
   isopod copy-in <name> <path>...     Copy more host folders INTO the sandbox
-  isopod rm <name> [--force]          Delete a sandbox (container + keys)
+  isopod rm <name> [--force]          Delete a sandbox (container + keys + snapshots)
+  isopod gc [--dry-run] [--force]     Remove isopod images no box still references
+  isopod egress [status|apply|rules]  Manage the network egress firewall
   isopod doctor                       Check host prerequisites
   isopod help                         Show this help
 
@@ -75,6 +77,15 @@ Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--o
                         Overrides the single-pair flags and the default
                         ~/.config/isopod/remap.
   --force, -f           Skip the confirmation prompt.
+
+Network egress isolation (stop a rogue in-box agent from mapping your LAN):
+  Enable it with 'egress lan-deny' in ~/.config/isopod/hardening.conf (or
+  ISOPOD_EGRESS=lan-deny). Boxes then go on a dedicated bridge and a HOST firewall
+  blocks box-initiated traffic to your LAN, the host, cloud metadata, and internal
+  DNS — while public internet and host->box published ports keep working. Needs a
+  rootful engine; load the firewall once with 'sudo isopod egress apply'.
+  Subcommands:  status (mode + whether it is loaded), apply (load it; needs root),
+  rules (print the nftables ruleset).
 
 Examples:
   isopod create myproj --repo https://github.com/me/proj --color teal

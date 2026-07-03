@@ -92,3 +92,74 @@ guest with a default (2g; override with `--memory` or `ISOPOD_MICROVM_MEMORY`),
 since a microVM boots a fixed-size guest. The Tier 1 fingerprint masks become
 largely redundant under a microVM — the guest has its own `/proc` and `/sys`, so
 they are left on but cost nothing.
+
+> A microVM adds a **kernel** boundary, not a **network** one. A box under Kata or
+> krun still reaches your LAN the same way — pair it with egress isolation below to
+> stop network reconnaissance.
+
+## Network egress isolation (`egress lan-deny`)
+
+Stops a rogue in-box agent from **mapping or fingerprinting your local network**:
+scanning your LAN, reaching the host, reading cloud metadata
+(`169.254.169.254`), or enumerating internal hostnames over DNS. Host-initiated
+**published ports keep working** (`--expose` and SSH), and the box keeps
+**public internet + DNS** for `apt`/`pip`/`git`.
+
+Everything is enforced by the engine and the host — an agent with in-box root and
+passwordless `sudo` cannot turn it off (there is no in-box firewall to flush).
+
+**How it works.** Published ports are host-*initiated*, so a box only ever sends
+*reply* traffic on them; a scan is a box-*initiated* new connection. A host
+firewall accepts the replies (conntrack `established,related`) and drops
+box-initiated traffic to RFC1918, the host, metadata, and multicast — while
+letting public destinations through. Three host-set pieces do it:
+
+- a dedicated bridge network (`isopod0`, fixed subnet) the firewall can target;
+- `--dns` pinned to a public resolver, so the box can't query the host's
+  internal/forwarding resolver (which knows your PTRs and split-horizon names);
+- `--cap-drop NET_RAW,NET_ADMIN`, so the box can't craft raw scan packets or
+  re-route around the rules.
+
+**Enable it** in your override file (`~/.config/isopod/hardening.conf`):
+
+```
+egress lan-deny
+```
+
+or per-run with `ISOPOD_EGRESS=lan-deny isopod create …`.
+
+### What you must do on the host
+
+Egress isolation needs a **rootful** podman or docker: a rootless engine routes
+boxes through a userspace network stack with no host bridge for the firewall to
+hook, so `isopod create` **refuses** rather than start an unprotected box. On a
+rootful engine, load the firewall once (needs root):
+
+```sh
+sudo isopod egress apply      # renders security/egress-host.nft and loads it
+isopod egress status          # mode, network, and whether it's loaded
+isopod doctor                 # also reports enforcement + loaded state
+```
+
+The rules are **not persistent** across reboot, a `firewalld` reload, or an engine
+restart — re-run `sudo isopod egress apply` afterward, or include the ruleset from
+`/etc/nftables.conf`. `isopod doctor` flags when it isn't loaded.
+
+**Fails closed.** If a box is configured for `egress lan-deny` but the host firewall
+is not loaded, `isopod create` (and `reconfigure`) **refuse**, rather than starting a
+box that only *looks* isolated. Load the firewall first, or — to start on the bridge
+anyway without the LAN block actually in effect — set `ISOPOD_EGRESS_ALLOW_UNLOADED=1`
+(you'll get a warning instead of a hard stop). When the firewall's state can't be read
+without root, isopod can't confirm either way and warns rather than blocking.
+
+### Limits
+
+- Blocks your **LAN/host/metadata/internal-DNS**, not exfiltration to arbitrary
+  **public** IPs — the box still has public internet (that's what keeps `apt`/`pip`
+  working). For a fully offline box, use `ISOPOD_RUN_ARGS="--network=none"`.
+- The isopod network is **IPv4-only** so a box has no IPv6 route to slip around the
+  v4 rules; if you make it dual-stack, also load the commented `ip6` rules in
+  `security/egress-host.nft`.
+- Same-bridge boxes can still discover each other at L2, but not reach each other
+  at L3 (dropped) — and both are equally locked down, so this leaks nothing about
+  the host.

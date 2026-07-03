@@ -9,7 +9,10 @@
 #
 # Engine note: the `security_opt: mask=` form below is Podman-only. Docker has no
 # mask flag — for Docker, delete the `security_opt:` block and use the `tmpfs:`
-# list plus the `/dev/null` binds shown in the commented-out sections.
+# list shown in the commented-out section. Docker/runc REFUSES bind mounts onto
+# `/proc` files, so `/proc/cmdline` and `/proc/modules` cannot be masked on
+# Docker at all (a `/dev/null` bind aborts the run) — they stay readable there.
+# Use Podman or a Tier 2/3 runtime to close them.
 
 services:
   isopod:
@@ -31,9 +34,11 @@ services:
 
     # --- Tier 1: mask host-revealing paths (PODMAN form) ---
     security_opt:
-      - mask=/proc/cmdline:/proc/modules:/sys/class/dmi:/sys/devices/virtual/dmi:/sys/bus/pci:/sys/bus/usb:/sys/class/net:/sys/class/hwmon:/sys/class/thermal:/sys/class/drm:/sys/block:/sys/class/nvme:/sys/firmware
+      - mask=/proc/cmdline:/proc/modules:/sys/class/dmi:/sys/devices/virtual/dmi:/sys/bus/pci:/sys/bus/usb:/sys/class/net:/sys/class/hwmon:/sys/class/thermal:/sys/class/drm:/sys/block:/sys/class/block:/sys/class/nvme:/sys/firmware
 
     # --- Tier 1: DOCKER equivalent (use these INSTEAD of security_opt above) ---
+    # Directory masks only — Docker cannot mask /proc/cmdline or /proc/modules
+    # (runc rejects /proc bind mounts), so those stay readable on Docker.
     # tmpfs:
     #   - /sys/class/dmi
     #   - /sys/devices/virtual/dmi
@@ -44,13 +49,13 @@ services:
     #   - /sys/class/thermal
     #   - /sys/class/drm
     #   - /sys/block
+    #   - /sys/class/block
     #   - /sys/class/nvme
     #   - /sys/firmware
-    # volumes:
-    #   - /dev/null:/proc/cmdline:ro
-    #   - /dev/null:/proc/modules:ro
 
-    # NOTE (matches hardening.conf): /proc/stat (host btime) and /proc/cpuinfo
-    # are intentionally NOT masked — doing so breaks top/htop and build tools,
-    # and the CPU is readable via the CPUID instruction regardless. See the
-    # README "What still can't be mitigated" section.
+    # NOTE (matches hardening.conf): /proc/stat (host btime), /proc/cpuinfo,
+    # /proc/meminfo, and /proc/version are intentionally NOT masked — doing so
+    # breaks top/htop and build tools, and the CPU/kernel are readable via CPUID
+    # and uname(2) regardless. The /sys/devices device tree is only partly masked
+    # (DMI only); a Tier 2/3 runtime closes it. See the README
+    # "What still can't be mitigated" section.

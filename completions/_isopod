@@ -31,6 +31,7 @@ _isopod() {
     'remap:Rewrite a box commit identity after fetch'
     'copy-in:Copy more host folders into the sandbox'
     'rm:Delete a sandbox (container + keys)'
+    'egress:Manage the network egress firewall'
     'doctor:Check host prerequisites'
     'help:Show help'
     'version:Show version'
@@ -77,6 +78,9 @@ _isopod() {
           ;;
         fetch)
           _arguments '--path[in-box repo path]:path:' '1:sandbox:_isopod_boxes'
+          ;;
+        egress)
+          _arguments '1:action:(status apply rules)'
           ;;
         info|shell|start|stop|export|copy-in)
           _arguments '1:sandbox:_isopod_boxes'

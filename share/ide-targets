@@ -9,4 +9,4 @@
 codium,vscodium    codium,vscodium,codium-insiders  /Applications/VSCodium.app/Contents/Resources/app/bin/codium  com.vscodium.codium,com.vscodium.codium-insiders
 cursor             cursor                           /Applications/Cursor.app/Contents/Resources/app/bin/cursor   -
 code,vscode        code                             -                                                            com.visualstudio.code
-windsurf           windsurf                         -                                                            -
+windsurf           windsurf                         /Applications/Windsurf.app/Contents/Resources/app/bin/windsurf  -
