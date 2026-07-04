@@ -93,6 +93,7 @@ Network egress isolation (host-enforced; an in-box agent cannot turn it off):
   engine, proxy/firewall not loaded) a default-on box degrades with a warning:
   allow-list -> lan-deny -> open. Change the mode in ~/.config/isopod/hardening.conf
   (or ISOPOD_EGRESS=...); ISOPOD_EGRESS=off / 'no-egress' turns it off.
+
   Modes:
    'egress lan-deny'    block box->LAN/host/metadata/internal-DNS; public internet
                         and host->box published ports keep working.
