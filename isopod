@@ -1092,7 +1092,7 @@ egress_apply_proxy() { # egress_apply_proxy <Yes|No>
     die "egress allow-list needs systemd (systemctl) to run the proxy as a persistent unit"
   # Prefer the packaged 'tinyproxy' account to drop privileges; fall back to
   # nobody/nogroup. PROXY_GROUP is read only by the rendered tinyproxy template
-  # (render_tmpl dynamic scope), which shellcheck can't see, so its assignment
+  # (dynamic scope at render time), which shellcheck can't see, so its assignment
   # block carries an SC2034 disable; PROXY_USER is also used in chown() below.
   local ISOPOD_EGRESS_PROXY_USER ISOPOD_EGRESS_PROXY_GROUP
   if id tinyproxy >/dev/null 2>&1; then ISOPOD_EGRESS_PROXY_USER=tinyproxy; else ISOPOD_EGRESS_PROXY_USER=nobody; fi
