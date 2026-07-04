@@ -4,4 +4,9 @@
 # apt, node for actions/checkout) without pulling the multi-GB "full" image.
 # isopod's jobs install their remaining deps (shellcheck, pexpect, …) at runtime
 # via apt, so this just needs to be a real Ubuntu base with a package manager.
+#
+# Under act the lint + test jobs run (including test/egress-render.sh, which
+# render-checks the egress firewall/proxy templates). act containers are
+# unprivileged with no /dev/kvm, so the nft parse check skips itself and the
+# live-isolation + microVM tiers do not run — same as GitHub's shared runners.
 -P ubuntu-latest=catthehacker/ubuntu:act-latest
