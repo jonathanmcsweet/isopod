@@ -1008,13 +1008,17 @@ egress_rules_loaded() {
 # systemd unit) and manages a service, so these helpers run privileged steps
 # via sudo when not already root, mirroring `egress apply`'s nft loading.
 egr_run_root() { # egr_run_root <cmd...>
-  if [ "$(id -u)" -eq 0 ]; then "$@"
-  elif have sudo; then sudo "$@"
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif have sudo; then
+    sudo "$@"
   else die "'$*' needs root — re-run as root, or install sudo"; fi
 }
 egr_write_root() { # egr_write_root <path>   (content on stdin)
-  if [ "$(id -u)" -eq 0 ]; then cat >"$1"
-  elif have sudo; then sudo tee "$1" >/dev/null
+  if [ "$(id -u)" -eq 0 ]; then
+    cat >"$1"
+  elif have sudo; then
+    sudo tee "$1" >/dev/null
   else die "writing $1 needs root — re-run as root, or install sudo"; fi
 }
 
@@ -1037,12 +1041,19 @@ egress_filter_regexes() {
   for f in "$ISOPOD_EGRESS_ALLOWLIST" "$USER_EGRESS_ALLOWLIST"; do
     [ -f "$f" ] || continue
     while IFS= read -r line || [ -n "$line" ]; do
-      line="${line%%#*}"                # strip comments
-      read -r dom _ <<<"$line" || true  # first token, whitespace-trimmed
+      line="${line%%#*}"               # strip comments
+      read -r dom _ <<<"$line" || true # first token, whitespace-trimmed
       [ -n "${dom:-}" ] || continue
       case "$dom" in
-        \*.*) esc="${dom#\*.}"; esc="${esc//./\\.}"; printf '^.+\\.%s$\n' "$esc" ;;
-        *) esc="${dom//./\\.}"; printf '^(.*\\.)?%s$\n' "$esc" ;;
+        \*.*)
+          esc="${dom#\*.}"
+          esc="${esc//./\\.}"
+          printf '^.+\\.%s$\n' "$esc"
+          ;;
+        *)
+          esc="${dom//./\\.}"
+          printf '^(.*\\.)?%s$\n' "$esc"
+          ;;
       esac
     done <"$f"
   done
@@ -1080,12 +1091,16 @@ egress_apply_proxy() { # egress_apply_proxy <Yes|No>
   have systemctl ||
     die "egress allow-list needs systemd (systemctl) to run the proxy as a persistent unit"
   # Prefer the packaged 'tinyproxy' account to drop privileges; fall back to
-  # nobody/nogroup. Set as locals the templates pick up via dynamic scope.
-  # shellcheck disable=SC2034
+  # nobody/nogroup. PROXY_GROUP is read only by the rendered tinyproxy template
+  # (render_tmpl dynamic scope), which shellcheck can't see, so its assignment
+  # block carries an SC2034 disable; PROXY_USER is also used in chown() below.
   local ISOPOD_EGRESS_PROXY_USER ISOPOD_EGRESS_PROXY_GROUP
   if id tinyproxy >/dev/null 2>&1; then ISOPOD_EGRESS_PROXY_USER=tinyproxy; else ISOPOD_EGRESS_PROXY_USER=nobody; fi
-  if getent group tinyproxy >/dev/null 2>&1; then ISOPOD_EGRESS_PROXY_GROUP=tinyproxy
-  elif getent group nogroup >/dev/null 2>&1; then ISOPOD_EGRESS_PROXY_GROUP=nogroup
+  # shellcheck disable=SC2034
+  if getent group tinyproxy >/dev/null 2>&1; then
+    ISOPOD_EGRESS_PROXY_GROUP=tinyproxy
+  elif getent group nogroup >/dev/null 2>&1; then
+    ISOPOD_EGRESS_PROXY_GROUP=nogroup
   else ISOPOD_EGRESS_PROXY_GROUP=nobody; fi
   egr_run_root mkdir -p "$ISOPOD_EGRESS_STATE_DIR" "$ISOPOD_EGRESS_PROXY_LOG_DIR"
   render_tmpl tinyproxy.conf.tmpl | egr_write_root "$ISOPOD_EGRESS_STATE_DIR/tinyproxy.conf"
@@ -2503,7 +2518,8 @@ egress_allow() { # egress_allow <domain>
 egress_log() { # egress_log [-f]
   [ -f "$ISOPOD_EGRESS_PROXY_LOG" ] ||
     die "no proxy log at $ISOPOD_EGRESS_PROXY_LOG (has 'sudo isopod egress apply' run?)"
-  if [ "${1:-}" = "-f" ]; then egr_run_root tail -f "$ISOPOD_EGRESS_PROXY_LOG"
+  if [ "${1:-}" = "-f" ]; then
+    egr_run_root tail -f "$ISOPOD_EGRESS_PROXY_LOG"
   else egr_run_root tail -n 200 "$ISOPOD_EGRESS_PROXY_LOG"; fi
 }
 
