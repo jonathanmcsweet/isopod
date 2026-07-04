@@ -19,7 +19,19 @@ install_engine_stubs() {
 echo "podman $*" >> "$STUB_LOG"
 cmd="$1"; shift || true
 case "$cmd" in
-  info)    exit 0 ;;
+  info)    # A realistic ociRuntimes listing so runtime_preflight and doctor see
+           # the sandboxed runtimes these tests exercise as "registered".
+           cat <<'INFO'
+host:
+  ociRuntimes:
+    crun: [/usr/bin/crun]
+    krun: [/usr/bin/krun]
+    runc: [/usr/bin/runc]
+    runsc: [/usr/bin/runsc]
+    kata-runtime: [/usr/bin/kata-runtime]
+    crun-vm: [/usr/bin/crun-vm]
+INFO
+           exit 0 ;;
   image)   # 'image exists' / 'image inspect' -> pretend image is missing once
            [ "$1" = exists ] && exit 1
            exit 1 ;;
