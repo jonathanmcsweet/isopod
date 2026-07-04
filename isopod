@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="1.6.0"
+ISOPOD_VERSION="1.7.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -43,6 +43,9 @@ USER_SSH_CONFIG="$HOME/.ssh/config"
 # Optional user override, layered on top of the baseline (mask/unmask/runtime/
 # no-runtime). Lives in the user's config dir so it survives package upgrades.
 USER_HARDENING_CONF="$CONFIG_DIR/hardening.conf"
+# User egress allow-list override (for `egress allow-list`), layered on top of
+# the shipped baseline. `isopod egress allow <domain>` appends to this file.
+USER_EGRESS_ALLOWLIST="$CONFIG_DIR/egress-allowlist.conf"
 DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
 IMAGE_LAYER_VERSION="2" # bump to force image rebuild when Dockerfile changes
 CONTAINER_USER="dev"
@@ -68,6 +71,22 @@ ISOPOD_EGRESS_SUBNET="${ISOPOD_EGRESS_SUBNET:-10.88.7.0/24}"
 ISOPOD_EGRESS_GATEWAY="${ISOPOD_EGRESS_GATEWAY:-10.88.7.1}"
 ISOPOD_EGRESS_DNS="${ISOPOD_EGRESS_DNS:-1.1.1.1}"
 ISOPOD_EGRESS_RULESET="${ISOPOD_EGRESS_RULESET:-$ISOPOD_DIR/security/egress-host.nft}"
+
+# Egress allow-list mode (`egress allow-list`): a host-side filtering proxy
+# (tinyproxy) on the bridge gateway is the box's ONLY route out, and only
+# allow-listed hostnames pass. Enforced host-side (firewall + proxy), so an
+# in-box agent cannot undo it. See docs "Network egress allow-list".
+ISOPOD_EGRESS_PROXY_PORT="${ISOPOD_EGRESS_PROXY_PORT:-8118}"
+ISOPOD_EGRESS_PROXY_BIN="${ISOPOD_EGRESS_PROXY_BIN:-tinyproxy}"
+ISOPOD_EGRESS_PROXY_UNIT="isopod-egress-proxy"
+ISOPOD_EGRESS_ALLOWLIST_RULESET="${ISOPOD_EGRESS_ALLOWLIST_RULESET:-$ISOPOD_DIR/security/egress-allowlist.nft}"
+# Shipped allow-list baseline (do not edit); layered with USER_EGRESS_ALLOWLIST.
+ISOPOD_EGRESS_ALLOWLIST="${ISOPOD_EGRESS_ALLOWLIST:-$ISOPOD_DIR/security/egress-allowlist.conf}"
+# Host state written by `egress apply` (root; apply already needs it): the
+# rendered proxy config + filter, and the access log tailed by `egress log`.
+ISOPOD_EGRESS_STATE_DIR="${ISOPOD_EGRESS_STATE_DIR:-/etc/isopod/egress}"
+ISOPOD_EGRESS_PROXY_LOG_DIR="${ISOPOD_EGRESS_PROXY_LOG_DIR:-/var/log/isopod}"
+ISOPOD_EGRESS_PROXY_LOG="${ISOPOD_EGRESS_PROXY_LOG:-$ISOPOD_EGRESS_PROXY_LOG_DIR/egress-proxy.log}"
 
 # ---------------------------------------------------------------------------
 # small helpers
@@ -886,8 +905,19 @@ active_egress() {
       done <"$f"
     done
   fi
-  [ "$r" = off ] && r=""
+  # Only the two known modes are "on"; anything else (off, blank, a typo) is
+  # treated as disabled so a bad directive fails safe rather than half-enabling.
+  case "$r" in lan-deny | allow-list) ;; *) r="" ;; esac
   printf '%s' "$r"
+}
+
+# The active nftables ruleset for the current mode: the default LAN-deny rules,
+# or the default-deny allow-list rules that force traffic through the proxy.
+egress_ruleset() {
+  case "$(active_egress)" in
+    allow-list) printf '%s' "$ISOPOD_EGRESS_ALLOWLIST_RULESET" ;;
+    *) printf '%s' "$ISOPOD_EGRESS_RULESET" ;;
+  esac
 }
 
 # True when the engine places boxes on a HOST-namespace bridge, which is where
@@ -972,6 +1002,142 @@ egress_rules_loaded() {
   esac
 }
 
+# --- egress allow-list: host-side filtering proxy ---------------------------
+# The allow-list mode adds a filtering proxy the host firewall forces boxes
+# through. Applying it writes root-owned host state (proxy config/filter, a
+# systemd unit) and manages a service, so these helpers run privileged steps
+# via sudo when not already root, mirroring `egress apply`'s nft loading.
+egr_run_root() { # egr_run_root <cmd...>
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif have sudo; then
+    sudo "$@"
+  else die "'$*' needs root — re-run as root, or install sudo"; fi
+}
+egr_write_root() { # egr_write_root <path>   (content on stdin)
+  if [ "$(id -u)" -eq 0 ]; then
+    cat >"$1"
+  elif have sudo; then
+    sudo tee "$1" >/dev/null
+  else die "writing $1 needs root — re-run as root, or install sudo"; fi
+}
+
+# Is the filtering proxy running? 0 = active, 1 = not active, 2 = unknown
+# (systemctl absent). Reading service state needs no root.
+egress_proxy_active() {
+  have systemctl || return 2
+  systemctl is-active --quiet "$ISOPOD_EGRESS_PROXY_UNIT" 2>/dev/null && return 0
+  return 1
+}
+
+# Translate the layered allow-list (baseline + user override) into anchored
+# POSIX-extended regexes for tinyproxy's host filter, one per line, on stdout:
+#   foo.com    -> ^(.*\.)?foo\.com$   (apex + any subdomain)
+#   *.foo.com  -> ^.+\.foo\.com$      (subdomains only, not the apex)
+# Both ends are anchored so a pattern can never match a look-alike host as a
+# substring (e.g. "foo.com" must not allow "foo.com.evil.net").
+egress_filter_regexes() {
+  local f line dom _ esc
+  for f in "$ISOPOD_EGRESS_ALLOWLIST" "$USER_EGRESS_ALLOWLIST"; do
+    [ -f "$f" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%#*}"               # strip comments
+      read -r dom _ <<<"$line" || true # first token, whitespace-trimmed
+      [ -n "${dom:-}" ] || continue
+      case "$dom" in
+        \*.*)
+          esc="${dom#\*.}"
+          esc="${esc//./\\.}"
+          printf '^.+\\.%s$\n' "$esc"
+          ;;
+        *)
+          esc="${dom//./\\.}"
+          printf '^(.*\\.)?%s$\n' "$esc"
+          ;;
+      esac
+    done <"$f"
+  done
+}
+
+# Write the rendered filter file (deduped) to the host state dir.
+egress_write_filter() {
+  egress_filter_regexes | sort -u | egr_write_root "$ISOPOD_EGRESS_STATE_DIR/filter"
+}
+
+# Load the active nftables ruleset (LAN-deny or allow-list) into the host netns.
+egress_load_nft() {
+  local rs rendered
+  rs="$(egress_ruleset)"
+  [ -f "$rs" ] || die "missing ruleset: $rs"
+  have nft || die "nft (nftables) not found — install nftables to apply the egress firewall"
+  rendered="$(render_tmpl "$rs")"
+  info "Loading isopod egress firewall into the host network namespace..."
+  printf '%s\n' "$rendered" | egr_run_root nft -f - || die "nft failed to load the ruleset"
+  info "egress firewall loaded (table inet isopod)."
+  warn "not persistent across reboot / firewalld reload — re-run 'sudo isopod egress apply' after
+       those, or include $rs from /etc/nftables.conf."
+}
+
+# Render the proxy config + filter + systemd unit and (re)start the service.
+# <deny> is tinyproxy's FilterDefaultDeny: Yes to enforce the allow-list, No for
+# observe mode (permit all, still log everything).
+egress_apply_proxy() { # egress_apply_proxy <Yes|No>
+  # FILTER_DEFAULT_DENY and the proxy user/group below are consumed by the
+  # rendered templates via dynamic scope, which shellcheck can't see.
+  # shellcheck disable=SC2034
+  local FILTER_DEFAULT_DENY="$1"
+  have "$ISOPOD_EGRESS_PROXY_BIN" ||
+    die "'$ISOPOD_EGRESS_PROXY_BIN' not found — install tinyproxy (apt/dnf/brew install tinyproxy)"
+  have systemctl ||
+    die "egress allow-list needs systemd (systemctl) to run the proxy as a persistent unit"
+  # Prefer the packaged 'tinyproxy' account to drop privileges; fall back to
+  # nobody/nogroup. PROXY_GROUP is read only by the rendered tinyproxy template
+  # (dynamic scope at render time), which shellcheck can't see, so its assignment
+  # block carries an SC2034 disable; PROXY_USER is also used in chown() below.
+  local ISOPOD_EGRESS_PROXY_USER ISOPOD_EGRESS_PROXY_GROUP
+  if id tinyproxy >/dev/null 2>&1; then ISOPOD_EGRESS_PROXY_USER=tinyproxy; else ISOPOD_EGRESS_PROXY_USER=nobody; fi
+  # shellcheck disable=SC2034
+  if getent group tinyproxy >/dev/null 2>&1; then
+    ISOPOD_EGRESS_PROXY_GROUP=tinyproxy
+  elif getent group nogroup >/dev/null 2>&1; then
+    ISOPOD_EGRESS_PROXY_GROUP=nogroup
+  else ISOPOD_EGRESS_PROXY_GROUP=nobody; fi
+  egr_run_root mkdir -p "$ISOPOD_EGRESS_STATE_DIR" "$ISOPOD_EGRESS_PROXY_LOG_DIR"
+  render_tmpl tinyproxy.conf.tmpl | egr_write_root "$ISOPOD_EGRESS_STATE_DIR/tinyproxy.conf"
+  egress_write_filter
+  render_tmpl isopod-egress-proxy.service.tmpl |
+    egr_write_root "/etc/systemd/system/$ISOPOD_EGRESS_PROXY_UNIT.service"
+  egr_run_root touch "$ISOPOD_EGRESS_PROXY_LOG"
+  egr_run_root chown "$ISOPOD_EGRESS_PROXY_USER" "$ISOPOD_EGRESS_PROXY_LOG" 2>/dev/null || true
+  info "Starting the egress filtering proxy ($ISOPOD_EGRESS_PROXY_UNIT)..."
+  egr_run_root systemctl daemon-reload
+  egr_run_root systemctl enable --now "$ISOPOD_EGRESS_PROXY_UNIT" ||
+    die "failed to start $ISOPOD_EGRESS_PROXY_UNIT — check: systemctl status $ISOPOD_EGRESS_PROXY_UNIT"
+}
+
+# Shared `isopod doctor` reporting for both egress modes: which engines can
+# enforce it (rootful host bridge) and whether the host firewall is loaded.
+egress_doctor_engines_and_fw() {
+  local eng seen=0
+  for eng in podman docker; do
+    have "$eng" && "$eng" info >/dev/null 2>&1 || continue
+    seen=1
+    if egress_can_enforce "$eng"; then
+      printf '  [ok]      %s can enforce egress (rootful — host bridge)\n' "$eng"
+    else
+      printf '  [warn]    %s is ROOTLESS — cannot enforce egress; such boxes fail preflight\n' "$eng"
+    fi
+  done
+  [ "$seen" = 1 ] || printf '  [warn]    no working engine to check egress enforcement against\n'
+  local erc=0
+  egress_rules_loaded || erc=$?
+  case "$erc" in
+    0) printf '  [ok]      egress firewall loaded (table inet isopod)\n' ;;
+    1) printf '  [warn]    egress firewall NOT loaded — run: sudo isopod egress apply\n' ;;
+    2) printf '  [--]      egress firewall status unknown (need root; try: sudo isopod egress status)\n' ;;
+  esac
+}
+
 # Preflight for a box that will run under `egress lan-deny`: the engine must be
 # able to enforce it, the dedicated network must exist, and the host firewall
 # should already be loaded. Called before build_run_args in create/reconfigure.
@@ -985,14 +1151,25 @@ egress_rules_loaded() {
 # unprivileged `isopod create` can't read them. Set ISOPOD_EGRESS_ALLOW_UNLOADED=1
 # to downgrade the not-loaded case to a warning (start on the bridge anyway).
 egress_preflight() { # egress_preflight <engine>
-  [ "$(active_egress)" = "lan-deny" ] || return 0
+  local mode
+  mode="$(active_egress)"
+  case "$mode" in lan-deny | allow-list) ;; *) return 0 ;; esac
   local engine="$1"
   if ! egress_can_enforce "$engine"; then
-    die "egress lan-deny needs a rootful engine (host-bridge networking); '$engine' here is rootless.
+    die "egress $mode needs a rootful engine (host-bridge networking); '$engine' here is rootless.
      A rootless engine routes boxes through a userspace stack with no host bridge, so the
      firewall cannot be enforced. Use a rootful podman/docker, or remove the 'egress' directive."
   fi
   ensure_egress_network "$engine"
+  # allow-list: the proxy is the box's ONLY route out, so a definitively-stopped
+  # proxy means the box would be created unable to reach anything. Fail closed.
+  if [ "$mode" = allow-list ]; then
+    local prc=0
+    egress_proxy_active || prc=$?
+    [ "$prc" = 1 ] && die "egress allow-list is configured but the filtering proxy
+     ($ISOPOD_EGRESS_PROXY_UNIT) is NOT running, so the box would have no route out.
+     Start it (needs root):  sudo isopod egress apply"
+  fi
   local rc=0
   egress_rules_loaded || rc=$?
   case "$rc" in
@@ -1060,17 +1237,31 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
      — they stay readable inside the box. Use rootless podman, or a Tier 2/3 runtime
      (runsc/kata/krun), to close them. Directory masks (/sys/*) are applied normally."
   fi
-  # Network egress isolation (`egress lan-deny`): put the box on the dedicated
-  # bridge the host firewall targets, pin DNS to a public resolver so the box
-  # cannot query the host's internal/forwarding resolver for reconnaissance, and
-  # drop the raw-socket / net-admin caps so it cannot craft scan packets or
-  # re-route around the rules. All host-enforced at run time — the box can't undo
-  # them. Preflight (create/reconfigure) has already verified the engine can
-  # enforce this and created the network.
-  if [ "$(active_egress)" = "lan-deny" ]; then
-    RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --dns "$ISOPOD_EGRESS_DNS"
-      --cap-drop NET_RAW --cap-drop NET_ADMIN)
-  fi
+  # Network egress isolation: put the box on the dedicated bridge the host
+  # firewall targets and drop the raw-socket / net-admin caps so it cannot craft
+  # scan packets or re-route around the host rules. All host-enforced at run time
+  # — the box can't undo it. Preflight (create/reconfigure) has already verified
+  # the engine can enforce this and created the network.
+  case "$(active_egress)" in
+    lan-deny)
+      # Pin DNS to a public resolver so the box cannot query the host's
+      # internal/forwarding resolver for reconnaissance.
+      RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --dns "$ISOPOD_EGRESS_DNS"
+        --cap-drop NET_RAW --cap-drop NET_ADMIN)
+      ;;
+    allow-list)
+      # Force the box through the host-side filtering proxy on the bridge
+      # gateway. The host firewall drops every other box-initiated flow, so
+      # unsetting these env vars just removes the box's only route out. No --dns:
+      # the box gets no resolver (the proxy resolves allow-listed names), which
+      # also closes DNS-tunnel exfil.
+      local _proxy="http://$ISOPOD_EGRESS_GATEWAY:$ISOPOD_EGRESS_PROXY_PORT"
+      RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --cap-drop NET_RAW --cap-drop NET_ADMIN
+        -e "http_proxy=$_proxy" -e "https_proxy=$_proxy"
+        -e "HTTP_PROXY=$_proxy" -e "HTTPS_PROXY=$_proxy"
+        -e "no_proxy=localhost,127.0.0.1,::1" -e "NO_PROXY=localhost,127.0.0.1,::1")
+      ;;
+  esac
   # Loopback-only app port publishings (from --expose / config.yaml).
   local spec
   for spec in "$@"; do [ -n "$spec" ] && RUN_ARGS+=(-p "127.0.0.1:$spec"); done
@@ -2210,55 +2401,137 @@ cmd_gc() {
 }
 
 # ---------------------------------------------------------------------------
-# egress — manage the host-side network firewall for `egress lan-deny` boxes
+# egress — manage the host-side firewall (and, for allow-list, the filtering
+# proxy) for `egress lan-deny` / `egress allow-list` boxes
 # ---------------------------------------------------------------------------
 cmd_egress() {
   local action="${1:-status}"
+  shift 2>/dev/null || true
   case "$action" in
-    status | "")
-      printf 'isopod egress\n\n'
-      local mode
-      mode="$(active_egress)"
-      printf '  mode:      %s\n' "${mode:-off}"
-      printf '  network:   %s (%s), gateway %s\n' "$ISOPOD_EGRESS_NET" "$ISOPOD_EGRESS_SUBNET" "$ISOPOD_EGRESS_GATEWAY"
-      printf '  dns:       %s (public resolver — box cannot query the host/LAN resolver)\n' "$ISOPOD_EGRESS_DNS"
-      printf '  ruleset:   %s\n' "$ISOPOD_EGRESS_RULESET"
-      local rc=0
-      egress_rules_loaded || rc=$?
-      case "$rc" in
-        0) printf '  firewall:  loaded (table inet isopod)\n' ;;
-        1) printf '  firewall:  NOT loaded — run: sudo isopod egress apply\n' ;;
-        2) printf '  firewall:  unknown (need root to read nftables; try: sudo isopod egress status)\n' ;;
-      esac
+    status | "") egress_status ;;
+    apply) egress_apply enforce ;;
+    observe) egress_apply observe ;;
+    allow)
+      [ -n "${1:-}" ] || die "usage: isopod egress allow <domain>"
+      egress_allow "$1"
       ;;
-    apply)
-      [ -f "$ISOPOD_EGRESS_RULESET" ] || die "missing ruleset: $ISOPOD_EGRESS_RULESET"
-      have nft || die "nft (nftables) not found — install nftables to apply the egress firewall"
-      local rendered
-      rendered="$(render_tmpl "$ISOPOD_EGRESS_RULESET")"
-      info "Loading isopod egress firewall into the host network namespace..."
-      if [ "$(id -u)" -eq 0 ]; then
-        printf '%s\n' "$rendered" | nft -f - || die "nft failed to load the ruleset"
-      elif have sudo; then
-        printf '%s\n' "$rendered" | sudo nft -f - || die "nft failed to load the ruleset (via sudo)"
-      else
-        die "loading nft rules needs root — re-run as root, or install sudo"
-      fi
-      info "egress firewall loaded (table inet isopod)."
-      warn "not persistent across reboot / firewalld reload — re-run 'sudo isopod egress apply' after
-       those, or include $ISOPOD_EGRESS_RULESET from /etc/nftables.conf."
-      ;;
-    rules | show)
-      render_tmpl "$ISOPOD_EGRESS_RULESET"
-      ;;
+    log) egress_log "$@" ;;
+    denied) egress_denied ;;
+    rules | show) render_tmpl "$(egress_ruleset)" ;;
     -h | --help | help)
-      printf 'usage: isopod egress [status|apply|rules]\n'
-      printf '  status  egress mode, network, and whether the host firewall is loaded\n'
-      printf '  apply   load the host firewall (needs root; run once, and after reboot/firewalld reload)\n'
-      printf '  rules   print the rendered nftables ruleset that apply would load\n'
+      printf 'usage: isopod egress [status|apply|observe|allow <domain>|log [-f]|denied|rules]\n'
+      printf '  status   mode, network, and proxy/firewall state\n'
+      printf '  apply    load the host firewall; for allow-list also (re)start the filtering proxy\n'
+      printf '  observe  allow-list only: run the proxy permit-all but log everything, to discover\n'
+      printf '           which domains a workflow needs; then switch back with apply\n'
+      printf '  allow    add a domain to your allow-list override and reload the proxy\n'
+      printf '  log      tail the proxy access log (-f to follow)\n'
+      printf '  denied   show hostnames the proxy refused (candidates to allow)\n'
+      printf '  rules    print the rendered nftables ruleset that apply would load\n'
       ;;
-    *) die "unknown egress action: $action (try: isopod egress status|apply|rules)" ;;
+    *) die "unknown egress action: $action (try: isopod egress status|apply|observe|allow|log|denied|rules)" ;;
   esac
+}
+
+egress_status() {
+  printf 'isopod egress\n\n'
+  local mode
+  mode="$(active_egress)"
+  printf '  mode:      %s\n' "${mode:-off}"
+  printf '  network:   %s (%s), gateway %s\n' "$ISOPOD_EGRESS_NET" "$ISOPOD_EGRESS_SUBNET" "$ISOPOD_EGRESS_GATEWAY"
+  case "$mode" in
+    allow-list)
+      printf '  proxy:     %s:%s (host-side, hostname allow-list)\n' "$ISOPOD_EGRESS_GATEWAY" "$ISOPOD_EGRESS_PROXY_PORT"
+      local prc=0
+      egress_proxy_active || prc=$?
+      case "$prc" in
+        0) printf '  proxy svc: active (%s)\n' "$ISOPOD_EGRESS_PROXY_UNIT" ;;
+        1) printf '  proxy svc: NOT running — run: sudo isopod egress apply\n' ;;
+        2) printf '  proxy svc: unknown (systemctl not found)\n' ;;
+      esac
+      local n
+      n="$(egress_filter_regexes | sort -u | grep -c . || true)"
+      printf '  allowlist: %s domains (%s + %s)\n' "$n" "$ISOPOD_EGRESS_ALLOWLIST" "$USER_EGRESS_ALLOWLIST"
+      printf '  log:       %s\n' "$ISOPOD_EGRESS_PROXY_LOG"
+      ;;
+    lan-deny)
+      printf '  dns:       %s (public resolver — box cannot query the host/LAN resolver)\n' "$ISOPOD_EGRESS_DNS"
+      ;;
+  esac
+  printf '  ruleset:   %s\n' "$(egress_ruleset)"
+  local rc=0
+  egress_rules_loaded || rc=$?
+  case "$rc" in
+    0) printf '  firewall:  loaded (table inet isopod)\n' ;;
+    1) printf '  firewall:  NOT loaded — run: sudo isopod egress apply\n' ;;
+    2) printf '  firewall:  unknown (need root to read nftables; try: sudo isopod egress status)\n' ;;
+  esac
+}
+
+# Load the firewall (and, for allow-list, the proxy). <want> is enforce|observe.
+egress_apply() { # egress_apply <enforce|observe>
+  local want="$1" mode
+  mode="$(active_egress)"
+  case "$mode" in
+    lan-deny)
+      [ "$want" = enforce ] || die "egress observe is only for allow-list mode (current mode: lan-deny)"
+      egress_load_nft
+      ;;
+    allow-list)
+      if [ "$want" = observe ]; then egress_apply_proxy No; else egress_apply_proxy Yes; fi
+      egress_load_nft
+      [ "$want" = observe ] && warn "egress OBSERVE mode: the proxy PERMITS all destinations and logs
+       them. Review with 'isopod egress denied' / 'isopod egress log', add domains with
+       'isopod egress allow <domain>', then run 'sudo isopod egress apply' to enforce."
+      ;;
+    *) die "egress is off — set 'egress lan-deny' or 'egress allow-list' in your hardening.conf
+     (or ISOPOD_EGRESS=...) first, then apply." ;;
+  esac
+}
+
+# Add a domain to the user allow-list override and reload the running proxy.
+egress_allow() { # egress_allow <domain>
+  local dom="$1"
+  # Only hostname characters, so an entry can never inject a regex metacharacter
+  # into the generated filter file (a security boundary — the filter is trusted).
+  case "$dom" in
+    "" | *[!a-zA-Z0-9.*-]*) die "invalid domain: '$dom' (letters, digits, '.', '-', leading '*.' only)" ;;
+  esac
+  mkdir -p "$CONFIG_DIR"
+  if [ -f "$USER_EGRESS_ALLOWLIST" ] && grep -qxF "$dom" "$USER_EGRESS_ALLOWLIST" 2>/dev/null; then
+    info "'$dom' is already in your allow-list ($USER_EGRESS_ALLOWLIST)"
+  else
+    printf '%s\n' "$dom" >>"$USER_EGRESS_ALLOWLIST"
+    info "added '$dom' to $USER_EGRESS_ALLOWLIST"
+  fi
+  # Reload the running proxy so the change takes effect without dropping
+  # connections; if it was never applied, tell the user to apply.
+  if [ -f "$ISOPOD_EGRESS_STATE_DIR/tinyproxy.conf" ]; then
+    egress_write_filter
+    egr_run_root systemctl reload "$ISOPOD_EGRESS_PROXY_UNIT" &&
+      info "proxy reloaded — '$dom' is now allowed"
+  else
+    warn "proxy not applied yet — run 'sudo isopod egress apply' to enforce the updated list"
+  fi
+}
+
+egress_log() { # egress_log [-f]
+  [ -f "$ISOPOD_EGRESS_PROXY_LOG" ] ||
+    die "no proxy log at $ISOPOD_EGRESS_PROXY_LOG (has 'sudo isopod egress apply' run?)"
+  if [ "${1:-}" = "-f" ]; then
+    egr_run_root tail -f "$ISOPOD_EGRESS_PROXY_LOG"
+  else egr_run_root tail -n 200 "$ISOPOD_EGRESS_PROXY_LOG"; fi
+}
+
+# Best-effort: pull the host names of refused (filtered) connections out of the
+# proxy log, so they can be reviewed and passed to `isopod egress allow`.
+egress_denied() {
+  [ -f "$ISOPOD_EGRESS_PROXY_LOG" ] ||
+    die "no proxy log at $ISOPOD_EGRESS_PROXY_LOG (has 'sudo isopod egress apply' run?)"
+  info "hostnames the proxy refused (not on the allow-list):"
+  egr_run_root grep -iE 'filter|refused|denied' "$ISOPOD_EGRESS_PROXY_LOG" 2>/dev/null |
+    grep -oE '[A-Za-z0-9._-]+\.[A-Za-z]{2,}' | sort -u |
+    sed 's/^/  /' || printf '  (none logged)\n'
 }
 
 cmd_doctor() {
@@ -2333,30 +2606,28 @@ cmd_doctor() {
     printf '  [warn]    hardening profile missing (%s) — boxes start WITHOUT fingerprint masks\n' "$HARDENING_CONF"
   fi
 
-  # Network egress isolation (host firewall; `egress lan-deny`).
-  if [ "$(active_egress)" = "lan-deny" ]; then
-    printf '  [ok]      egress isolation: lan-deny (boxes on %s; LAN/host/metadata/internal-DNS blocked)\n' "$ISOPOD_EGRESS_NET"
-    local eng seen=0
-    for eng in podman docker; do
-      have "$eng" && "$eng" info >/dev/null 2>&1 || continue
-      seen=1
-      if egress_can_enforce "$eng"; then
-        printf '  [ok]      %s can enforce egress (rootful — host bridge)\n' "$eng"
-      else
-        printf '  [warn]    %s is ROOTLESS — cannot enforce egress lan-deny; such boxes fail preflight\n' "$eng"
-      fi
-    done
-    [ "$seen" = 1 ] || printf '  [warn]    no working engine to check egress enforcement against\n'
-    local erc=0
-    egress_rules_loaded || erc=$?
-    case "$erc" in
-      0) printf '  [ok]      egress firewall loaded (table inet isopod)\n' ;;
-      1) printf '  [warn]    egress firewall NOT loaded — run: sudo isopod egress apply\n' ;;
-      2) printf '  [--]      egress firewall status unknown (need root; try: sudo isopod egress status)\n' ;;
-    esac
-  else
-    printf '  [--]      egress isolation: off (boxes can reach your LAN; enable with `egress lan-deny` in hardening.conf)\n'
-  fi
+  # Network egress isolation (host firewall; `egress lan-deny` / `allow-list`).
+  case "$(active_egress)" in
+    allow-list)
+      printf '  [ok]      egress isolation: allow-list (boxes forced through host proxy %s:%s; default-deny egress)\n' \
+        "$ISOPOD_EGRESS_GATEWAY" "$ISOPOD_EGRESS_PROXY_PORT"
+      local prc=0
+      egress_proxy_active || prc=$?
+      case "$prc" in
+        0) printf '  [ok]      egress proxy running (%s)\n' "$ISOPOD_EGRESS_PROXY_UNIT" ;;
+        1) printf '  [warn]    egress proxy NOT running — run: sudo isopod egress apply\n' ;;
+        2) printf '  [--]      egress proxy status unknown (systemctl not found)\n' ;;
+      esac
+      egress_doctor_engines_and_fw
+      ;;
+    lan-deny)
+      printf '  [ok]      egress isolation: lan-deny (boxes on %s; LAN/host/metadata/internal-DNS blocked)\n' "$ISOPOD_EGRESS_NET"
+      egress_doctor_engines_and_fw
+      ;;
+    *)
+      printf '  [--]      egress isolation: off (enable with `egress lan-deny` or `egress allow-list` in hardening.conf)\n'
+      ;;
+  esac
 
   if [ -e /dev/kvm ]; then
     local mvm
