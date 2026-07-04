@@ -23,10 +23,12 @@ fail() {
   exit 1
 }
 
-# 1. Every template referenced by the script must exist in share/.
+# 1. Every template referenced by the script must exist in share/. Strip comments
+#    first (sed) so a doc comment that merely mentions "render_tmpl <word>" isn't
+#    mistaken for a call — only actual code is scanned.
 while read -r tmpl; do
   [ -f "share/$tmpl" ] || fail "isopod calls render_tmpl '$tmpl' but share/$tmpl is missing"
-done < <(grep -oE 'render_tmpl[[:space:]]+[A-Za-z0-9._-]+' isopod | awk '{print $2}' | sort -u)
+done < <(sed 's/#.*$//' isopod | grep -oE 'render_tmpl[[:space:]]+[A-Za-z0-9._-]+' | awk '{print $2}' | sort -u)
 ok "every render_tmpl reference has a share/ file"
 
 # 1b. The base image build reads share/Dockerfile at runtime — it must exist.

@@ -14,7 +14,7 @@ repos:
         args: ["-S", "warning"]
         # Matches the lint scope in test/run.sh. .bats files use non-standard
         # syntax shellcheck can't parse, so they're intentionally excluded.
-        files: '^(isopod|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|test/(run|packaging|brew-formula)\.sh)$'
+        files: '^(isopod|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|test/(run|packaging|egress-render|brew-formula)\.sh)$'
 
   - repo: https://github.com/scop/pre-commit-shfmt
     rev: v3.13.1-1
@@ -23,7 +23,7 @@ repos:
         args: ["-w", "-i", "2", "-ci"]
         # Pure bash/sh only — shfmt can't parse .bats (@test) or the zsh
         # completion (completions/_isopod).
-        files: '^(isopod|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|completions/isopod\.bash|test/(run|packaging|brew-formula)\.sh|test/helper\.bash)$'
+        files: '^(isopod|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|completions/isopod\.bash|test/(run|packaging|egress-render|brew-formula)\.sh|test/helper\.bash)$'
 
   # GitHub Actions: static lint of workflow files, on commit. Self-provisions via
   # Go (no system install). Already scoped to ^.github/workflows/ by the hook.
@@ -31,6 +31,31 @@ repos:
     rev: v1.7.12
     hooks:
       - id: actionlint
+
+  # Fast, dependency-free repo checks that run on commit (no engine/network).
+  # These mirror steps in test/run.sh so the class of failure they catch (a
+  # template with no share/ file, an egress ruleset/proxy template that stops
+  # rendering) is caught locally instead of in CI. Scoped to the files that can
+  # affect them so most commits skip them.
+  - repo: local
+    hooks:
+      - id: packaging
+        name: packaging (share/ ships + templates render)
+        entry: bash test/packaging.sh
+        language: system
+        files: '^(isopod|install\.sh|share/.*|test/packaging\.sh)$'
+        pass_filenames: false
+        stages: [pre-commit]
+        require_serial: true
+
+      - id: egress-render
+        name: egress templates render (+ nft parse where available)
+        entry: bash test/egress-render.sh
+        language: system
+        files: '^(isopod|security/egress.*|share/(tinyproxy\.conf\.tmpl|isopod-egress-proxy\.service\.tmpl)|test/egress-render\.sh)$'
+        pass_filenames: false
+        stages: [pre-commit]
+        require_serial: true
 
   # Heavier local CI runs — pre-push only, and only when the matching CI file
   # changes. These use your own installed tools (NOT provisioned by pre-commit)
