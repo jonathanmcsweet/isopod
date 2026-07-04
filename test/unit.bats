@@ -294,6 +294,57 @@ teardown() { isopod_teardown_env; }
   [[ "$joined" != *"--cap-drop NET_RAW"* ]]
 }
 
+# ---- egress allow-list mode --------------------------------------------------
+@test "active_egress reads allow-list from the user override" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'egress allow-list\n' >"$ISOPOD_CONFIG_DIR/hardening.conf"
+  run active_egress
+  assert_output "allow-list"
+}
+@test "active_egress treats an unknown mode as disabled" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'egress bogus-mode\n' >"$ISOPOD_CONFIG_DIR/hardening.conf"
+  run active_egress
+  assert_output ""
+}
+@test "egress_ruleset selects the allow-list ruleset in allow-list mode" {
+  ISOPOD_EGRESS=allow-list run egress_ruleset
+  assert_output --partial "egress-allowlist.nft"
+}
+@test "build_run_args forces the proxy and drops caps in allow-list mode" {
+  ENGINE=podman
+  ISOPOD_EGRESS=allow-list build_run_args box img 127.0.0.1::22 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--network isopod0"* ]]
+  [[ "$joined" == *"http_proxy=http://10.88.7.1:8118"* ]]
+  [[ "$joined" == *"https_proxy=http://10.88.7.1:8118"* ]]
+  [[ "$joined" == *"--cap-drop NET_RAW"* ]]
+  [[ "$joined" == *"--cap-drop NET_ADMIN"* ]]
+  # No pinned resolver in allow-list mode — the proxy resolves names.
+  [[ "$joined" != *"--dns"* ]]
+}
+@test "egress_filter_regexes anchors bare domains and wildcards" {
+  ISOPOD_EGRESS_ALLOWLIST="$TEST_TMP/allow.conf"
+  USER_EGRESS_ALLOWLIST="$TEST_TMP/user.conf"
+  printf '# comment\nexample.com\n*.cdn.example.net\n' >"$ISOPOD_EGRESS_ALLOWLIST"
+  : >"$USER_EGRESS_ALLOWLIST"
+  run egress_filter_regexes
+  assert_success
+  assert_line '^(.*\.)?example\.com$'
+  assert_line '^.+\.cdn\.example\.net$'
+}
+@test "egress_allow rejects a domain with regex metacharacters" {
+  run egress_allow 'evil.com|.*'
+  assert_failure
+  assert_output --partial "invalid domain"
+}
+@test "egress_allow appends a valid domain to the user override" {
+  ISOPOD_EGRESS_STATE_DIR="$TEST_TMP/state" # no tinyproxy.conf => no reload attempt
+  run egress_allow "internal.example.org"
+  assert_success
+  grep -qxF "internal.example.org" "$USER_EGRESS_ALLOWLIST"
+}
+
 @test "egress_can_enforce: true for rootful podman, false for rootless" {
   make_stub podman 0 "false" # {{.Host.Security.Rootless}} => false
   run egress_can_enforce podman

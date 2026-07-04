@@ -16,7 +16,7 @@ Usage:
   isopod copy-in <name> <path>...     Copy more host folders INTO the sandbox
   isopod rm <name> [--force]          Delete a sandbox (container + keys + snapshots)
   isopod gc [--dry-run] [--force]     Remove isopod images no box still references
-  isopod egress [status|apply|rules]  Manage the network egress firewall
+  isopod egress [status|apply|allow …]  Manage the network egress firewall/proxy
   isopod doctor                       Check host prerequisites
   isopod help                         Show this help
 
@@ -78,14 +78,17 @@ Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--o
                         ~/.config/isopod/remap.
   --force, -f           Skip the confirmation prompt.
 
-Network egress isolation (stop a rogue in-box agent from mapping your LAN):
-  Enable it with 'egress lan-deny' in ~/.config/isopod/hardening.conf (or
-  ISOPOD_EGRESS=lan-deny). Boxes then go on a dedicated bridge and a HOST firewall
-  blocks box-initiated traffic to your LAN, the host, cloud metadata, and internal
-  DNS — while public internet and host->box published ports keep working. Needs a
-  rootful engine; load the firewall once with 'sudo isopod egress apply'.
-  Subcommands:  status (mode + whether it is loaded), apply (load it; needs root),
-  rules (print the nftables ruleset).
+Network egress isolation (host-enforced; an in-box agent cannot turn it off):
+  Set the mode in ~/.config/isopod/hardening.conf (or ISOPOD_EGRESS=...), then load
+  it once with 'sudo isopod egress apply'. Needs a rootful engine (host bridge).
+  Modes:
+   'egress lan-deny'    block box->LAN/host/metadata/internal-DNS; public internet
+                        and host->box published ports keep working.
+   'egress allow-list'  DEFAULT-DENY egress: a host-side filtering proxy is the
+                        box's only route out, and only allow-listed hostnames pass
+                        (stops data exfiltration to arbitrary destinations).
+  Subcommands:  status, apply (load firewall + start proxy), observe (build the
+  allow-list from real traffic), allow <domain>, log [-f], denied, rules.
 
 Examples:
   isopod create myproj --repo https://github.com/me/proj --color teal

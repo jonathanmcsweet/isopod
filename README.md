@@ -78,7 +78,7 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 ### What it does NOT protect against
 
-- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless you've created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. (Reconnaissance in the *other* direction — a rogue agent scanning your **local network**, the host, or cloud metadata — can be blocked with host-enforced [network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny), while keeping published ports and public internet working.)
+- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless you've created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. To narrow this, [`egress allow-list`](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list) forces the box through a host-side filtering proxy that permits only allow-listed hostnames — it limits, but does not eliminate, exfiltration (a secret can still be sent *into* an allowed host). Reconnaissance in the *other* direction — a rogue agent scanning your **local network**, the host, or cloud metadata — can be blocked with host-enforced [network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny), while keeping published ports and public internet working.
 
 - **A misbehaving agent inside the container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above — but anything inside the container (including data you copied in) is fully exposed to it. If you don't need in-container package installs, create the container with **`--no-sudo`** to drop that privilege. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
 
@@ -119,6 +119,7 @@ Off by default (they need host-side setup) — see **[docs/opt-in-security.md](d
 - **gVisor (`runsc`)** — a syscall-virtualizing runtime that hides CPU/kernel/boot identity.
 - **microVM runtimes (Kata, krun)** — a per-box guest kernel behind a KVM boundary.
 - **Network egress isolation (`egress lan-deny`)** — a host firewall that stops a rogue agent from mapping your LAN, the host, cloud metadata, or internal DNS, while keeping published ports and public internet working.
+- **Network egress allow-list (`egress allow-list`)** — a host-side filtering proxy that is the box's only route out and permits only allow-listed hostnames, to limit data exfiltration to arbitrary destinations.
 
 ### What still can't be mitigated
 
@@ -205,7 +206,7 @@ Both run over the box's SSH connection, so the box must be **running** (`isopod 
 
 `ISOPOD_SSH_WAIT_TRIES` — how many 1s attempts `create`/`start` make waiting for sshd before giving up (default `30`).
 
-[Network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny) (`egress lan-deny`) has its own overrides: `ISOPOD_EGRESS` (`lan-deny`|off), `ISOPOD_EGRESS_NET`, `ISOPOD_EGRESS_SUBNET`, `ISOPOD_EGRESS_GATEWAY`, `ISOPOD_EGRESS_DNS`, `ISOPOD_EGRESS_RULESET` (the network/firewall parameters), and `ISOPOD_EGRESS_ALLOW_UNLOADED=1` to start a box even when the host firewall isn't loaded yet (otherwise `create` fails closed).
+[Network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny) has its own overrides: `ISOPOD_EGRESS` (`lan-deny`|`allow-list`|off), `ISOPOD_EGRESS_NET`, `ISOPOD_EGRESS_SUBNET`, `ISOPOD_EGRESS_GATEWAY`, `ISOPOD_EGRESS_DNS`, `ISOPOD_EGRESS_RULESET` (the network/firewall parameters), and `ISOPOD_EGRESS_ALLOW_UNLOADED=1` to start a box even when the host firewall isn't loaded yet (otherwise `create` fails closed). The [`allow-list`](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list) mode adds `ISOPOD_EGRESS_PROXY_PORT`, `ISOPOD_EGRESS_PROXY_BIN`, `ISOPOD_EGRESS_ALLOWLIST` (allow-list file), and `ISOPOD_EGRESS_ALLOWLIST_RULESET`.
 
 ## Customizing the container
 

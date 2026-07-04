@@ -77,7 +77,7 @@ _isopod() {
       mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
       ;;
     egress)
-      mapfile -t COMPREPLY < <(compgen -W "status apply rules" -- "$cur")
+      mapfile -t COMPREPLY < <(compgen -W "status apply observe allow log denied rules" -- "$cur")
       ;;
   esac
   return 0
