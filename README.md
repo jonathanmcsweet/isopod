@@ -114,7 +114,7 @@ Verify from inside a container: after hardening, `cat /proc/cmdline` (podman) an
 > isopod deliberately does **not** add `--cap-drop=ALL`, `--read-only`, or `--security-opt no-new-privileges` here: the container runs `sshd` and gives agents passwordless `sudo apt install` for toolchains, all of which those flags would break. The isolation guarantees in [The isolation model](#the-isolation-model) (no mounts, loopback-only SSH, rootless userns) remain the primary boundary; the masks above are defense-in-depth against *fingerprinting* specifically.
 
 ### Security defaults and how to adjust them
-As of v2.0.0 the two strongest features are **on by default**; see **[docs/opt-in-security.md](docs/opt-in-security.md)** for details and tuning:
+See **[docs/opt-in-security.md](docs/opt-in-security.md)** for details and tuning:
 
 - **microVM by default** — `isopod create` runs the box in a per-box guest kernel behind a KVM boundary (krun/crun-vm/Kata) when a microVM runtime and `/dev/kvm` are available. If not, it falls back to gVisor (`runsc`), then a plain container, with a warning. Pass **`--container`** to force a plain shared-kernel container.
 - **Network egress allow-list by default (`egress allow-list`)** — a host-side filtering proxy is the box's only route out and permits only allow-listed hostnames, to limit data exfiltration. When it can't be enforced (rootless engine, firewall/proxy not loaded) a default-on box degrades with a warning (allow-list → lan-deny → open). Turn it off with `ISOPOD_EGRESS=off` or `no-egress`.
