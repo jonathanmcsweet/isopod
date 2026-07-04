@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck -S warning isopod install.sh test/run.sh test/packaging.sh test/brew-formula.sh verify-host-isolation.sh
+          shellcheck -S warning isopod install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh verify-host-isolation.sh
           bash -n isopod install.sh verify-host-isolation.sh
           # lint the discrete python helpers under lib/
           sudo apt-get install -y -qq python3 python3-pyflakes
@@ -40,6 +40,10 @@ jobs:
           # Install core test deps first, on their own line, so they always
           # land even if an optional package on another line is unavailable.
           sudo apt-get install -y -qq bash openssh-client python3 python3-pexpect
+          # nftables lets test/egress-render.sh parse-check the rendered egress
+          # rulesets (nft -c). GitHub Linux runners can load nf_tables; where a
+          # runner can't, the check skips itself rather than failing.
+          sudo apt-get install -y -qq nftables || true
           bash test/run.sh
 
   # -------------------------------------------------------------------------
@@ -68,6 +72,16 @@ jobs:
   # runner, or just run it locally:
   #
   #   RUN_LIVE=1 test/run.sh
+  #
+  # microVM tier (krun/kata): GitHub-hosted Linux runners DO expose /dev/kvm, so
+  # a KVM microVM can in principle boot here — but nested virt is flaky and the
+  # rootless-podman default cannot enforce the egress firewall, so we do not run
+  # a microVM matrix in hosted CI. Test that tier on a KVM-capable self-hosted
+  # runner. GitLab.com shared runners have no /dev/kvm at all.
+  #
+  # Live `egress allow-list` testing additionally needs nftables + tinyproxy +
+  # systemd on the runner (the proxy is a systemd unit); the render/parse checks
+  # in test/egress-render.sh cover the static side without any of that.
   # -------------------------------------------------------------------------
   live-isolation:
     if: github.event_name == 'workflow_dispatch'

@@ -80,7 +80,7 @@ _isopod() {
           _arguments '--path[in-box repo path]:path:' '1:sandbox:_isopod_boxes'
           ;;
         egress)
-          _arguments '1:action:(status apply rules)'
+          _arguments '1:action:(status apply observe allow log denied rules)'
           ;;
         info|shell|start|stop|export|copy-in)
           _arguments '1:sandbox:_isopod_boxes'

@@ -184,3 +184,99 @@ without root, isopod can't confirm either way and warns rather than blocking.
 - Same-bridge boxes can still discover each other at L2, but not reach each other
   at L3 (dropped) — and both are equally locked down, so this leaks nothing about
   the host.
+
+## Network egress allow-list (`egress allow-list`)
+
+Where `lan-deny` blocks your local network but leaves the public internet open,
+`allow-list` inverts the default: a box may reach **only the hostnames you
+approve**, and nothing else. It exists to limit **data exfiltration** — a rogue
+in-box agent can't POST your code to an arbitrary server, because the connection
+never leaves the host.
+
+Everything is enforced by the engine and the host. An agent with in-box root and
+passwordless `sudo` cannot turn it off: there is no in-box proxy or firewall to
+change, and unsetting the box's `http_proxy` just removes its only route out.
+
+**How it works.** Two host-side pieces:
+
+- a **filtering proxy** ([tinyproxy](https://tinyproxy.github.io/)) running on the
+  egress bridge gateway, which allows or denies each request by the requested
+  hostname (`CONNECT` target / `Host` header). It filters on the name, not the
+  payload, so there is **no TLS interception and no CA certificate** to install.
+- a **host firewall** (`security/egress-allowlist.nft`) that drops every
+  box-initiated flow *except* to the proxy — so the proxy is the box's only way
+  out. Boxes also get `--cap-drop NET_RAW,NET_ADMIN` so they can't re-route
+  around it, and **no DNS** (the proxy resolves allow-listed names itself, which
+  also closes DNS-tunnel exfil).
+
+**Enable it** in your override file (`~/.config/isopod/hardening.conf`):
+
+```
+egress allow-list
+```
+
+or per-run with `ISOPOD_EGRESS=allow-list isopod create …`.
+
+### What you must do on the host
+
+Same rootful-engine requirement as `lan-deny`, plus `tinyproxy` and `systemd`.
+One-time (needs root), which loads the firewall **and** starts the proxy as the
+`isopod-egress-proxy` unit:
+
+```sh
+sudo isopod egress apply       # start the proxy + load the firewall
+isopod egress status           # mode, proxy state, allow-list size, firewall state
+```
+
+The default allow-list (`security/egress-allowlist.conf`) covers common package
+registries and source hosts (Debian/Ubuntu apt, PyPI, npm, crates.io, Go modules,
+GitHub/GitLab). Your own additions go in `~/.config/isopod/egress-allowlist.conf`
+and survive upgrades.
+
+### Building and growing the allow-list
+
+You rarely know every domain a workflow needs up front. **Observe mode** runs the
+proxy permit-all but logs everything, so you can discover them from real traffic,
+then lock it down:
+
+```sh
+sudo isopod egress observe     # permit all, but log every request
+# …run your workflow once…
+isopod egress denied           # hostnames that would be blocked under enforce
+isopod egress allow files.pythonhosted.org   # approve one (reloads, no restart)
+sudo isopod egress apply       # switch back to enforcing the allow-list
+```
+
+Day to day, when an agent hits a wall the blocked host shows up in the log:
+
+```sh
+isopod egress log -f           # watch requests live (allowed + refused)
+isopod egress denied           # unique refused hostnames — candidates to allow
+isopod egress allow <domain>   # approve it; the proxy reloads without dropping connections
+```
+
+Allow-list entries take two forms:
+
+| Entry | Matches |
+| --- | --- |
+| `github.com` | `github.com` **and** all subdomains (`api.github.com`) |
+| `*.githubusercontent.com` | subdomains only (not the apex) |
+
+**Fails closed.** `isopod create` (and `reconfigure`) refuse if the proxy is not
+running, rather than start a box with no route out. `isopod egress status` and
+`isopod doctor` report whether the proxy and firewall are both up. Like the nft
+rules, the systemd unit is what keeps the proxy up across reboots; re-run
+`sudo isopod egress apply` after a `firewalld` reload or engine restart.
+
+### Limits
+
+- Filters by **hostname, not payload**. It stops connections to non-allowed
+  domains, but cannot stop a secret being sent *into* an allow-listed domain
+  (a GitHub gist, an `npm publish`). An allow-list narrows the exfil surface to
+  the hosts you trust — it does not eliminate it. Keep the list tight.
+- `CONNECT` is limited to the standard TLS ports (443/563), so the tunnel can't
+  reach arbitrary services (e.g. `ssh` on 22).
+- Clients that ignore `http_proxy` get no network (that's fail-closed). The common
+  tools — `apt`, `pip`, `git`, `curl`, `wget` — all honor it.
+- Same platform matrix as `lan-deny`: Linux host (or the `podman machine` VM on
+  macOS / the WSL2 distro on Windows). There is no Windows-native path.

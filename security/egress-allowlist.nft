@@ -1,0 +1,64 @@
+#!/usr/sbin/nft -f
+#
+# security/egress-allowlist.nft — HOST-side egress firewall for isopod
+# "egress allow-list" boxes. Rendered by "isopod egress apply" (the network's
+# subnet, gateway, and the proxy port are substituted in) and loaded into the
+# HOST network namespace — so a rogue agent inside a box, even with root and
+# passwordless sudo, cannot flush or edit it.
+#
+# The model is DEFAULT-DENY egress, forced through a filtering proxy:
+#   - the ONLY new flow a box may open is TCP to the filtering proxy, which
+#     listens on the bridge gateway ($ISOPOD_EGRESS_GATEWAY:$ISOPOD_EGRESS_PROXY_PORT);
+#   - every other box-initiated flow — the public internet, the LAN, the host,
+#     cloud metadata, DNS — is dropped.
+# The proxy (a host process) then makes the real outbound connection on the
+# box's behalf, but ONLY to hostnames on the allow-list. Because the proxy runs
+# in the HOST netns its own outbound traffic is sourced from the host, not the
+# box subnet, so it passes the forward rule below and reaches the internet.
+#
+# Why this can't be bypassed from inside the box: unsetting http_proxy just
+# removes the box's only usable route (this ruleset drops direct egress), and
+# the box has NET_RAW/NET_ADMIN dropped (set by the isopod script) so it cannot
+# craft packets or re-route around the rules. There is no in-box firewall to
+# flush — enforcement is entirely host-side.
+#
+# DNS: a box gets NO direct resolver (udp/tcp 53 is box-initiated off-bridge
+# traffic, dropped below). It does not need one — the proxy resolves allow-listed
+# names itself from the CONNECT/Host hostname. This also closes DNS-tunnel exfil.
+#
+# IPv4-only by design (no IPv6 route for a box to slip around these v4 rules).
+#
+# NOT persistent across reboot / firewalld reload / engine restart. The systemd
+# unit isopod-egress-proxy keeps the proxy up; re-run "sudo isopod egress apply"
+# to reload these rules after such events, or include this file from
+# /etc/nftables.conf. "isopod egress status" reports whether both are active.
+
+# Idempotent reload: ensure the table exists, drop it, then define it fresh, so a
+# re-apply never stacks duplicate chains. Same table name as egress-host.nft, so
+# switching modes replaces the ruleset rather than layering it.
+add table inet isopod
+delete table inet isopod
+
+table inet isopod {
+	# Box -> anything routed off the bridge (LAN, internet, metadata, DNS).
+	# Default-deny: only established replies pass; every new box-initiated flow
+	# off the bridge is dropped. The proxy's own upstream connections are sourced
+	# from the host (not the box subnet), so they short-circuit to accept here.
+	chain forward {
+		type filter hook forward priority -5; policy accept;
+		ip saddr != $ISOPOD_EGRESS_SUBNET accept
+		ct state established,related accept
+		ip saddr $ISOPOD_EGRESS_SUBNET drop
+	}
+
+	# Box -> the HOST itself, reached on the bridge gateway IP. The ONLY new flow
+	# allowed is TCP to the filtering proxy; everything else box-initiated to the
+	# host (other services, the engine's DNS on the gateway) is dropped.
+	chain input {
+		type filter hook input priority -5; policy accept;
+		ip saddr != $ISOPOD_EGRESS_SUBNET accept
+		ct state established,related accept
+		ip daddr $ISOPOD_EGRESS_GATEWAY tcp dport $ISOPOD_EGRESS_PROXY_PORT ct state new accept
+		ct state new drop
+	}
+}
