@@ -88,7 +88,8 @@ nft_check() { # nft_check <label> <rendered ruleset>
   fi
   case "$err" in
     *"permission denied"* | *"Operation not permitted"* | *"not permitted"* | *"Could not"*)
-      skip "$label: nft -c needs privilege here — parse check skipped" ;;
+      skip "$label: nft -c needs privilege here — parse check skipped"
+      ;;
     *) fail "$label: nft rejected the ruleset:
 $err" ;;
   esac
