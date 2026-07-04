@@ -56,7 +56,8 @@ _isopod() {
             '--memory[memory limit, e.g. 4g]:memory:' \
             '--cpus[cpu limit]:cpus:' \
             '--port[fixed host SSH port]:port:' \
-            '--no-sudo[do not grant in-box passwordless sudo]'
+            '--no-sudo[do not grant in-box passwordless sudo]' \
+            '--container[run as a plain container instead of the default microVM]'
           ;;
         code)
           _arguments \
