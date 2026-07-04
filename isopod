@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="1.5.0"
+ISOPOD_VERSION="1.6.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -51,6 +51,12 @@ WORKSPACE="/home/dev/workspace"
 # no --memory (a microVM boots a fixed-size guest; without this it would be
 # starved). Override with ISOPOD_MICROVM_MEMORY or an explicit --memory.
 MICROVM_DEFAULT_MEMORY="${ISOPOD_MICROVM_MEMORY:-2g}"
+# Extra OCI annotations for a Tier 3 microVM runtime. libkrun/krun reads krun.*
+# annotations to tune the guest (e.g. "krun.nested_virt=1" to allow nested virt
+# inside the box). Space-separated key=value list, applied by build_run_args as
+# --annotation flags when a microVM runtime is active. podman only — annotations
+# are a crun/krun feature; docker run has no --annotation.
+ISOPOD_MICROVM_ANNOTATIONS="${ISOPOD_MICROVM_ANNOTATIONS:-}"
 
 # Network egress isolation (hardening `egress lan-deny`). Boxes are placed on this
 # dedicated fixed-subnet bridge so the host firewall (security/egress-host.nft) can
@@ -792,6 +798,74 @@ is_microvm_runtime() {
   [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
 }
 
+# Is an OCI runtime usable by the engine? True when the binary is on PATH (podman
+# and docker both invoke the runtime by name from PATH) OR the engine reports it
+# among its registered runtimes. Best-effort: a false "unavailable" only ever
+# downgrades to a warning at doctor time, and preflight double-checks before a run.
+runtime_available() { # runtime_available <engine> <name>
+  local engine="$1" name="$2"
+  [ -n "$name" ] || return 1
+  have "$name" && return 0
+  # `<engine> info` lists registered runtimes (podman: the ociRuntimes map;
+  # docker: the Runtimes section). A word-boundary match is enough for a hint.
+  "$engine" info 2>/dev/null | grep -qw -- "$name"
+}
+
+# Fail-closed preflight for the configured OCI runtime, mirroring egress_preflight:
+# turn a late, cryptic engine error ("runtime not found") into an early, clear one,
+# and make sure a box the user asked to run under a sandboxed runtime does not
+# silently start without it. No-op when no runtime is configured or the runtime is
+# a custom one isopod cannot classify (unknown tier — pass it straight through).
+runtime_preflight() { # runtime_preflight <engine>
+  local rt
+  rt="$(active_runtime)"
+  [ -n "$rt" ] || return 0
+  local tier
+  tier="$(runtime_tier "$rt" 2>/dev/null || true)"
+  [ -n "$tier" ] || return 0
+  local engine="$1"
+  if ! runtime_available "$engine" "$rt"; then
+    die "runtime '$rt' (Tier $tier) is not on PATH or registered with '$engine', so the box
+     cannot start under it. Install and register the runtime with your engine, or remove the
+     'runtime' directive from hardening.conf (and unset ISOPOD_RUNTIME) to run without it."
+  fi
+  # A Tier 3 microVM needs hardware virtualization. On a native Linux host that is
+  # /dev/kvm; a missing node means the run will almost certainly fail. Warn rather
+  # than die: on macOS/Windows the engine runs in its own VM (libkrun uses HVF /
+  # Hyper-V there), so a host /dev/kvm check would be a false negative.
+  if [ "$tier" = 3 ] && [ "$(uname -s)" = Linux ] && [ ! -e /dev/kvm ]; then
+    warn "microVM runtime '$rt' needs hardware virtualization but /dev/kvm is absent on this host.
+     The box will likely fail to start. Enable KVM (or nested virt), or switch to a Tier 2
+     runtime (runsc) / the Tier 1 masks. See 'isopod doctor'."
+  fi
+}
+
+# True when a headline sandboxed runtime is available (binary on PATH or registered
+# with a present engine). Used by the doctor detection hints below.
+_runtime_present() { # _runtime_present <name>
+  local name="$1" e
+  have "$name" && return 0
+  for e in podman docker; do
+    have "$e" && runtime_available "$e" "$name" && return 0
+  done
+  return 1
+}
+
+# Doctor hints: which sandboxed runtimes are available to enable. A curated set of
+# headline names (not the full share/runtimes table) keeps the hint short, and lists
+# the strongest tier first. detect_microvm_runtimes = Tier 3 only (own kernel/DMI);
+# detect_sandboxed_runtimes = Tier 3 then Tier 2 (runsc syscall sandbox).
+detect_microvm_runtimes() {
+  local n out=""
+  for n in krun crun-vm kata-runtime; do _runtime_present "$n" && out="${out:+$out }$n"; done
+  printf '%s' "$out"
+}
+detect_sandboxed_runtimes() {
+  local n out=""
+  for n in krun crun-vm kata-runtime runsc; do _runtime_present "$n" && out="${out:+$out }$n"; done
+  printf '%s' "$out"
+}
+
 # ---------------------------------------------------------------------------
 # network egress isolation (`egress lan-deny`)
 # ---------------------------------------------------------------------------
@@ -971,6 +1045,13 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   local -a hard_args=()
   mapfile -t hard_args < <(hardening_run_args "$ENGINE")
   [ "${#hard_args[@]}" -gt 0 ] && RUN_ARGS+=("${hard_args[@]}")
+  # Tier 3 microVM tuning: pass krun.* OCI annotations to the guest (podman only;
+  # annotations are a crun/krun feature and docker run has no --annotation). e.g.
+  # ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1".
+  if [ "$ENGINE" = podman ] && [ -n "$ISOPOD_MICROVM_ANNOTATIONS" ] && is_microvm_runtime; then
+    local ann
+    for ann in $ISOPOD_MICROVM_ANNOTATIONS; do [ -n "$ann" ] && RUN_ARGS+=(--annotation "$ann"); done
+  fi
   # Docker/runc can't bind-mask /proc files; hardening_run_args skipped them.
   # Warn once here (not inside that function, which also renders the reference
   # Compose file) so the user knows those paths stay readable on Docker.
@@ -1178,6 +1259,10 @@ cmd_create() {
   # Verify the engine can enforce egress isolation and set up its network before
   # the box starts (no-op unless `egress lan-deny` is configured).
   egress_preflight "$ENGINE"
+  # Verify a configured sandboxed runtime (Tier 2/3) can actually run before we
+  # start, so a missing/unregistered runtime fails early and clearly instead of
+  # as a cryptic engine error (no-op when no runtime is configured).
+  runtime_preflight "$ENGINE"
   build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${expose_specs[@]}"
 
   info "Starting container ($ENGINE)..."
@@ -1812,6 +1897,8 @@ cmd_reconfigure() {
   # Re-check egress enforcement + network before recreating (the profile may have
   # changed since create; no-op unless `egress lan-deny` is configured).
   egress_preflight "$ENGINE"
+  # Re-check the runtime too — the profile's `runtime` directive may have changed.
+  runtime_preflight "$ENGINE"
 
   # Snapshot the box so the recreate keeps the workspace + installed packages.
   local snap old_img
@@ -2222,7 +2309,7 @@ cmd_doctor() {
         3) label="Tier 3 (microVM, separate kernel)" ;;
         *) label="custom runtime (tier unknown)" ;;
       esac
-      if have "$rt" || { have podman && podman info 2>/dev/null | grep -q "$rt"; }; then
+      if runtime_available podman "$rt" || runtime_available docker "$rt"; then
         printf '  [ok]      sandboxed runtime: %s — %s\n' "$rt" "$label"
       else
         printf '  [warn]    runtime "%s" not found on host — install/register it or boxes will fail to start\n' "$rt"
@@ -2232,6 +2319,15 @@ cmd_doctor() {
       fi
     else
       printf '  [--]      sandboxed runtime: off (Tier 1 masks active; see security/hardening.conf)\n'
+      # Auto-detect sandboxed runtimes the user could enable for structural (not
+      # mask-based) fingerprint resistance. Tier 3 microVM (own kernel/DMI) is the
+      # strongest; Tier 2 (runsc) is a syscall sandbox on the shared kernel.
+      local avail
+      avail="$(detect_sandboxed_runtimes)"
+      if [ -n "$avail" ]; then
+        printf '  [--]      available to enable: %s — add e.g. `runtime %s` to hardening.conf\n' \
+          "$avail" "${avail%% *}"
+      fi
     fi
   else
     printf '  [warn]    hardening profile missing (%s) — boxes start WITHOUT fingerprint masks\n' "$HARDENING_CONF"
@@ -2263,7 +2359,13 @@ cmd_doctor() {
   fi
 
   if [ -e /dev/kvm ]; then
-    printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes (kata, krun) available\n'
+    local mvm
+    mvm="$(detect_microvm_runtimes)"
+    if [ -n "$mvm" ]; then
+      printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes detected: %s\n' "$mvm"
+    else
+      printf '  [ok]      /dev/kvm present — Tier 3 microVM ready; install a runtime (krun, crun-vm, kata)\n'
+    fi
   else
     printf '  [--]      /dev/kvm absent — Tier 3 microVM runtimes unavailable (Tier 1/2 still work)\n'
   fi

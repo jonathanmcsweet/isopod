@@ -499,3 +499,96 @@ EOF
   assert_success
   assert_output --partial "WITHOUT the LAN block"
 }
+
+# ---- sandboxed runtime detection + preflight (Tier 2/3) ----------------------
+# A podman stub whose `info` lists a set of registered OCI runtimes.
+_stub_podman_runtimes() { # _stub_podman_runtimes <name...>
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'echo "podman $*" >> "$STUB_LOG"'
+    echo '[ "$1" = info ] || exit 0'
+    printf 'cat <<'\''INFO'\''\nhost:\n  ociRuntimes:\n'
+    local n
+    for n in "$@"; do printf '    %s: [/usr/bin/%s]\n' "$n" "$n"; done
+    printf 'INFO\n'
+  } >"$STUB_DIR/podman"
+  chmod +x "$STUB_DIR/podman"
+}
+
+@test "runtime_available: true for a runtime on PATH" {
+  make_stub krun 0
+  run runtime_available podman krun
+  assert_success
+}
+@test "runtime_available: true for a runtime the engine reports as registered" {
+  _stub_podman_runtimes crun runc krun
+  run runtime_available podman krun
+  assert_success
+}
+@test "runtime_available: false for an absent, unregistered runtime" {
+  _stub_podman_runtimes crun runc
+  run runtime_available podman krun
+  assert_failure
+}
+
+@test "runtime_preflight is a no-op when no runtime is configured" {
+  run runtime_preflight podman
+  assert_success
+  assert_output ""
+}
+@test "runtime_preflight is a no-op for an unclassified custom runtime" {
+  # Unknown tier (not in share/runtimes) -> pass straight through, no availability check.
+  ISOPOD_RUNTIME=my-custom-runtime run runtime_preflight podman
+  assert_success
+  assert_output ""
+}
+@test "runtime_preflight fails closed when the configured runtime is unavailable" {
+  _stub_podman_runtimes crun runc
+  ISOPOD_RUNTIME=krun run runtime_preflight podman
+  assert_failure
+  assert_output --partial "not on PATH or registered"
+}
+@test "runtime_preflight passes when the configured runtime is registered" {
+  _stub_podman_runtimes crun runc krun
+  # /dev/kvm may be absent here; that path only warns (success), never fails.
+  ISOPOD_RUNTIME=krun run runtime_preflight podman
+  assert_success
+}
+
+@test "detect_microvm_runtimes reports a registered Tier 3 runtime" {
+  _stub_podman_runtimes crun runc krun crun-vm
+  run detect_microvm_runtimes
+  assert_success
+  assert_output --partial "krun"
+  assert_output --partial "crun-vm"
+}
+@test "detect_sandboxed_runtimes lists Tier 3 before Tier 2" {
+  _stub_podman_runtimes crun runc runsc krun
+  run detect_sandboxed_runtimes
+  assert_success
+  # krun (Tier 3) must appear before runsc (Tier 2)
+  [[ "$output" == krun*runsc* ]]
+}
+
+# ---- microVM OCI annotations (build_run_args) --------------------------------
+@test "build_run_args passes krun annotations for a podman microVM runtime" {
+  ENGINE=podman
+  ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=krun \
+    build_run_args box img 127.0.0.1::22 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--annotation krun.nested_virt=1"* ]]
+}
+@test "build_run_args omits annotations for a Tier 2 (non-microVM) runtime" {
+  ENGINE=podman
+  ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=runsc \
+    build_run_args box img 127.0.0.1::22 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"--annotation"* ]]
+}
+@test "build_run_args does not pass --annotation on docker (podman-only feature)" {
+  ENGINE=docker
+  ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=krun \
+    build_run_args box img 127.0.0.1::22 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"--annotation"* ]]
+}
