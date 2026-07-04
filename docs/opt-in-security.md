@@ -38,18 +38,27 @@ or container escape is contained by the VM. Enable it through the **same**
 - **krun** (libkrun, Podman-native): `ISOPOD_RUNTIME=krun isopod create …`
 - **Kata Containers** (pluggable Firecracker / Cloud Hypervisor / QEMU backend):
   `ISOPOD_RUNTIME=kata isopod create …`
+- **crun-vm** (run a VM disk image as an OCI container): `ISOPOD_RUNTIME=crun-vm …`
 
 Because isopod brings a box up entirely over SSH (no `engine exec`/`cp`), every
-operation — clone, copy-in, export, fetch, shell — enters the guest correctly
-under a microVM.
+operation — clone, copy-in, export, fetch, remap, shell — enters the guest
+correctly under a microVM. (`engine exec` does **not** enter a krun guest, which
+is exactly why isopod never uses it.)
+
+isopod fails closed on the runtime: if you configure a Tier 2/3 runtime that is
+not registered with your engine or on `PATH`, `isopod create` stops with a clear
+error before starting instead of silently running the box without the isolation
+you asked for.
 
 ### What you must do on the host
 
 Both engines need **`/dev/kvm`** (bare metal or a KVM-enabled VM; nested virt is
 often off in cloud CI) and a microVM runtime **registered under the name you
-pass to `ISOPOD_RUNTIME`**. `isopod doctor` reports `/dev/kvm` and whether the
-runtime is found. Package names and binary paths vary by distro — doctor is the
-check that it's wired up.
+pass to `ISOPOD_RUNTIME`**. `isopod doctor` reports `/dev/kvm`, whether the
+configured runtime is found, and — when no runtime is set — **auto-detects which
+sandboxed runtimes (krun, crun-vm, kata, runsc) are already available to enable**,
+so you can see your options at a glance. Package names and binary paths vary by
+distro — doctor is the check that it's wired up.
 
 **Podman + krun** (lightest path — krun is a [crun](https://github.com/containers/crun)
 handler backed by [libkrun](https://github.com/containers/libkrun), so it's
@@ -92,6 +101,18 @@ guest with a default (2g; override with `--memory` or `ISOPOD_MICROVM_MEMORY`),
 since a microVM boots a fixed-size guest. The Tier 1 fingerprint masks become
 largely redundant under a microVM — the guest has its own `/proc` and `/sys`, so
 they are left on but cost nothing.
+
+### Tuning the guest (krun annotations)
+
+libkrun reads `krun.*` OCI annotations to tune the guest. Pass them with
+`ISOPOD_MICROVM_ANNOTATIONS` (a space-separated `key=value` list); isopod adds
+each as a `--annotation` when a microVM runtime is active. This is **Podman-only**
+— annotations are a crun/krun feature, and `docker run` has no `--annotation`.
+
+```sh
+# allow nested virtualization inside the box (e.g. to run KVM workloads in-guest)
+ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=krun isopod create dev
+```
 
 > A microVM adds a **kernel** boundary, not a **network** one. A box under Kata or
 > krun still reaches your LAN the same way — pair it with egress isolation below to

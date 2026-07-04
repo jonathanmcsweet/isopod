@@ -198,8 +198,9 @@ Both run over the box's SSH connection, so the box must be **running** (`isopod 
 `ISOPOD_BUILD_ARGS` — extra args for `build` (e.g. `--network=host`, 
 `--build-arg http_proxy=...` behind corporate proxies). 
 `ISOPOD_RUN_ARGS` — extra args for `run` (e.g. `--network=none` for an offline container, `--userns=keep-id`, custom DNS).
-`ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata`, `krun`; needs `/dev/kvm`).
+`ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata`, `krun`, `crun-vm`; needs `/dev/kvm`). A configured runtime that isn't registered with the engine fails `create` closed with a clear error.
 `ISOPOD_MICROVM_MEMORY` — default guest memory when a Tier 3 microVM runtime is active and no `--memory` is given (default `2g`). 
+`ISOPOD_MICROVM_ANNOTATIONS` — space-separated `krun.*` OCI annotations passed to a microVM guest (e.g. `krun.nested_virt=1`); Podman only. 
 `ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
 
 `ISOPOD_SSH_WAIT_TRIES` — how many 1s attempts `create`/`start` make waiting for sshd before giving up (default `30`).

@@ -52,6 +52,49 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
       "${opts[@]}" "dev@127.0.0.1" "${rcmd[@]}"
 }
 
+# Resolve a Tier 3 microVM runtime to test under, or skip. Honors
+# ISOPOD_TEST_MICROVM_RUNTIME (default: krun); needs /dev/kvm and the runtime on
+# PATH or registered with a present engine. Echoes the runtime name.
+_microvm_runtime_or_skip() {
+  local rt="${ISOPOD_TEST_MICROVM_RUNTIME:-krun}"
+  [ -e /dev/kvm ] || skip "no /dev/kvm (Tier 3 microVM needs hardware virtualization)"
+  if ! command -v "$rt" >/dev/null 2>&1 &&
+    ! { command -v podman >/dev/null 2>&1 && podman info 2>/dev/null | grep -qw -- "$rt"; } &&
+    ! { command -v docker >/dev/null 2>&1 && docker info 2>/dev/null | grep -qw -- "$rt"; }; then
+    skip "microVM runtime '$rt' not available (register it, or set ISOPOD_TEST_MICROVM_RUNTIME)"
+  fi
+  printf '%s' "$rt"
+}
+
+@test "live: fetch and export work under a Tier 3 microVM runtime (no engine exec)" {
+  local rt; rt="$(_microvm_runtime_or_skip)"
+  # Create the box under a real microVM. Every isopod data path is SSH-driven, so
+  # this is the end-to-end proof that create/fetch/export keep working under a
+  # separate guest kernel — where the engine's own `exec`/`cp` would not enter.
+  ISOPOD_RUNTIME="$rt" run "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
+  assert_success
+  run bssh -o ConnectTimeout=45 -- whoami
+  assert_success
+  assert_output "dev"
+  # fetch: seed git history in-box, pull it to a host repo over the SSH transport.
+  bssh -- sh -c '
+    cd /home/dev/workspace &&
+    git init -q -b main && git config user.email t@t && git config user.name t &&
+    echo micro > f.txt && git add f.txt && git commit -qm "feat: microvm seed"'
+  local host_repo="$TEST_TMP/host-repo"; mkdir -p "$host_repo"; git -C "$host_repo" init -q
+  run "$ISOPOD_ROOT/isopod" fetch "$BOX" "$host_repo"
+  assert_success
+  run git -C "$host_repo" log --oneline "$BOX/main"
+  assert_output --partial "microvm seed"
+  # export: stream the workspace out as a tar archive (also over SSH). export
+  # creates the dest itself and refuses a pre-existing one, so don't mkdir it.
+  local dest="$TEST_TMP/exported"
+  run "$ISOPOD_ROOT/isopod" export "$BOX" "$dest"
+  assert_success
+  run cat "$dest/f.txt"
+  assert_output "micro"
+}
+
 @test "live: a created box is reachable over ssh as the dev user" {
   run "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   assert_success
