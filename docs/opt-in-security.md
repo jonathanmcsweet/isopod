@@ -1,8 +1,17 @@
-# Opt-in Security Features
+# Security Features and Defaults
 
-These features are **off by default** because they require host-side setup. They
-complement the always-on [fingerprint hardening](../README.md#fingerprint-hardening)
-and [isolation model](../README.md#the-isolation-model) described in the README.
+As of v2.0.0 the two strongest features are **on by default**: `isopod create`
+runs the box in a **microVM** (its own guest kernel) when a microVM runtime and
+`/dev/kvm` are available, and network egress uses the **allow-list**. When a
+default can't be honored, isopod degrades with a warning rather than failing —
+the runtime falls back microVM → gVisor → plain container, and egress falls back
+allow-list → lan-deny → open. Force a plain container with `isopod create
+--container`; turn egress off with `ISOPOD_EGRESS=off` or a `no-egress` directive.
+
+The runtimes below still need host-side setup (installing/registering the runtime
+with your engine). They complement the always-on
+[fingerprint hardening](../README.md#fingerprint-hardening) and
+[isolation model](../README.md#the-isolation-model) described in the README.
 
 ## gVisor (`runsc`) syscall-virtualizing runtime
 

@@ -194,6 +194,15 @@ EOF
   assert_stub_called 'podman run .*--memory 4g'
 }
 
+@test "create --container runs a plain container and records container mode" {
+  # --container forces Tier 1 even when a runtime is configured.
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --container --color teal
+  assert_success
+  assert_stub_not_called 'podman run .*--runtime'
+  assert_stub_not_called 'podman run .*--memory 2g' # no microVM memory default
+  grep -qx 'runtime=container' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+}
+
 @test "create builds the base image from share/Dockerfile with build args" {
   run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success

@@ -247,10 +247,30 @@ teardown() { isopod_teardown_env; }
 }
 
 # ---- network egress isolation (`egress lan-deny`) ----------------------------
-@test "active_egress is off by default" {
+@test "active_egress defaults to allow-list" {
   run active_egress
   assert_success
+  assert_output "allow-list"
+}
+@test "active_egress: a bare no-egress directive overrides the default" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'no-egress\n' >"$ISOPOD_CONFIG_DIR/hardening.conf"
+  run active_egress
   assert_output ""
+}
+@test "active_egress: ISOPOD_EGRESS=off overrides the default" {
+  ISOPOD_EGRESS=off run active_egress
+  assert_output ""
+}
+@test "egress_explicitly_set: false at the default, true via env or a directive" {
+  run egress_explicitly_set
+  assert_failure
+  ISOPOD_EGRESS=off run egress_explicitly_set
+  assert_success
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'no-egress\n' >"$ISOPOD_CONFIG_DIR/hardening.conf"
+  run egress_explicitly_set
+  assert_success
 }
 @test "active_egress reads lan-deny from the user override" {
   mkdir -p "$ISOPOD_CONFIG_DIR"
@@ -286,9 +306,16 @@ teardown() { isopod_teardown_env; }
   [[ "$joined" == *"--cap-drop NET_RAW"* ]]
   [[ "$joined" == *"--cap-drop NET_ADMIN"* ]]
 }
-@test "build_run_args omits egress flags by default" {
+@test "build_run_args uses allow-list egress flags by default" {
   ENGINE=podman
   build_run_args box img 127.0.0.1::22 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--network isopod0"* ]]
+  [[ "$joined" == *"http_proxy=http://10.88.7.1:8118"* ]]
+}
+@test "build_run_args omits egress flags when egress is off" {
+  ENGINE=podman
+  ISOPOD_EGRESS=off build_run_args box img 127.0.0.1::22 "" ""
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" != *"--network isopod0"* ]]
   [[ "$joined" != *"--cap-drop NET_RAW"* ]]
@@ -384,9 +411,22 @@ EOF
 }
 
 @test "egress_preflight is a no-op when egress is off" {
-  run egress_preflight podman
+  ISOPOD_EGRESS=off run egress_preflight podman
   assert_success
   assert_output ""
+}
+@test "resolve_egress degrades default-on egress to off on a rootless engine" {
+  make_stub podman 0 "true" # rootless => cannot enforce
+  resolve_egress podman
+  run active_egress
+  assert_output ""
+}
+@test "resolve_egress leaves an explicitly requested egress mode untouched" {
+  make_stub podman 0 "true" # rootless
+  export ISOPOD_EGRESS=lan-deny
+  resolve_egress podman # explicit: must NOT downgrade (preflight fails closed)
+  run active_egress
+  assert_output "lan-deny"
 }
 @test "egress_preflight refuses a rootless engine (fails closed)" {
   make_stub podman 0 "true" # rootless
@@ -619,6 +659,48 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   assert_success
   # krun (Tier 3) must appear before runsc (Tier 2)
   [[ "$output" == krun*runsc* ]]
+}
+
+# ---- default runtime resolution (microVM by default, --container opt-out) -----
+@test "resolve_runtime selects a microVM by default when one is runnable" {
+  [ -e /dev/kvm ] || skip "no /dev/kvm on this host — microVM is not runnable"
+  _stub_podman_runtimes crun runc krun
+  resolve_runtime podman 0
+  run active_runtime
+  assert_output "krun"
+}
+@test "resolve_runtime falls back to gVisor when no microVM is runnable" {
+  # Only runsc (Tier 2, no KVM needed) is registered; no microVM available.
+  _stub_podman_runtimes runc runsc
+  resolve_runtime podman 0
+  run active_runtime
+  assert_output "runsc"
+}
+@test "resolve_runtime falls back to a plain container when nothing is available" {
+  _stub_podman_runtimes runc
+  resolve_runtime podman 0
+  run active_runtime
+  assert_output ""
+}
+@test "resolve_runtime honors an explicitly configured runtime" {
+  _stub_podman_runtimes runc runsc
+  export ISOPOD_RUNTIME=runsc
+  resolve_runtime podman 0
+  run active_runtime
+  assert_output "runsc"
+}
+@test "resolve_runtime with --container forces a plain container" {
+  _stub_podman_runtimes runc runsc # runsc is available but must be ignored
+  resolve_runtime podman 1
+  run active_runtime
+  assert_output ""
+}
+@test "resolve_runtime: --container overrides an explicitly configured runtime" {
+  _stub_podman_runtimes runc krun
+  export ISOPOD_RUNTIME=krun
+  resolve_runtime podman 1
+  run active_runtime
+  assert_output ""
 }
 
 # ---- microVM OCI annotations (build_run_args) --------------------------------
