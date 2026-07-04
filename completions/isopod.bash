@@ -60,7 +60,7 @@ _isopod() {
   if [[ "$cur" == -* ]]; then
     local opts=""
     case "$sub" in
-      create) opts="--repo --branch --copy --color --image --dockerfile --expose --engine --memory --cpus --port --no-sudo" ;;
+      create) opts="--repo --branch --copy --color --image --dockerfile --expose --engine --memory --cpus --port --no-sudo --container" ;;
       reconfigure) opts="--expose --memory --cpus --color" ;;
       code) opts="--app" ;;
       rm) opts="--force" ;;
