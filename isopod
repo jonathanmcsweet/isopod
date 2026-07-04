@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="1.7.0"
+ISOPOD_VERSION="2.0.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -230,6 +230,14 @@ box_dir() { printf '%s/%s' "$BOXES_DIR" "$1"; }
 
 require_box() {
   [ -d "$(box_dir "$1")" ] || die "no such sandbox: '$1' (see: isopod list)"
+}
+
+# Common command entry: assert the box exists and select the engine it was
+# created with (sets ENGINE). Commands that mutate shared state call acquire_lock
+# themselves afterwards, since whether/why they lock varies.
+open_box() { # open_box <name>
+  require_box "$1"
+  detect_engine "$(meta_get "$1" engine || true)"
 }
 
 meta_get() { # meta_get <name> <key>
@@ -666,6 +674,18 @@ auto_color() { # auto_color <name> -> a preset derived from the name (stable)
   preset_color "${presets[$idx]}"
 }
 
+# Resolve a color to a #rrggbb hex: a 6-hex value (with/without '#') passes
+# through; anything else is a preset name. Prints the hex, or returns 1 for an
+# unknown preset so the caller dies with its own message.
+resolve_color() { # resolve_color <preset|hex>
+  local c="$1"
+  if [[ "$c" =~ ^#?[0-9a-fA-F]{6}$ ]]; then
+    printf '%s' "#${c#\#}"
+  else
+    preset_color "$c"
+  fi
+}
+
 # Write/merge .vscode/settings.json inside the box so every IDE window
 # attached to this box is tinted. Lives in the container, not on the host.
 # The merge logic lives in lib/apply_color.py; we stream it into the box over
@@ -745,6 +765,10 @@ parse_hardening() {
 
   # env var wins over the profile so it can be toggled per invocation.
   HARD_RUNTIME="${ISOPOD_RUNTIME:-$runtime}"
+  # --container (resolve_runtime) forces a plain Tier 1 container: no runtime flag,
+  # overriding ISOPOD_RUNTIME and any `runtime` directive. Keep this in step with
+  # the same check in active_runtime so the run flag and the resolved tier agree.
+  [ "${ISOPOD_FORCE_CONTAINER:-0}" = 1 ] && HARD_RUNTIME=""
   # Copy into the globals, dropping any empty slots an unmask left behind, so
   # callers can trust "${#HARD_FMASKS[@]}" as a real count.
   for m in "${masks[@]:-}"; do [ -n "$m" ] && HARD_MASKS+=("$m"); done
@@ -779,6 +803,9 @@ hardening_run_args() { # hardening_run_args <engine>
 # flags: ISOPOD_RUNTIME wins, else the last `runtime`/`no-runtime` across the
 # shipped baseline and the user override. Echoes nothing when no runtime is set.
 active_runtime() {
+  # --container (resolve_runtime sets this): force a plain Tier 1 container,
+  # overriding any configured runtime. Wins over ISOPOD_RUNTIME / directives.
+  [ "${ISOPOD_FORCE_CONTAINER:-0}" = 1 ] && return 0
   if [ -n "${ISOPOD_RUNTIME:-}" ]; then
     printf '%s' "$ISOPOD_RUNTIME"
     return 0
@@ -885,30 +912,109 @@ detect_sandboxed_runtimes() {
   printf '%s' "$out"
 }
 
+# True when a runtime can actually run a box under <engine> right now: it is
+# available (on PATH / registered), and — for a Tier 3 microVM — the host has
+# hardware virtualization (/dev/kvm on Linux; assumed present off-Linux, where the
+# engine runs in its own VM). Used to pick the default runtime and to fall back.
+_runtime_runnable() { # _runtime_runnable <engine> <name>
+  local engine="$1" name="$2" tier
+  runtime_available "$engine" "$name" || return 1
+  tier="$(runtime_tier "$name" 2>/dev/null || true)"
+  if [ "$tier" = 3 ] && [ "$(uname -s)" = Linux ] && [ ! -e /dev/kvm ]; then
+    return 1 # microVM runtime present but no KVM to back it
+  fi
+  return 0
+}
+
+# Resolve the EFFECTIVE runtime for a create, defaulting to a microVM.
+# Precedence:
+#   1. --container      -> plain Tier 1 container (sets ISOPOD_FORCE_CONTAINER)
+#   2. explicit runtime -> honored as-is (ISOPOD_RUNTIME / `runtime` directive)
+#   3. default          -> strongest RUNNABLE sandbox: a microVM (krun/crun-vm/
+#      kata) if one is installed and KVM is present, else gVisor (runsc), else a
+#      plain container. Each step down from a microVM warns loudly.
+# Sets ISOPOD_RUNTIME (or ISOPOD_FORCE_CONTAINER) in-process for the rest of the run.
+resolve_runtime() { # resolve_runtime <engine> <container_opt 0|1>
+  local engine="$1" container_opt="${2:-0}" explicit rt
+  explicit="$(active_runtime)"
+  if [ "$container_opt" = 1 ]; then
+    [ -n "$explicit" ] &&
+      info "--container overrides the configured runtime '$explicit' — running as a plain container"
+    export ISOPOD_FORCE_CONTAINER=1
+    return 0
+  fi
+  [ -n "$explicit" ] && return 0 # user picked a runtime; respect it
+  # Default: pick the strongest runnable sandbox, microVM first.
+  for rt in krun crun-vm kata-runtime; do
+    if _runtime_runnable "$engine" "$rt"; then
+      export ISOPOD_RUNTIME="$rt"
+      info "microVM runtime '$rt' selected by default (strong isolation; opt out with --container)"
+      return 0
+    fi
+  done
+  warn "no usable microVM runtime found (need krun, crun-vm, or kata + /dev/kvm). isopod defaults
+   to a microVM for isolation; falling back to a weaker sandbox. Install a microVM runtime for
+   full isolation, or pass --container to select a plain container without this warning."
+  if _runtime_runnable "$engine" runsc; then
+    export ISOPOD_RUNTIME="runsc"
+    warn "using gVisor (runsc, Tier 2 syscall sandbox) instead of a microVM"
+    return 0
+  fi
+  warn "no sandboxed runtime available — running as a PLAIN CONTAINER (Tier 1, weakest isolation).
+   Install a microVM runtime (krun/crun-vm/kata) or gVisor (runsc) to harden. See: isopod doctor"
+  export ISOPOD_FORCE_CONTAINER=1
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # network egress isolation (`egress lan-deny`)
 # ---------------------------------------------------------------------------
 # Resolve the egress mode the same way as active_runtime: ISOPOD_EGRESS wins,
 # else the last `egress`/`no-egress` across the baseline and the user override.
-# Echoes "lan-deny" or "" (off). `off` in the profile means the same as unset.
+# Echoes "allow-list", "lan-deny", or "" (off). The DEFAULT (nothing configured
+# anywhere) is the strict "allow-list" — egress isolation is on by default so a
+# box cannot exfiltrate to arbitrary hosts. An explicit `off`/`no-egress` (or
+# ISOPOD_EGRESS=off) still turns it off; see egress_explicitly_set.
 active_egress() {
-  local r="${ISOPOD_EGRESS:-}"
-  if [ -z "$r" ]; then
+  local r
+  if [ -n "${ISOPOD_EGRESS+x}" ]; then
+    r="$ISOPOD_EGRESS" # env set (even to "off"/"") — an explicit choice
+  else
+    r="__unset__"
     local f key val _
     for f in "$HARDENING_CONF" "$USER_HARDENING_CONF"; do
       [ -f "$f" ] || continue
       while read -r key val _; do
         case "$key" in
           egress) r="$val" ;;
-          no-egress) r="" ;;
+          no-egress) r="off" ;;
         esac
       done <"$f"
     done
   fi
+  # Nothing configured anywhere -> default to the strict allow-list.
+  [ "$r" = "__unset__" ] && r="allow-list"
   # Only the two known modes are "on"; anything else (off, blank, a typo) is
   # treated as disabled so a bad directive fails safe rather than half-enabling.
   case "$r" in lan-deny | allow-list) ;; *) r="" ;; esac
   printf '%s' "$r"
+}
+
+# True when the egress mode was chosen explicitly (ISOPOD_EGRESS set, or an
+# `egress`/`no-egress` directive in a profile), vs. left at the default. Callers
+# use this to keep the fail-closed preflight for boxes that ASKED for egress,
+# while letting the default-on egress degrade gracefully instead of blocking a
+# create (see resolve_egress).
+egress_explicitly_set() {
+  [ -n "${ISOPOD_EGRESS+x}" ] && return 0
+  local f key _
+  for f in "$HARDENING_CONF" "$USER_HARDENING_CONF"; do
+    [ -f "$f" ] || continue
+    while read -r key _; do
+      case "$key" in egress | no-egress) return 0 ;; esac
+    done <"$f"
+  done
+  return 1
 }
 
 # The active nftables ruleset for the current mode: the default LAN-deny rules,
@@ -1138,6 +1244,54 @@ egress_doctor_engines_and_fw() {
   esac
 }
 
+# Resolve the EFFECTIVE egress mode for a create/reconfigure, degrading the
+# default-on egress instead of blocking the box. Egress is on by default now
+# (active_egress -> allow-list), but the strict modes need a rootful engine, a
+# running proxy, and a loaded host firewall. When egress was chosen EXPLICITLY
+# this is a no-op — egress_preflight keeps failing closed, since the user asked
+# for it. When egress is only on by DEFAULT, walk it down with a loud warning:
+#   allow-list -> lan-deny (proxy not up) -> off (rootless / firewall not loaded)
+# Sets ISOPOD_EGRESS in-process so the rest of the run (preflight, build_run_args)
+# sees the achievable mode. Silence any degrade with ISOPOD_EGRESS=off.
+resolve_egress() { # resolve_egress <engine>
+  local engine="$1" mode
+  mode="$(active_egress)"
+  [ -n "$mode" ] || return 0        # already off
+  egress_explicitly_set && return 0 # opt-in: leave fail-closed preflight in charge
+  # Rootless engine cannot enforce either mode (no host bridge) -> open network.
+  if ! egress_can_enforce "$engine"; then
+    warn "egress is on by default but '$engine' is rootless and cannot enforce it — continuing
+     with an OPEN network. Use a rootful podman/docker for isolation, or set ISOPOD_EGRESS=off
+     to silence this."
+    export ISOPOD_EGRESS=off
+    return 0
+  fi
+  # allow-list needs the filtering proxy; if it is definitively stopped, drop to
+  # lan-deny (LAN block without the proxy) rather than leaving the box no route out.
+  if [ "$mode" = allow-list ]; then
+    local prc=0
+    egress_proxy_active || prc=$?
+    if [ "$prc" = 1 ]; then
+      warn "egress allow-list is on by default but its filtering proxy ($ISOPOD_EGRESS_PROXY_UNIT)
+       is not running — falling back to lan-deny. Enable the full allow-list with:
+       sudo isopod egress apply"
+      export ISOPOD_EGRESS=lan-deny
+      mode=lan-deny
+    fi
+  fi
+  # Host firewall definitively not loaded -> the LAN block would not be in effect;
+  # continue open rather than fail the create (the explicit path still dies).
+  local rc=0
+  egress_rules_loaded || rc=$?
+  if [ "$rc" = 1 ]; then
+    warn "egress is on by default but the host firewall is not loaded, so the block would not be
+     in effect — continuing with an OPEN network. Load it with 'sudo isopod egress apply', or set
+     ISOPOD_EGRESS=off to silence this."
+    export ISOPOD_EGRESS=off
+  fi
+  return 0
+}
+
 # Preflight for a box that will run under `egress lan-deny`: the engine must be
 # able to enforce it, the dedicated network must exist, and the host firewall
 # should already be loaded. Called before build_run_args in create/reconfigure.
@@ -1188,6 +1342,26 @@ egress_preflight() { # egress_preflight <engine>
        not run it, load it with:  sudo isopod egress apply   — verify:  sudo isopod egress status" ;;
   esac
   return 0
+}
+
+# Validate --expose specs ('PORT' or 'HOSTPORT:CONTAINERPORT') into the global
+# EXPOSE_SPECS array (bash can't return arrays); dies on a bad spec. Shared by
+# create and reconfigure so the two can't drift. build_run_args publishes each on
+# 127.0.0.1 only. Fills in the caller's process (not a subshell) so `die` aborts.
+EXPOSE_SPECS=()
+parse_expose_specs() { # parse_expose_specs <spec...>
+  EXPOSE_SPECS=()
+  local spec host_p ctr_p
+  for spec in "$@"; do
+    [ -z "$spec" ] && continue
+    case "$spec" in
+      *:*) host_p="${spec%%:*}" ctr_p="${spec##*:}" ;;
+      *) host_p="$spec" ctr_p="$spec" ;;
+    esac
+    valid_port "$host_p" && valid_port "$ctr_p" ||
+      die "invalid --expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
+    EXPOSE_SPECS+=("$host_p:$ctr_p")
+  done
 }
 
 # Assemble the `$ENGINE run` argument list for a box into the global RUN_ARGS
@@ -1277,6 +1451,7 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
 cmd_create() {
   local name="" repo="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
+  local container_opt=0
   local -a copies=() exposes=()
 
   while [ $# -gt 0 ]; do
@@ -1334,6 +1509,10 @@ cmd_create() {
         no_sudo=1
         shift
         ;;
+      --container)
+        container_opt=1
+        shift
+        ;;
       -h | --help)
         usage
         exit 0
@@ -1383,34 +1562,24 @@ cmd_create() {
     [ -e "$p" ] || die "--copy path does not exist: $p"
   done
 
-  # Resolve --expose specs into loopback-only port publishings. A spec is either
-  # 'PORT' (host port = container port) or 'HOSTPORT:CONTAINERPORT'. Bound to
-  # 127.0.0.1 only, matching the SSH binding — a box never listens on all host
-  # interfaces unless you opt in with ISOPOD_RUN_ARGS.
-  local -a expose_specs=()
-  local spec host_p ctr_p
-  for spec in "${exposes[@]:-}"; do
-    [ -z "$spec" ] && continue
-    case "$spec" in
-      *:*) host_p="${spec%%:*}" ctr_p="${spec##*:}" ;;
-      *) host_p="$spec" ctr_p="$spec" ;;
-    esac
-    valid_port "$host_p" && valid_port "$ctr_p" ||
-      die "invalid --expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
-    expose_specs+=("$host_p:$ctr_p")
-  done
+  # Validate --expose specs into loopback-only port publishings (EXPOSE_SPECS).
+  parse_expose_specs "${exposes[@]:-}"
 
-  # resolve color
+  # resolve color: default auto-rotates from the name; else preset/hex
   local hex=""
   if [ -z "$color" ]; then
     hex=$(auto_color "$name")
-  elif [[ "$color" =~ ^#?[0-9a-fA-F]{6}$ ]]; then
-    hex="#${color#\#}"
   else
-    hex=$(preset_color "$color") || die "unknown color '$color' (use a preset or '#rrggbb')"
+    hex=$(resolve_color "$color") || die "unknown color '$color' (use a preset or '#rrggbb')"
   fi
 
   detect_engine "$engine_opt"
+
+  # Resolve the effective runtime (microVM by default, --container to opt out) and
+  # egress mode (allow-list by default, degrades gracefully) BEFORE the microVM
+  # memory sizing and the preflights below, which both read the resolved values.
+  resolve_runtime "$ENGINE" "$container_opt"
+  resolve_egress "$ENGINE"
 
   # --dockerfile: build the project's Dockerfile first and use it as the base the
   # sandbox layers sshd/git onto (same role as --image, you just hand over a
@@ -1454,7 +1623,7 @@ cmd_create() {
   # start, so a missing/unregistered runtime fails early and clearly instead of
   # as a cryptic engine error (no-op when no runtime is configured).
   runtime_preflight "$ENGINE"
-  build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${expose_specs[@]}"
+  build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${EXPOSE_SPECS[@]:-}"
 
   info "Starting container ($ENGINE)..."
   "$ENGINE" "${RUN_ARGS[@]}" >/dev/null
@@ -1468,12 +1637,15 @@ cmd_create() {
     printf 'color=%s\n' "$hex"
     printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'sudo=%s\n' "$BOX_SUDO"
+    # Record the effective runtime so reconfigure reproduces the box's isolation
+    # tier rather than re-defaulting. "container" == plain Tier 1 (no runtime).
+    printf 'runtime=%s\n' "$(active_runtime 2>/dev/null | grep . || printf container)"
     printf 'port=%s\n' "$hostport"
     printf 'memory=%s\n' "$memory"
     printf 'cpus=%s\n' "$cpus"
     printf 'expose=%s\n' "$(
       IFS=,
-      printf '%s' "${expose_specs[*]:-}"
+      printf '%s' "${EXPOSE_SPECS[*]:-}"
     )"
   } >"$(box_dir "$name")/meta"
   write_box_config "$name"
@@ -1544,16 +1716,14 @@ cmd_copy_in() {
   local name="${1:-}"
   shift || true
   [ -n "$name" ] && [ $# -gt 0 ] || die "usage: isopod copy-in <name> <path>..."
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   do_copy_in "$name" "$@"
 }
 
 cmd_export() {
   local name="${1:-}" dest="${2:-}"
   [ -n "$name" ] || die "usage: isopod export <name> [dest-dir]"
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   dest="${dest:-./isopod-$name-export}"
   [ -e "$dest" ] && die "destination already exists: $dest"
   info "Copying $WORKSPACE out of the box to $dest ..."
@@ -1955,8 +2125,7 @@ cmd_list() {
 cmd_info() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod info <name>"
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   acquire_lock # refresh_port may rewrite the shared ssh_config
   refresh_port "$name"
   local forwards
@@ -1968,8 +2137,7 @@ cmd_info() {
 cmd_start() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod start <name>"
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   acquire_lock # refresh_port may rewrite the shared ssh_config
   "$ENGINE" start "$(ctr_name "$name")" >/dev/null
   refresh_port "$name"
@@ -1980,8 +2148,7 @@ cmd_start() {
 cmd_stop() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod stop <name>"
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   "$ENGINE" stop "$(ctr_name "$name")" >/dev/null
   info "stopped '$name'"
 }
@@ -2036,9 +2203,22 @@ cmd_reconfigure() {
     esac
   done
   [ -n "$name" ] || die "usage: isopod reconfigure <name> [--memory|--cpus|--color|--expose ...]"
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   acquire_lock
+
+  # Reproduce the box's isolation tier: recreate it under the SAME runtime it was
+  # created with, rather than re-defaulting (which could silently flip a plain
+  # container into a microVM, or vice versa). "container" == plain Tier 1. A box
+  # created before this was recorded (no key) falls back to the current default.
+  local saved_rt
+  saved_rt=$(meta_get "$name" runtime 2>/dev/null || true)
+  case "$saved_rt" in
+    container) export ISOPOD_FORCE_CONTAINER=1 ;;
+    "") resolve_runtime "$ENGINE" 0 ;;
+    *) export ISOPOD_RUNTIME="$saved_rt" ;;
+  esac
+  # Degrade default-on egress gracefully instead of blocking the recreate.
+  resolve_egress "$ENGINE"
 
   # config.yaml is the source of truth (synthesize it for pre-feature boxes),
   # with any flags overriding individual fields.
@@ -2054,19 +2234,8 @@ cmd_reconfigure() {
   [ "$color_set" = 1 ] && d_color="$color"
   [ "$expose_set" = 1 ] && d_expose=("${exposes[@]}")
 
-  # validate + normalize the exposes
-  local -a expose_specs=()
-  local spec host_p ctr_p
-  for spec in "${d_expose[@]:-}"; do
-    [ -z "$spec" ] && continue
-    case "$spec" in
-      *:*) host_p="${spec%%:*}" ctr_p="${spec##*:}" ;;
-      *) host_p="$spec" ctr_p="$spec" ;;
-    esac
-    valid_port "$host_p" && valid_port "$ctr_p" ||
-      die "invalid expose '$spec' (use PORT or HOSTPORT:CONTAINERPORT, 1-65535)"
-    expose_specs+=("$host_p:$ctr_p")
-  done
+  # validate + normalize the exposes into EXPOSE_SPECS
+  parse_expose_specs "${d_expose[@]:-}"
   [ -n "$d_memory" ] && { valid_memory "$d_memory" || die "invalid memory '$d_memory' (e.g. 512m, 2g)"; }
   [ -n "$d_cpus" ] && { valid_cpus "$d_cpus" || die "invalid cpus '$d_cpus' (a positive number, e.g. 1 or 1.5)"; }
 
@@ -2074,11 +2243,7 @@ cmd_reconfigure() {
   local hex
   hex=$(meta_get "$name" color || true)
   if [ -n "$d_color" ]; then
-    if [[ "$d_color" =~ ^#?[0-9a-fA-F]{6}$ ]]; then
-      hex="#${d_color#\#}"
-    else
-      hex=$(preset_color "$d_color") || die "unknown color '$d_color' (use a preset or '#rrggbb')"
-    fi
+    hex=$(resolve_color "$d_color") || die "unknown color '$d_color' (use a preset or '#rrggbb')"
   fi
 
   local ctr
@@ -2102,7 +2267,7 @@ cmd_reconfigure() {
   local port
   port=$(meta_get "$name" port)
   "$ENGINE" rm -f "$ctr" >/dev/null 2>&1 || true
-  build_run_args "$name" "$snap" "127.0.0.1:$port:22" "$d_memory" "$d_cpus" "${expose_specs[@]}"
+  build_run_args "$name" "$snap" "127.0.0.1:$port:22" "$d_memory" "$d_cpus" "${EXPOSE_SPECS[@]:-}"
   info "Recreating the container with the new settings ($ENGINE)..."
   if ! "$ENGINE" "${RUN_ARGS[@]}" >/dev/null; then
     die "recreate failed — your snapshot is saved as '$snap'"
@@ -2113,12 +2278,13 @@ cmd_reconfigure() {
   hostport=$(resolve_port "$name") || die "could not determine published SSH port"
   meta_set "$name" image "$snap"
   meta_set "$name" port "$hostport"
+  meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
   meta_set "$name" memory "$d_memory"
   meta_set "$name" cpus "$d_cpus"
   meta_set "$name" color "$hex"
   meta_set "$name" expose "$(
     IFS=,
-    printf '%s' "${expose_specs[*]:-}"
+    printf '%s' "${EXPOSE_SPECS[*]:-}"
   )"
   write_ssh_include
   scan_host_key "$name" >/dev/null || true # keeps stderr: a key-change warning must show
@@ -2137,8 +2303,7 @@ cmd_reconfigure() {
 cmd_shell() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod shell <name>"
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   acquire_lock # may start the box and refresh the shared ssh_config
   # Start a stopped box first (like `isopod code`), so `shell` on a stopped box
   # gives a working session instead of a raw SSH connection error.
@@ -2244,8 +2409,7 @@ cmd_code() {
     esac
   done
   [ -n "$name" ] || die "usage: isopod code <name> [--app codium|cursor|windsurf|code]"
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   acquire_lock # may start the box and refresh the shared ssh_config
 
   local status
@@ -2303,8 +2467,7 @@ cmd_rm() {
     esac
   done
   [ -n "$name" ] || die "usage: isopod rm <name> [--force]"
-  require_box "$name"
-  detect_engine "$(meta_get "$name" engine || true)"
+  open_box "$name"
   if [ "$force" -ne 1 ]; then
     printf "Delete sandbox '%s'? Anything not pushed/exported is lost. [y/N] " "$name"
     read -r ans
