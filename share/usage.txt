@@ -5,7 +5,7 @@ Usage:
   isopod list                         List sandboxes and their status
   isopod info <name>                  Show connection details for a sandbox
   isopod code <name> [--app APP]      Open the sandbox in VSCodium (or APP)
-  isopod shell <name>                 Open a shell inside the sandbox
+  isopod shell <name> [-- cmd...]     Open a shell (or run cmd) inside the sandbox
   isopod start <name>                 Start a stopped sandbox
   isopod stop <name>                  Stop a running sandbox
   isopod config <name>                Show a box's editable config (config.yaml)
@@ -20,11 +20,15 @@ Usage:
   isopod doctor                       Check host prerequisites
   isopod help                         Show this help
 
-Secure by default: a box runs in a microVM (its own kernel) when a microVM
-runtime (krun/crun-vm/kata) and KVM are available, falling back to gVisor then a
-plain container; pass --container to force a plain container. Network egress uses
-the allow-list by default (only allow-listed hosts are reachable) — set
-ISOPOD_EGRESS=off or 'no-egress' in hardening.conf to turn it off.
+Secure by default: a box runs in a microVM (its own kernel) when a virtio-net
+microVM runtime (crun-vm/kata) and KVM are available, falling back to gVisor then
+a plain container; pass --container to force a plain container. (krun is a microVM
+too, but its TSI networking stalls bulk data over SSH port-forwards into the box,
+which breaks 'isopod code' Remote-SSH — so it is not auto-selected; pass
+--runtime krun to use it for shell/copy/export.) Network egress uses the
+allow-list by default (only
+allow-listed hosts are reachable) — set ISOPOD_EGRESS=off or 'no-egress' in
+hardening.conf to turn it off.
 
 Options for create (each accepts both '--opt value' and '--opt=value'):
   --repo <url>          Git repo to clone inside the box (https or ssh URL)

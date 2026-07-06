@@ -1,19 +1,35 @@
 # isopod runtime tiers — how `isopod doctor` classifies the configured runtime
-# (the hardening.conf `runtime` directive / ISOPOD_RUNTIME) and whether
-# `isopod create` sizes a default --memory for it.
+# (the hardening.conf `runtime` directive / ISOPOD_RUNTIME), whether `isopod
+# create` sizes a default --memory for it, and which runtime it auto-selects.
 #
 #   tier 2  syscall sandbox, shared host kernel, no /dev/kvm needed (e.g. gVisor)
 #   tier 3  microVM, separate guest kernel, needs /dev/kvm (e.g. Kata, krun)
 #
-# Columns: <runtime-name> <tier>. The name matches what you pass to --runtime
-# (and to the `runtime` directive / ISOPOD_RUNTIME). Unlisted runtimes still
-# work; doctor just cannot name their tier and create skips the memory default.
-runsc         2
-runsc-kvm     2
-kata          3
-kata-runtime  3
-kata-qemu     3
-kata-fc       3
-kata-clh      3
-krun          3
-crun-vm       3
+# Columns: <runtime-name> <tier> <net>. <net> is the guest network stack, which
+# decides whether SSH TCP-forwarding and bulk transfers work — VSCodium
+# Remote-SSH (`isopod code`) and `isopod copy`/`export` all depend on both:
+#   virtio    real virtio-net interface — forwarding and bulk transfers work
+#   netstack  gVisor user-space netstack (Tier 2) — works
+#   tsi       libkrun Transparent Socket Impersonation — SSH exec channels are
+#             fast, but bulk data over an SSH TCP port-forward into a guest
+#             loopback service STALLS. That is exactly how VSCodium/Cursor/
+#             JetBrains reach their remote server, so `isopod code` (Remote-SSH)
+#             can't connect. isopod's own shell/copy/export/fetch use exec
+#             channels and are unaffected. isopod never auto-selects a `tsi`
+#             runtime as the default microVM; it stays usable on explicit request
+#             (--runtime / ISOPOD_RUNTIME) for those shell/data workflows.
+#             Upstream libkrun bugs: containers/libkrun#579 (TSI drops large
+#             transfers — BufDescTooSmall) + #510 (guest loopback wrongly proxied).
+#
+# The name matches what you pass to --runtime (and the `runtime` directive /
+# ISOPOD_RUNTIME). Unlisted runtimes still work; doctor just cannot name their
+# tier and create skips the memory default.
+runsc         2  netstack
+runsc-kvm     2  netstack
+kata          3  virtio
+kata-runtime  3  virtio
+kata-qemu     3  virtio
+kata-fc       3  virtio
+kata-clh      3  virtio
+krun          3  tsi
+crun-vm       3  virtio
