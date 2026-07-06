@@ -289,3 +289,34 @@ _microvm_runtime_or_skip() {
   run bash -c "podman inspect isopod-$BOX >/dev/null 2>&1 || docker inspect isopod-$BOX >/dev/null 2>&1"
   assert_failure
 }
+
+@test "live: --secret lands in the tmpfs, survives restart, and never leaks" {
+  # Hermetic file backend — no host keychain involved.
+  export ISOPOD_SECRET_BACKEND=file
+  run bash -c "printf 'live-s3kr1t' | '$ISOPOD_ROOT/isopod' secret set LIVE_TOKEN"
+  assert_success
+  run "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --secret LIVE_TOKEN
+  assert_success
+  # value readable in-box at the default path, mode 400, owned by dev
+  run bssh -- cat /run/secrets/LIVE_TOKEN
+  assert_success
+  assert_output "live-s3kr1t"
+  run bssh -- stat -c '%a %U' /run/secrets/LIVE_TOKEN
+  assert_output "400 dev"
+  # nothing about the value is visible to the engine
+  engine=$(sed -n 's/^engine=//p' "$ISOPOD_CONFIG_DIR/boxes/$BOX/meta")
+  run "$engine" inspect "isopod-$BOX"
+  refute_output --partial "live-s3kr1t"
+  # the tmpfs empties on stop; start re-injects
+  "$ISOPOD_ROOT/isopod" stop "$BOX"
+  run "$ISOPOD_ROOT/isopod" start "$BOX"
+  assert_success
+  run bssh -- cat /run/secrets/LIVE_TOKEN
+  assert_output "live-s3kr1t"
+  # the export tarball cannot contain it (tmpfs is outside the workspace)
+  out="$TEST_TMP/out"
+  "$ISOPOD_ROOT/isopod" export "$BOX" "$out"
+  run grep -r "live-s3kr1t" "$out"
+  assert_failure
+  "$ISOPOD_ROOT/isopod" secret rm LIVE_TOKEN
+}

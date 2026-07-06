@@ -14,7 +14,7 @@ repos:
         args: ["-S", "warning"]
         # Matches the lint scope in test/run.sh. .bats files use non-standard
         # syntax shellcheck can't parse, so they're intentionally excluded.
-        files: '^(isopod|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|test/(run|packaging|egress-render|brew-formula)\.sh)$'
+        files: '^(isopod|lib/isopod\.d/[^/]+\.sh|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|test/(run|packaging|egress-render|brew-formula)\.sh)$'
 
   - repo: https://github.com/scop/pre-commit-shfmt
     rev: v3.13.1-1
@@ -23,7 +23,7 @@ repos:
         args: ["-w", "-i", "2", "-ci"]
         # Pure bash/sh only — shfmt can't parse .bats (@test) or the zsh
         # completion (completions/_isopod).
-        files: '^(isopod|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|completions/isopod\.bash|test/(run|packaging|egress-render|brew-formula)\.sh|test/helper\.bash)$'
+        files: '^(isopod|lib/isopod\.d/[^/]+\.sh|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|completions/isopod\.bash|test/(run|packaging|egress-render|brew-formula)\.sh|test/helper\.bash)$'
 
   # GitHub Actions: static lint of workflow files, on commit. Self-provisions via
   # Go (no system install). Already scoped to ^.github/workflows/ by the hook.
@@ -43,7 +43,7 @@ repos:
         name: packaging (share/ ships + templates render)
         entry: bash test/packaging.sh
         language: system
-        files: '^(isopod|install\.sh|share/.*|test/packaging\.sh)$'
+        files: '^(isopod|lib/isopod\.d/[^/]+\.sh|install\.sh|share/.*|test/packaging\.sh)$'
         pass_filenames: false
         stages: [pre-commit]
         require_serial: true
@@ -52,7 +52,7 @@ repos:
         name: egress templates render (+ nft parse where available)
         entry: bash test/egress-render.sh
         language: system
-        files: '^(isopod|security/egress.*|share/(tinyproxy\.conf\.tmpl|isopod-egress-proxy\.service\.tmpl)|test/egress-render\.sh)$'
+        files: '^(isopod|lib/isopod\.d/(egress|util)\.sh|security/egress.*|share/(tinyproxy\.conf\.tmpl|isopod-egress-proxy\.service\.tmpl)|test/egress-render\.sh)$'
         pass_filenames: false
         stages: [pre-commit]
         require_serial: true

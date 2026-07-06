@@ -17,6 +17,7 @@ Usage:
   isopod rm <name> [--force]          Delete a sandbox (container + keys + snapshots)
   isopod gc [--dry-run] [--force]     Remove isopod images no box still references
   isopod egress [status|apply|allow …]  Manage the network egress firewall/proxy
+  isopod secret [set|ls|rm] <NAME>    Manage secrets injected into boxes
   isopod doctor                       Check host prerequisites
   isopod help                         Show this help
 
@@ -60,6 +61,11 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         available, or you accept a shared-kernel sandbox.
   --port <n>            Fixed host port for SSH (default: random free port,
                         bound to 127.0.0.1 only)
+  --secret NAME[:path]  Inject secret NAME (stored via 'isopod secret set') into
+                        the box at path (default /run/secrets/NAME), repeatable.
+                        Values live in a memory-backed tmpfs and are streamed in
+                        over SSH — never in the image, env, 'inspect', export
+                        tarballs, or reconfigure snapshots. Re-injected on start.
 
 Reconfiguring a box (change run settings without starting over):
   Every box has an editable config at $CONFIG_DIR/boxes/<name>/config.yaml,
@@ -106,6 +112,13 @@ Network egress isolation (host-enforced; an in-box agent cannot turn it off):
                         (stops data exfiltration to arbitrary destinations).
   Subcommands:  status, apply (load firewall + start proxy), observe (build the
   allow-list from real traffic), allow <domain>, log [-f], denied, rules.
+
+Secrets (host-stored, injected per box):
+  'isopod secret set NAME' stores a value (stdin or hidden prompt — never argv)
+  in the OS keychain ('security' on macOS, 'secret-tool' on Linux), falling back
+  to a 0600 file under $CONFIG_DIR/secrets. 'secret ls' lists names isopod
+  manages (a secret stored outside isopod won't list); 'secret rm' deletes one.
+  Secrets are host-global: removing a box does not remove its secrets.
 
 Examples:
   isopod create myproj --repo https://github.com/me/proj --color teal

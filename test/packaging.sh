@@ -28,7 +28,7 @@ fail() {
 #    mistaken for a call — only actual code is scanned.
 while read -r tmpl; do
   [ -f "share/$tmpl" ] || fail "isopod calls render_tmpl '$tmpl' but share/$tmpl is missing"
-done < <(sed 's/#.*$//' isopod | grep -oE 'render_tmpl[[:space:]]+[A-Za-z0-9._-]+' | awk '{print $2}' | sort -u)
+done < <(sed 's/#.*$//' isopod lib/isopod.d/*.sh | grep -oE 'render_tmpl[[:space:]]+[A-Za-z0-9._-]+' | awk '{print $2}' | sort -u)
 ok "every render_tmpl reference has a share/ file"
 
 # 1b. The base image build reads share/Dockerfile at runtime — it must exist.
