@@ -29,7 +29,6 @@ host:
     runc: [/usr/bin/runc]
     runsc: [/usr/bin/runsc]
     kata-runtime: [/usr/bin/kata-runtime]
-    crun-vm: [/usr/bin/crun-vm]
 INFO
            exit 0 ;;
   image)   # 'image exists' / 'image inspect' -> pretend image is missing once

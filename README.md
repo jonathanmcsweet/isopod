@@ -116,7 +116,7 @@ Verify from inside a container: after hardening, `cat /proc/cmdline` (podman) an
 ### Security defaults and how to adjust them
 See **[docs/opt-in-security.md](docs/opt-in-security.md)** for details and tuning:
 
-- **microVM by default** — `isopod create` runs the box in a per-box guest kernel behind a KVM boundary (krun/crun-vm/Kata) when a microVM runtime and `/dev/kvm` are available. If not, it falls back to gVisor (`runsc`), then a plain container, with a warning. Pass **`--container`** to force a plain shared-kernel container.
+- **microVM by default** — `isopod create` runs the box in a per-box guest kernel behind a KVM boundary (Kata) when a virtio-net microVM runtime and `/dev/kvm` are available. If not, it falls back to gVisor (`runsc`), then a plain container, with a warning. Pass **`--container`** to force a plain shared-kernel container. (`krun` is a microVM too, but its libkrun **TSI** networking stalls bulk data over an SSH port-forward into the box — the path VSCodium/Cursor/JetBrains use to reach their remote server — so `isopod code` can't connect and krun is **not** auto-selected. Its SSH exec path is fast, so it stays available via `--runtime krun` / `ISOPOD_RUNTIME=krun` for `isopod shell`/copy/export.)
 - **Network egress allow-list by default (`egress allow-list`)** — a host-side filtering proxy is the box's only route out and permits only allow-listed hostnames, to limit data exfiltration. When it can't be enforced (rootless engine, firewall/proxy not loaded) a default-on box degrades with a warning (allow-list → lan-deny → open). Turn it off with `ISOPOD_EGRESS=off` or `no-egress`.
 - **gVisor (`runsc`)** — the Tier 2 fallback / an explicit `runtime runsc`: a syscall-virtualizing runtime that hides CPU/kernel/boot identity while sharing the host kernel.
 - **Network egress isolation (`egress lan-deny`)** — the lighter mode / degrade target: a host firewall that stops a rogue agent from mapping your LAN, the host, cloud metadata, or internal DNS, while keeping published ports and public internet working.
@@ -199,7 +199,7 @@ Both run over the box's SSH connection, so the box must be **running** (`isopod 
 `ISOPOD_BUILD_ARGS` — extra args for `build` (e.g. `--network=host`, 
 `--build-arg http_proxy=...` behind corporate proxies). 
 `ISOPOD_RUN_ARGS` — extra args for `run` (e.g. `--network=none` for an offline container, `--userns=keep-id`, custom DNS).
-`ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata`, `krun`, `crun-vm`; needs `/dev/kvm`). A configured runtime that isn't registered with the engine fails `create` closed with a clear error.
+`ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata`; needs `/dev/kvm`). `krun` is honored but never auto-selected (its TSI networking breaks `isopod code`); `crun-vm` is unsupported (it boots VM disk images, not isopod's OCI images). A configured runtime that isn't registered with the engine fails `create` closed with a clear error.
 `ISOPOD_MICROVM_MEMORY` — default guest memory when a Tier 3 microVM runtime is active and no `--memory` is given (default `2g`). 
 `ISOPOD_MICROVM_ANNOTATIONS` — space-separated `krun.*` OCI annotations passed to a microVM guest (e.g. `krun.nested_virt=1`); Podman only. 
 `ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
