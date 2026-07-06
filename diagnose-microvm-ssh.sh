@@ -18,16 +18,6 @@
 #   containers/libkrun#510 — TSI wrongly intercepts guest-internal *unix-socket*
 #     loopback traffic, routing the IDE server's socket through the host VMM.
 #
-# WHY THIS SCRIPT WAS HARDENED: an earlier version tested only a chunked HTTP
-# *download* (GET) over a TCP forward. That path can survive TSI even when the
-# real IDE fails — a false PASS. The VS Code / VSCodium remote server instead:
-#   (a) has the client *upload* a large payload host->guest,
-#   (b) exchanges sustained *bidirectional* traffic (its WebSocket), and
-#   (c) commonly listens on a *unix domain socket* the client forwards to.
-# So this probe now exercises all of (a)-(c) — the exact conditions #579/#510
-# break — over both a TCP forward and a UNIX-socket forward. A PASS here means
-# the runtime really can carry Remote-SSH.
-#
 # Usage:   ./diagnose-microvm-ssh.sh <box-name>
 #
 # Exit codes: 0 = all IDE-shaped transfers survive (runtime is Remote-SSH capable),
