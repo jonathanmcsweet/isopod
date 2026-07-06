@@ -222,6 +222,39 @@ teardown() { isopod_teardown_env; }
   refute_output --partial "mask="        # docker has no mask flag
 }
 
+@test "resolve_runtime_flag: podman gets an on-PATH bare name as an absolute path" {
+  # podman resolves --runtime against its containers.conf map or an absolute
+  # path, not a bare PATH name — so a bare `kata-runtime` must become a path.
+  local bin="$BATS_TEST_TMPDIR/kata-runtime"
+  printf '#!/bin/sh\n' >"$bin" && chmod +x "$bin"
+  PATH="$BATS_TEST_TMPDIR:$PATH" run resolve_runtime_flag podman kata-runtime
+  assert_success
+  assert_output "$bin"
+}
+
+@test "resolve_runtime_flag: a name with no on-PATH binary is passed through" {
+  # e.g. `kata-qemu` is a containers.conf alias, not a binary — leave it for
+  # podman's runtime map to resolve.
+  run resolve_runtime_flag podman kata-qemu-not-on-path
+  assert_success
+  assert_output "kata-qemu-not-on-path"
+}
+
+@test "resolve_runtime_flag: an absolute path is passed through unchanged" {
+  run resolve_runtime_flag podman /opt/kata/bin/kata-runtime
+  assert_success
+  assert_output "/opt/kata/bin/kata-runtime"
+}
+
+@test "resolve_runtime_flag: docker never rewrites the name to a path" {
+  # docker's --runtime only accepts registered names, so leave it untouched.
+  local bin="$BATS_TEST_TMPDIR/kata-runtime"
+  printf '#!/bin/sh\n' >"$bin" && chmod +x "$bin"
+  PATH="$BATS_TEST_TMPDIR:$PATH" run resolve_runtime_flag docker kata-runtime
+  assert_success
+  assert_output "kata-runtime"
+}
+
 @test "parse_hardening records the /proc file masks in HARD_FMASKS" {
   parse_hardening
   [ "${#HARD_FMASKS[@]}" -ge 1 ]

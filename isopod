@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="2.0.1"
+ISOPOD_VERSION="2.0.2"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -776,6 +776,27 @@ parse_hardening() {
   return 0
 }
 
+# Resolve the value handed to `--runtime` for a given engine. podman accepts a
+# name registered in its containers.conf [engine.runtimes] map OR an absolute
+# path to the runtime binary — it does NOT invoke a bare name from PATH. So the
+# default-registered name for Kata is `kata`, and a bare `kata-runtime` fails
+# with 'default OCI runtime "kata-runtime" not found' even though the binary is
+# on PATH. When the name is a bare, on-PATH binary, hand podman its absolute path
+# so it runs regardless of what containers.conf happens to register. A value that
+# already contains a slash is a path; a name whose binary is not on PATH (e.g.
+# `kata-qemu`, a containers.conf alias, not a binary) is passed through so
+# podman's map can resolve it. docker only accepts registered names, so it is
+# always passed through unchanged.
+resolve_runtime_flag() { # resolve_runtime_flag <engine> <name>
+  local engine="$1" name="$2" path
+  case "$name" in '' | */*) printf '%s' "$name"; return 0 ;; esac
+  if [ "$engine" = "podman" ] && path="$(command -v "$name" 2>/dev/null)"; then
+    printf '%s' "$path"
+    return 0
+  fi
+  printf '%s' "$name"
+}
+
 hardening_run_args() { # hardening_run_args <engine>
   local engine="$1"
   if ! parse_hardening; then
@@ -783,7 +804,8 @@ hardening_run_args() { # hardening_run_args <engine>
     return 0
   fi
 
-  [ -n "$HARD_RUNTIME" ] && printf '%s\n' "--runtime" "$HARD_RUNTIME"
+  [ -n "$HARD_RUNTIME" ] &&
+    printf '%s\n' "--runtime" "$(resolve_runtime_flag "$engine" "$HARD_RUNTIME")"
 
   local p
   if [ "$engine" = "docker" ]; then
@@ -861,10 +883,11 @@ is_microvm_runtime() {
   [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
 }
 
-# Is an OCI runtime usable by the engine? True when the binary is on PATH (podman
-# and docker both invoke the runtime by name from PATH) OR the engine reports it
-# among its registered runtimes. Best-effort: a false "unavailable" only ever
-# downgrades to a warning at doctor time, and preflight double-checks before a run.
+# Is an OCI runtime usable by the engine? True when the binary is on PATH (for
+# podman, hardening_run_args passes such a bare name as an absolute path, which
+# podman accepts) OR the engine reports it among its registered runtimes. Best-
+# effort: a false "unavailable" only ever downgrades to a warning at doctor time,
+# and preflight double-checks before a run.
 runtime_available() { # runtime_available <engine> <name>
   local engine="$1" name="$2"
   [ -n "$name" ] || return 1
