@@ -36,7 +36,7 @@ INFO
            exit 1 ;;
   build)   exit 0 ;;
   run)     echo "deadbeefcontainerid"; exit 0 ;;
-  port)    echo "127.0.0.1:45678" ;;        # maps 22/tcp -> host 45678
+  port)    echo "127.0.0.1:45678" ;;        # maps 2222/tcp -> host 45678
   exec)    exit 0 ;;
   cp)      exit 0 ;;
   inspect) echo "running" ;;                # state status
@@ -117,7 +117,7 @@ EOF
   run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   # the run command must bind to 127.0.0.1, never 0.0.0.0 or a bare port
-  assert_stub_called 'podman run .*127\.0\.0\.1::22'
+  assert_stub_called 'podman run .*127\.0\.0\.1::2222'
   refute_output --partial "0.0.0.0"
 }
 
@@ -157,7 +157,11 @@ EOF
 }
 
 @test "create applies Tier 1 fingerprint masks from the hardening profile" {
-  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  # --container forces Tier 1: the masks hide HOST hardware a shared-kernel box
+  # can read. A microVM has its own kernel + virtual devices, so isopod skips the
+  # masks there (covered by the hardening_run_args unit tests) — force Tier 1 so
+  # this test is deterministic whether or not the runner can auto-select a microVM.
+  run "$ISOPOD_ROOT/isopod" create demo --container --color teal
   assert_success
   # podman gets a single --security-opt mask= list covering the leaky paths
   assert_stub_called 'podman run .*--security-opt mask=.*/sys/class/dmi'
@@ -310,7 +314,9 @@ EOF
 
 # ---- config / reconfigure ----------------------------------------------------
 @test "create writes a per-box config.yaml shaped like a Compose service" {
-  run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --memory 4g --color teal
+  # --container (Tier 1) so the fingerprint masks render into the reference; a
+  # microVM box correctly omits them (its guest kernel has nothing to mask).
+  run "$ISOPOD_ROOT/isopod" create demo --container --expose 3001:3000 --memory 4g --color teal
   assert_success
   cfg="$ISOPOD_CONFIG_DIR/boxes/demo/config.yaml"
   [ -f "$cfg" ]
