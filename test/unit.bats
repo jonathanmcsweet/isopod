@@ -195,6 +195,26 @@ teardown() { isopod_teardown_env; }
   assert_output --partial "runsc"
 }
 
+@test "hardening_run_args skips host masks under a Tier 3 microVM" {
+  # A microVM has its own kernel + virtual devices, so the host-fingerprint masks
+  # protect nothing there: emit the runtime flag, but none of the masks.
+  ISOPOD_RUNTIME=krun run hardening_run_args podman
+  assert_success
+  assert_output --partial "--runtime"
+  assert_output --partial "krun"
+  refute_output --partial "mask="
+  refute_output --partial "/proc/cmdline"
+  refute_output --partial "/sys/class"
+}
+
+@test "hardening_run_args keeps host masks under a Tier 2 runtime" {
+  # gVisor is not a separate-kernel VM, so the masks still apply.
+  ISOPOD_RUNTIME=runsc run hardening_run_args podman
+  assert_success
+  assert_output --partial "--runtime"
+  assert_output --partial "mask="
+}
+
 @test "hardening_run_args: a user mask: directive adds to the baseline" {
   mkdir -p "$ISOPOD_CONFIG_DIR"
   printf 'mask /sys/class/power_supply\n' >"$ISOPOD_CONFIG_DIR/hardening.conf"
@@ -220,6 +240,39 @@ teardown() { isopod_teardown_env; }
   refute_output --partial "/dev/null"    # /proc file masks are not attempted
   refute_output --partial "/proc/cmdline"
   refute_output --partial "mask="        # docker has no mask flag
+}
+
+@test "resolve_runtime_flag: podman gets an on-PATH bare name as an absolute path" {
+  # podman resolves --runtime against its containers.conf map or an absolute
+  # path, not a bare PATH name — so a bare `kata-runtime` must become a path.
+  local bin="$BATS_TEST_TMPDIR/kata-runtime"
+  printf '#!/bin/sh\n' >"$bin" && chmod +x "$bin"
+  PATH="$BATS_TEST_TMPDIR:$PATH" run resolve_runtime_flag podman kata-runtime
+  assert_success
+  assert_output "$bin"
+}
+
+@test "resolve_runtime_flag: a name with no on-PATH binary is passed through" {
+  # e.g. `kata-qemu` is a containers.conf alias, not a binary — leave it for
+  # podman's runtime map to resolve.
+  run resolve_runtime_flag podman kata-qemu-not-on-path
+  assert_success
+  assert_output "kata-qemu-not-on-path"
+}
+
+@test "resolve_runtime_flag: an absolute path is passed through unchanged" {
+  run resolve_runtime_flag podman /opt/kata/bin/kata-runtime
+  assert_success
+  assert_output "/opt/kata/bin/kata-runtime"
+}
+
+@test "resolve_runtime_flag: docker never rewrites the name to a path" {
+  # docker's --runtime only accepts registered names, so leave it untouched.
+  local bin="$BATS_TEST_TMPDIR/kata-runtime"
+  printf '#!/bin/sh\n' >"$bin" && chmod +x "$bin"
+  PATH="$BATS_TEST_TMPDIR:$PATH" run resolve_runtime_flag docker kata-runtime
+  assert_success
+  assert_output "kata-runtime"
 }
 
 @test "parse_hardening records the /proc file masks in HARD_FMASKS" {
@@ -299,7 +352,7 @@ teardown() { isopod_teardown_env; }
 
 @test "build_run_args adds egress flags when lan-deny is active" {
   ENGINE=podman
-  ISOPOD_EGRESS=lan-deny build_run_args box img 127.0.0.1::22 "" ""
+  ISOPOD_EGRESS=lan-deny build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" == *"--network isopod0"* ]]
   [[ "$joined" == *"--dns 1.1.1.1"* ]]
@@ -308,14 +361,14 @@ teardown() { isopod_teardown_env; }
 }
 @test "build_run_args uses allow-list egress flags by default" {
   ENGINE=podman
-  build_run_args box img 127.0.0.1::22 "" ""
+  build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" == *"--network isopod0"* ]]
   [[ "$joined" == *"http_proxy=http://10.88.7.1:8118"* ]]
 }
 @test "build_run_args omits egress flags when egress is off" {
   ENGINE=podman
-  ISOPOD_EGRESS=off build_run_args box img 127.0.0.1::22 "" ""
+  ISOPOD_EGRESS=off build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" != *"--network isopod0"* ]]
   [[ "$joined" != *"--cap-drop NET_RAW"* ]]
@@ -340,7 +393,7 @@ teardown() { isopod_teardown_env; }
 }
 @test "build_run_args forces the proxy and drops caps in allow-list mode" {
   ENGINE=podman
-  ISOPOD_EGRESS=allow-list build_run_args box img 127.0.0.1::22 "" ""
+  ISOPOD_EGRESS=allow-list build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" == *"--network isopod0"* ]]
   [[ "$joined" == *"http_proxy=http://10.88.7.1:8118"* ]]
@@ -673,9 +726,10 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
 }
 
 # ---- runtime network classification (share/runtimes column 3) ----------------
-@test "runtime_net classifies krun as tsi and virtio-net microVMs as virtio" {
+@test "runtime_net classifies krun and kata microVMs as virtio" {
+  # krun is listed as virtio: isopod runs it with passt (krun.use_passt=1).
   run runtime_net krun
-  assert_output "tsi"
+  assert_output "virtio"
   run runtime_net kata-runtime
   assert_output "virtio"
   run runtime_net kata
@@ -703,28 +757,29 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   run active_runtime
   assert_output "kata-runtime"
 }
-@test "resolve_runtime prefers a virtio-net microVM over krun (TSI)" {
+@test "resolve_runtime prefers kata over krun when both are runnable" {
   [ -e /dev/kvm ] || skip "no /dev/kvm on this host — microVM is not runnable"
+  # Both are virtio now; kata comes first in the runtimes table, so it wins.
   _stub_podman_runtimes crun runc krun kata-runtime
   resolve_runtime podman 0
   run active_runtime
   assert_output "kata-runtime"
 }
-@test "resolve_runtime never auto-selects krun (TSI); falls back to gVisor" {
+@test "resolve_runtime auto-selects krun (virtio via passt) when it is the only microVM" {
   [ -e /dev/kvm ] || skip "no /dev/kvm on this host — krun would not be runnable"
-  # krun is runnable but its TSI networking breaks Remote-SSH, so it is skipped
-  # and the default degrades to the next working sandbox (gVisor).
+  # krun now runs with passt (virtio-net), so it carries Remote-SSH and IS
+  # auto-selected as the default microVM ahead of the Tier 2 fallback.
   _stub_podman_runtimes crun runc krun runsc
   resolve_runtime podman 0
   run active_runtime
-  assert_output "runsc"
+  assert_output "krun"
 }
-@test "resolve_runtime never auto-selects krun (TSI); falls back to a container" {
+@test "resolve_runtime auto-selects krun ahead of falling back to a plain container" {
   [ -e /dev/kvm ] || skip "no /dev/kvm on this host — krun would not be runnable"
   _stub_podman_runtimes crun runc krun # krun only, no gVisor
   resolve_runtime podman 0
   run active_runtime
-  assert_output ""
+  assert_output "krun"
 }
 @test "resolve_runtime falls back to gVisor when no microVM is runnable" {
   # Only runsc (Tier 2, no KVM needed) is registered; no microVM available.
@@ -746,9 +801,8 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   run active_runtime
   assert_output "runsc"
 }
-@test "resolve_runtime honors an explicit krun even though it is never auto-selected" {
-  # An explicit choice is respected as-is (no runnable/KVM gate), so krun stays
-  # usable for shell-only workflows despite its TSI networking.
+@test "resolve_runtime honors an explicit krun" {
+  # An explicit choice is respected as-is (no runnable/KVM gate).
   _stub_podman_runtimes runc krun
   export ISOPOD_RUNTIME=krun
   resolve_runtime podman 0
@@ -773,21 +827,41 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
 @test "build_run_args passes krun annotations for a podman microVM runtime" {
   ENGINE=podman
   ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=krun \
-    build_run_args box img 127.0.0.1::22 "" ""
+    build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" == *"--annotation krun.nested_virt=1"* ]]
+}
+@test "build_run_args auto-adds krun.use_passt for a krun microVM (virtio-net for isopod code)" {
+  ENGINE=podman
+  ISOPOD_RUNTIME=krun build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--annotation krun.use_passt=1"* ]]
+}
+@test "build_run_args does not force use_passt for a non-krun microVM (kata)" {
+  ENGINE=podman
+  ISOPOD_RUNTIME=kata-runtime build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"use_passt"* ]]
+}
+@test "build_run_args lets the user override krun.use_passt" {
+  ENGINE=podman
+  ISOPOD_MICROVM_ANNOTATIONS="krun.use_passt=0" ISOPOD_RUNTIME=krun \
+    build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--annotation krun.use_passt=0"* ]]
+  [[ "$joined" != *"krun.use_passt=1"* ]]
 }
 @test "build_run_args omits annotations for a Tier 2 (non-microVM) runtime" {
   ENGINE=podman
   ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=runsc \
-    build_run_args box img 127.0.0.1::22 "" ""
+    build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" != *"--annotation"* ]]
 }
 @test "build_run_args does not pass --annotation on docker (podman-only feature)" {
   ENGINE=docker
   ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=krun \
-    build_run_args box img 127.0.0.1::22 "" ""
+    build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" != *"--annotation"* ]]
 }
