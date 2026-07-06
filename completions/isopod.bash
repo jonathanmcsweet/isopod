@@ -13,7 +13,7 @@ _isopod() {
   cword="$COMP_CWORD"
   words=("${COMP_WORDS[@]}")
 
-  local cmds="create list info code shell start stop config reconfigure export fetch remap copy-in rm egress doctor help version"
+  local cmds="create list info code shell start stop config reconfigure export fetch remap copy-in rm egress secret doctor help version"
   local colors="red orange amber green teal blue purple magenta gray grey"
   local apps="codium vscodium cursor windsurf code"
 
@@ -51,7 +51,7 @@ _isopod() {
       COMPREPLY=()
       return 0
       ;; # a path
-    --repo | --branch | --image | --memory | --cpus | --port | --expose | --name | --email | --old-email | --old-name | --path)
+    --repo | --branch | --image | --memory | --cpus | --port | --expose | --secret | --name | --email | --old-email | --old-name | --path)
       return 0
       ;; # free-form argument; let the shell default take over
   esac
@@ -60,7 +60,7 @@ _isopod() {
   if [[ "$cur" == -* ]]; then
     local opts=""
     case "$sub" in
-      create) opts="--repo --branch --copy --color --image --dockerfile --expose --engine --memory --cpus --port --no-sudo --container" ;;
+      create) opts="--repo --branch --copy --color --image --dockerfile --expose --secret --engine --memory --cpus --port --no-sudo --container" ;;
       reconfigure) opts="--expose --memory --cpus --color" ;;
       code) opts="--app" ;;
       rm) opts="--force" ;;
@@ -78,6 +78,15 @@ _isopod() {
       ;;
     egress)
       mapfile -t COMPREPLY < <(compgen -W "status apply observe allow log denied rules" -- "$cur")
+      ;;
+    secret)
+      if [ "$cword" -eq 2 ]; then
+        mapfile -t COMPREPLY < <(compgen -W "set ls rm" -- "$cur")
+      elif [ "${words[2]}" = "rm" ]; then
+        # complete stored names from the index (names only — never values)
+        local index="${ISOPOD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/isopod}/secrets/index"
+        [ -r "$index" ] && mapfile -t COMPREPLY < <(compgen -W "$(cat "$index")" -- "$cur")
+      fi
       ;;
   esac
   return 0

@@ -90,3 +90,7 @@ Run `test/run.sh` and keep it green before committing. See the
 Project-specific rules — extracting long strings to `share/`, keeping helper
 scripts in `lib/`, Conventional Commits — live in
 [`CLAUDE.md`](../CLAUDE.md). Read it before making structural changes.
+
+The CLI's functions live in sourced modules under `lib/isopod.d/` (one file per
+domain: engine, ssh, hardening, egress, …). The `isopod` entry point keeps only
+globals, the module source loop, and `main`.
