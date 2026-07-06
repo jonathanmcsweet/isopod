@@ -137,6 +137,19 @@ Even with every mask on, a **plain shared-kernel container cannot hide these** �
 A **Tier 2 runtime** (gVisor `runsc`) already presents a synthetic `/proc`/`/sys`, closing the device tree, `/proc/version`, and boot id. A **Tier 3 microVM runtime** (Kata or krun) also closes `uname`, RAM/CPU identity, and the timing channels — the box runs on its own guest kernel behind a hardware boundary. See [docs/opt-in-security.md](docs/opt-in-security.md#microvm-runtimes-kata-krun--tier-3).
 
 Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a Tier 3 microVM runtime (or a full VM); isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
+
+## Secrets
+
+Store a value once on the host, then hand it to specific boxes at create time:
+
+```sh
+isopod secret set NPM_TOKEN          # value from stdin or a hidden prompt — never argv
+isopod create myproj --secret NPM_TOKEN            # appears at /run/secrets/NPM_TOKEN
+isopod create other --secret NPM_TOKEN:/run/secrets/npmrc-token   # custom path
+```
+
+Values live in the OS keychain (`security` on macOS, `secret-tool` on Linux; 0600-file fallback) and are streamed over the box's SSH channel into a memory-backed tmpfs. They never appear in image layers, container env, `inspect` output, `isopod export` tarballs, or `reconfigure` snapshots, and a stopped box holds no secrets (they're re-injected on `start`). Manage them with `isopod secret set|ls|rm`.
+
 ## Requirements
 
 - Linux (primary), macOS (via `podman machine` or Docker Desktop), or Windows (via WSL2 — see [docs/installation-and-platform.md](docs/installation-and-platform.md#windows))

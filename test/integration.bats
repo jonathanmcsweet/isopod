@@ -726,3 +726,96 @@ EOF
   assert_output --partial "localhost/isopod-base:orphan"
   assert_stub_not_called 'podman rmi'
 }
+
+# ---- secrets ------------------------------------------------------------------
+
+# Seed a secret in the hermetic file store (the test HOME's config dir).
+seed_secret() { # seed_secret <name> <value>
+  export ISOPOD_SECRET_BACKEND=file
+  mkdir -p "$ISOPOD_CONFIG_DIR/secrets"
+  chmod 700 "$ISOPOD_CONFIG_DIR/secrets"
+  printf '%s' "$2" >"$ISOPOD_CONFIG_DIR/secrets/$1"
+  printf '%s\n' "$1" >>"$ISOPOD_CONFIG_DIR/secrets/index"
+  : >"$ISOPOD_CONFIG_DIR/secrets/.plaintext-warned"
+}
+
+@test "create --secret mounts the secrets tmpfs and streams the value over ssh only" {
+  seed_secret API_KEY 's3kr1tv4lu3'
+  run "$ISOPOD_ROOT/isopod" create demo --color teal --secret API_KEY
+  assert_success
+  # tmpfs mount owned by the in-box user, on the engine command line
+  assert_stub_called 'podman run .*--tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1000'
+  # injection happens over SSH stdin into the tmpfs path
+  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  # the VALUE never reaches any stubbed command's argv (engine, ssh, ...)
+  assert_stub_not_called 's3kr1tv4lu3'
+  # name:path pairs persist in meta for start/reconfigure re-injection
+  run grep '^secrets=API_KEY:/run/secrets/API_KEY$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+@test "create --secret dies early when the secret is not stored" {
+  export ISOPOD_SECRET_BACKEND=file
+  run "$ISOPOD_ROOT/isopod" create demo --secret NOPE
+  assert_failure
+  assert_output --partial "isopod secret set NOPE"
+  # validation failed before any engine work — and no half-made box remains
+  assert_stub_not_called 'podman run'
+  [ ! -d "$ISOPOD_CONFIG_DIR/boxes/demo" ]
+}
+
+@test "create --secret rejects a target inside the workspace" {
+  seed_secret API_KEY x
+  run "$ISOPOD_ROOT/isopod" create demo --secret API_KEY:/home/dev/workspace/key
+  assert_failure
+  assert_output --partial "isopod export"
+}
+
+@test "start re-injects secrets into the fresh tmpfs" {
+  seed_secret API_KEY 's3kr1tv4lu3'
+  "$ISOPOD_ROOT/isopod" create demo --color teal --secret API_KEY
+  : >"$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" start demo
+  assert_success
+  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  assert_stub_not_called 's3kr1tv4lu3'
+}
+
+@test "start of a box without secrets does not wait on ssh" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  : >"$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" start demo
+  assert_success
+  # no injection and no wait_for_ssh probe — only engine + keyscan traffic
+  assert_stub_not_called '^ssh '
+}
+
+@test "reconfigure recreates the tmpfs and re-injects secrets" {
+  seed_secret API_KEY 's3kr1tv4lu3'
+  "$ISOPOD_ROOT/isopod" create demo --color teal --secret API_KEY
+  : >"$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" reconfigure demo
+  assert_success
+  assert_stub_called 'podman run .*--tmpfs /run/secrets:'
+  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  assert_stub_not_called 's3kr1tv4lu3'
+}
+
+@test "secret set/ls/rm round-trip via the CLI (file backend)" {
+  export ISOPOD_SECRET_BACKEND=file
+  run bash -c "printf hunter2 | '$ISOPOD_ROOT/isopod' secret set MY_TOKEN"
+  assert_success
+  run "$ISOPOD_ROOT/isopod" secret ls
+  assert_output --partial "MY_TOKEN"
+  run "$ISOPOD_ROOT/isopod" secret rm MY_TOKEN
+  assert_success
+  run "$ISOPOD_ROOT/isopod" secret ls
+  refute_output --partial "MY_TOKEN"
+}
+
+@test "secret set refuses a value on argv-less empty stdin" {
+  export ISOPOD_SECRET_BACKEND=file
+  run bash -c "printf '' | '$ISOPOD_ROOT/isopod' secret set MY_TOKEN"
+  assert_failure
+  assert_output --partial "empty value"
+}

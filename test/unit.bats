@@ -865,3 +865,140 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" != *"--annotation"* ]]
 }
+
+# ---- secrets: names, paths, specs ---------------------------------------------
+
+@test "valid_secret_name accepts typical env-style names" {
+  run valid_secret_name "API_KEY"
+  assert_success
+  run valid_secret_name "_x"
+  assert_success
+  run valid_secret_name "Token9"
+  assert_success
+}
+
+@test "valid_secret_name rejects malformed names" {
+  run valid_secret_name ""
+  assert_failure
+  run valid_secret_name "9lead"
+  assert_failure
+  run valid_secret_name "a b"
+  assert_failure
+  run valid_secret_name "a:b"
+  assert_failure
+  run valid_secret_name "a,b"
+  assert_failure
+  run valid_secret_name "$(printf 'x%.0s' {1..65})"
+  assert_failure
+}
+
+@test "parse_secret_specs defaults the target to /run/secrets/NAME" {
+  export ISOPOD_SECRET_BACKEND=file
+  mkdir -p "$ISOPOD_CONFIG_DIR/secrets"
+  printf 'v' >"$ISOPOD_CONFIG_DIR/secrets/TOK"
+  parse_secret_specs TOK
+  [ "${SECRET_SPECS[0]}" = "TOK:/run/secrets/TOK" ]
+}
+
+@test "parse_secret_specs keeps an explicit path and warns outside /run/secrets" {
+  export ISOPOD_SECRET_BACKEND=file
+  mkdir -p "$ISOPOD_CONFIG_DIR/secrets"
+  printf 'v' >"$ISOPOD_CONFIG_DIR/secrets/TOK"
+  run parse_secret_specs TOK:/opt/creds/tok
+  assert_success
+  assert_output --partial "outside the /run/secrets tmpfs"
+}
+
+@test "parse_secret_specs dies on a workspace target (export would leak it)" {
+  export ISOPOD_SECRET_BACKEND=file
+  mkdir -p "$ISOPOD_CONFIG_DIR/secrets"
+  printf 'v' >"$ISOPOD_CONFIG_DIR/secrets/TOK"
+  run parse_secret_specs "TOK:$WORKSPACE/tok"
+  assert_failure
+  assert_output --partial "isopod export"
+}
+
+@test "parse_secret_specs dies on relative or metachar paths" {
+  export ISOPOD_SECRET_BACKEND=file
+  mkdir -p "$ISOPOD_CONFIG_DIR/secrets"
+  printf 'v' >"$ISOPOD_CONFIG_DIR/secrets/TOK"
+  run parse_secret_specs "TOK:etc/tok"
+  assert_failure
+  run parse_secret_specs "TOK:/run/secrets/a b"
+  assert_failure
+  run parse_secret_specs 'TOK:/run/secrets/$(x)'
+  assert_failure
+}
+
+@test "parse_secret_specs dies on duplicate names and duplicate targets" {
+  export ISOPOD_SECRET_BACKEND=file
+  mkdir -p "$ISOPOD_CONFIG_DIR/secrets"
+  printf 'v' >"$ISOPOD_CONFIG_DIR/secrets/TOK"
+  printf 'v' >"$ISOPOD_CONFIG_DIR/secrets/TOK2"
+  run parse_secret_specs TOK TOK
+  assert_failure
+  assert_output --partial "duplicate secret"
+  run parse_secret_specs TOK:/run/secrets/same TOK2:/run/secrets/same
+  assert_failure
+  assert_output --partial "same path"
+}
+
+@test "parse_secret_specs dies when the secret is not in the store" {
+  export ISOPOD_SECRET_BACKEND=file
+  run parse_secret_specs NOPE
+  assert_failure
+  assert_output --partial "isopod secret set NOPE"
+}
+
+# ---- secrets: backend selection and stores --------------------------------------
+
+@test "secret_backend honors the env override" {
+  ISOPOD_SECRET_BACKEND=file run secret_backend
+  assert_output "file"
+}
+
+@test "secret_backend prefers secret-tool on Linux, else falls back to file" {
+  if [ "$(uname -s)" = Darwin ]; then skip "Linux backend order"; fi
+  make_stub secret-tool
+  run secret_backend
+  assert_output "keychain-linux"
+  rm -f "$STUB_DIR/secret-tool"
+  # no keychain tool anywhere -> file (ignore any host secret-tool; keep a
+  # self-contained uname so the platform check works on the narrowed PATH)
+  printf '#!/bin/sh\necho Linux\n' >"$STUB_DIR/uname"
+  chmod +x "$STUB_DIR/uname"
+  PATH="$STUB_DIR" run secret_backend
+  assert_output "file"
+}
+
+@test "file backend: set stores 0600, get round-trips, rm removes" {
+  export ISOPOD_SECRET_BACKEND=file
+  printf 'hunter2' | secret_store_set TOK
+  [ "$(stat -c '%a' "$ISOPOD_CONFIG_DIR/secrets/TOK")" = "600" ]
+  run secret_store_get TOK
+  assert_output "hunter2"
+  run secret_store_ls
+  assert_output "TOK"
+  secret_store_rm TOK
+  [ ! -f "$ISOPOD_CONFIG_DIR/secrets/TOK" ]
+  run secret_store_get TOK
+  assert_failure
+  run secret_store_ls
+  refute_output --partial "TOK"
+}
+
+@test "file backend warns about plaintext exactly once" {
+  export ISOPOD_SECRET_BACKEND=file
+  run bash -c 'ISOPOD_SOURCED=1 source "$ISOPOD_ROOT/isopod"; printf a | secret_store_set A'
+  assert_output --partial "plaintext"
+  run bash -c 'ISOPOD_SOURCED=1 source "$ISOPOD_ROOT/isopod"; printf b | secret_store_set B'
+  refute_output --partial "plaintext"
+}
+
+@test "keychain-linux backend passes the value on stdin, never argv" {
+  make_stub secret-tool
+  export ISOPOD_SECRET_BACKEND=keychain-linux
+  printf 's3kr1tv4lu3' | secret_store_set TOK
+  assert_stub_called 'secret-tool store .*service isopod name TOK'
+  assert_stub_not_called 's3kr1tv4lu3'
+}
