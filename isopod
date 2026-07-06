@@ -870,8 +870,11 @@ runtime_available() { # runtime_available <engine> <name>
   [ -n "$name" ] || return 1
   have "$name" && return 0
   # `<engine> info` lists registered runtimes (podman: the ociRuntimes map;
-  # docker: the Runtimes section). A word-boundary match is enough for a hint.
-  "$engine" info 2>/dev/null | grep -qw -- "$name"
+  # docker: the Runtimes section). Match the name as a whole token — treating '-'
+  # as part of it — so a short name (kata, runsc) is not falsely found inside a
+  # longer one (kata-runtime, runsc-kvm), which would auto-select a runtime the
+  # engine cannot actually invoke.
+  "$engine" info 2>/dev/null | grep -qE "(^|[^[:alnum:]_-])${name}([^[:alnum:]_-]|\$)"
 }
 
 # Fail-closed preflight for the configured OCI runtime, mirroring egress_preflight:
