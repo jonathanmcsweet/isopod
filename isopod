@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="2.0.0"
+ISOPOD_VERSION="2.0.1"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -839,6 +839,23 @@ runtime_tier() { # runtime_tier <name>
   return 1
 }
 
+# Guest network stack of a runtime from the share/runtimes table (column 3):
+# 'virtio'/'netstack' (SSH forwarding + bulk transfers work) or 'tsi' (libkrun
+# Transparent Socket Impersonation, which stalls bulk SSH transfers and so breaks
+# Remote-SSH and copy/export). Echoes nothing for an unlisted runtime.
+runtime_net() { # runtime_net <name>
+  local want="$1" f="$ISOPOD_SHARE/runtimes" name tier net
+  [ -n "$want" ] && [ -f "$f" ] || return 1
+  while read -r name tier net _; do
+    case "$name" in '' | '#'*) continue ;; esac
+    [ "$name" = "$want" ] && {
+      printf '%s' "$net"
+      return 0
+    }
+  done <"$f"
+  return 1
+}
+
 # True when the configured runtime is a Tier 3 microVM (its own guest kernel).
 is_microvm_runtime() {
   [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
@@ -853,8 +870,11 @@ runtime_available() { # runtime_available <engine> <name>
   [ -n "$name" ] || return 1
   have "$name" && return 0
   # `<engine> info` lists registered runtimes (podman: the ociRuntimes map;
-  # docker: the Runtimes section). A word-boundary match is enough for a hint.
-  "$engine" info 2>/dev/null | grep -qw -- "$name"
+  # docker: the Runtimes section). Match the name as a whole token — treating '-'
+  # as part of it — so a short name (kata, runsc) is not falsely found inside a
+  # longer one (kata-runtime, runsc-kvm), which would auto-select a runtime the
+  # engine cannot actually invoke.
+  "$engine" info 2>/dev/null | grep -qE "(^|[^[:alnum:]_-])${name}([^[:alnum:]_-]|\$)"
 }
 
 # Fail-closed preflight for the configured OCI runtime, mirroring egress_preflight:
@@ -903,12 +923,12 @@ _runtime_present() { # _runtime_present <name>
 # detect_sandboxed_runtimes = Tier 3 then Tier 2 (runsc syscall sandbox).
 detect_microvm_runtimes() {
   local n out=""
-  for n in krun crun-vm kata-runtime; do _runtime_present "$n" && out="${out:+$out }$n"; done
+  for n in krun kata-runtime; do _runtime_present "$n" && out="${out:+$out }$n"; done
   printf '%s' "$out"
 }
 detect_sandboxed_runtimes() {
   local n out=""
-  for n in krun crun-vm kata-runtime runsc; do _runtime_present "$n" && out="${out:+$out }$n"; done
+  for n in krun kata-runtime runsc; do _runtime_present "$n" && out="${out:+$out }$n"; done
   printf '%s' "$out"
 }
 
@@ -930,9 +950,9 @@ _runtime_runnable() { # _runtime_runnable <engine> <name>
 # Precedence:
 #   1. --container      -> plain Tier 1 container (sets ISOPOD_FORCE_CONTAINER)
 #   2. explicit runtime -> honored as-is (ISOPOD_RUNTIME / `runtime` directive)
-#   3. default          -> strongest RUNNABLE sandbox: a microVM (krun/crun-vm/
-#      kata) if one is installed and KVM is present, else gVisor (runsc), else a
-#      plain container. Each step down from a microVM warns loudly.
+#   3. default          -> strongest RUNNABLE sandbox: a virtio-net microVM (kata)
+#      if installed and KVM is present, else gVisor (runsc), else a plain
+#      container. Each step down from a microVM warns loudly.
 # Sets ISOPOD_RUNTIME (or ISOPOD_FORCE_CONTAINER) in-process for the rest of the run.
 resolve_runtime() { # resolve_runtime <engine> <container_opt 0|1>
   local engine="$1" container_opt="${2:-0}" explicit rt
@@ -944,24 +964,45 @@ resolve_runtime() { # resolve_runtime <engine> <container_opt 0|1>
     return 0
   fi
   [ -n "$explicit" ] && return 0 # user picked a runtime; respect it
-  # Default: pick the strongest runnable sandbox, microVM first.
-  for rt in krun crun-vm kata-runtime; do
-    if _runtime_runnable "$engine" "$rt"; then
-      export ISOPOD_RUNTIME="$rt"
-      info "microVM runtime '$rt' selected by default (strong isolation; opt out with --container)"
-      return 0
+  # Default: pick the strongest RUNNABLE microVM whose guest networking carries
+  # a bulk SSH port-forward into a loopback service — that is how VSCodium/Cursor/
+  # JetBrains ('isopod code') reach their remote server. krun's libkrun TSI
+  # networking stalls bulk data on exactly that path (a small forward works, a
+  # megabyte one hangs), even though SSH exec channels are fast — so a 'tsi'
+  # runtime is NEVER auto-selected. It stays usable on explicit request for
+  # 'isopod shell'/copy/export, which ride exec channels. The table drives this.
+  local tier net tsi_only=""
+  while read -r rt tier net _; do
+    case "$rt" in '' | '#'*) continue ;; esac
+    [ "$tier" = 3 ] || continue
+    _runtime_runnable "$engine" "$rt" || continue
+    if [ "$net" = tsi ]; then
+      tsi_only="${tsi_only:-$rt}" # remember it to explain the fallback below
+      continue
     fi
-  done
-  warn "no usable microVM runtime found (need krun, crun-vm, or kata + /dev/kvm). isopod defaults
-   to a microVM for isolation; falling back to a weaker sandbox. Install a microVM runtime for
+    export ISOPOD_RUNTIME="$rt"
+    info "microVM runtime '$rt' selected by default (strong isolation; opt out with --container)"
+    return 0
+  done <"$ISOPOD_SHARE/runtimes"
+  if [ -n "$tsi_only" ]; then
+    warn "the only microVM runtime available ('$tsi_only') uses libkrun TSI networking, which
+   stalls bulk data over an SSH port-forward into the box — the path VSCodium/Cursor/JetBrains
+   use to reach their remote server, so 'isopod code' can't connect. Not selecting it by default.
+   Install kata (the supported Tier 3 microVM) for a working default, or pass
+   '--runtime $tsi_only' to use it for 'isopod shell'/copy/export (exec channels, unaffected)."
+  else
+    warn "no usable microVM runtime found (need kata + /dev/kvm).
+   isopod defaults to a microVM for isolation; falling back to a weaker sandbox. Install one for
    full isolation, or pass --container to select a plain container without this warning."
+  fi
   if _runtime_runnable "$engine" runsc; then
     export ISOPOD_RUNTIME="runsc"
     warn "using gVisor (runsc, Tier 2 syscall sandbox) instead of a microVM"
     return 0
   fi
-  warn "no sandboxed runtime available — running as a PLAIN CONTAINER (Tier 1, weakest isolation).
-   Install a microVM runtime (krun/crun-vm/kata) or gVisor (runsc) to harden. See: isopod doctor"
+  warn "no IDE-capable sandboxed runtime available — running as a PLAIN CONTAINER (Tier 1, weakest
+   isolation). Install kata (Tier 3 microVM) or gVisor (runsc) to harden.
+   See: isopod doctor"
   export ISOPOD_FORCE_CONTAINER=1
   return 0
 }
@@ -2303,7 +2344,15 @@ cmd_reconfigure() {
 
 cmd_shell() {
   local name="${1:-}"
-  [ -n "$name" ] || die "usage: isopod shell <name>"
+  [ -n "$name" ] || die "usage: isopod shell <name> [-- command...]"
+  shift || true
+  # Anything after the name (optionally preceded by `--`) is an inline command to
+  # run non-interactively in the workspace, like `docker exec` — e.g.
+  # `isopod shell mybox -- ls -la`. With nothing after the name, open an
+  # interactive login shell. (Arguments are re-split by the box shell, matching
+  # `ssh host cmd args` semantics.)
+  [ "${1:-}" = "--" ] && shift
+  local -a rcmd=("$@")
   open_box "$name"
   acquire_lock # may start the box and refresh the shared ssh_config
   # Start a stopped box first (like `isopod code`), so `shell` on a stopped box
@@ -2312,15 +2361,18 @@ cmd_shell() {
   status=$("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || true)
   [ "$status" = "running" ] || cmd_start "$name"
   refresh_port "$name"
-  # Release the lock before the (possibly long) interactive session so other
-  # isopod commands aren't blocked meanwhile; the on-exit trap releases it too.
+  # Release the lock before the (possibly long) session so other isopod commands
+  # aren't blocked meanwhile; the on-exit trap releases it too.
   release_lock
-  # Interactive shell over SSH (-t for a tty), landing in the workspace. Like
-  # every other box op, this goes through SSH so it enters the workload under
-  # any runtime — including a microVM, where the engine's exec would not. Plain
-  # `bash` (not `bash -l`) sources ~/.bashrc, matching the old `engine exec` shell.
-  # box_ssh is a shell function, so it can't be `exec`'d — call it and let its
-  # exit status propagate as this command's.
+  # Every box op goes through SSH so it enters the workload under any runtime —
+  # including a microVM, where the engine's exec would not. box_ssh is a shell
+  # function, so it can't be `exec`'d — call it and let its exit status propagate.
+  if [ "${#rcmd[@]}" -gt 0 ]; then
+    box_ssh "$name" -- "cd '$WORKSPACE' 2>/dev/null; ${rcmd[*]}"
+    return
+  fi
+  # Interactive shell (-t for a tty), landing in the workspace. Plain `bash`
+  # (not `bash -l`) sources ~/.bashrc, matching the old `engine exec` shell.
   box_ssh "$name" -t -- "cd '$WORKSPACE' 2>/dev/null; exec bash"
 }
 
@@ -2754,6 +2806,11 @@ cmd_doctor() {
       if [ "$tier" = 3 ] && [ ! -e /dev/kvm ]; then
         printf '  [warn]    /dev/kvm absent — the microVM runtime "%s" needs it (KVM / nested virt unavailable here)\n' "$rt"
       fi
+      if [ "$(runtime_net "$rt" 2>/dev/null)" = tsi ]; then
+        printf '  [warn]    "%s" uses libkrun TSI networking — SSH port-forwards into the box stall on\n' "$rt"
+        printf '            bulk, so VSCodium/Cursor/JetBrains (isopod code) cannot connect. Fine for\n'
+        printf '            isopod shell/copy/export; for the IDE use kata (Tier 3 microVM) or --container.\n'
+      fi
     else
       printf '  [--]      sandboxed runtime: off (Tier 1 masks active; see security/hardening.conf)\n'
       # Auto-detect sandboxed runtimes the user could enable for structural (not
@@ -2798,8 +2855,11 @@ cmd_doctor() {
     mvm="$(detect_microvm_runtimes)"
     if [ -n "$mvm" ]; then
       printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes detected: %s\n' "$mvm"
+      case " $mvm " in
+        *" krun "*) printf '  [note]    krun is fine for `isopod shell`/copy/export, but its TSI networking stalls\n            SSH port-forwards, so `isopod code` (Remote-SSH) fails — use kata for the IDE\n' ;;
+      esac
     else
-      printf '  [ok]      /dev/kvm present — Tier 3 microVM ready; install a runtime (krun, crun-vm, kata)\n'
+      printf '  [ok]      /dev/kvm present — Tier 3 microVM ready; install kata (crun-vm cannot boot isopod images)\n'
     fi
   else
     printf '  [--]      /dev/kvm absent — Tier 3 microVM runtimes unavailable (Tier 1/2 still work)\n'

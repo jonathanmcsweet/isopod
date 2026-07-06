@@ -44,10 +44,16 @@ host. This is the answer to "containers share the host kernel": a kernel exploit
 or container escape is contained by the VM. Enable it through the **same**
 `runtime` directive as gVisor — isopod treats any runtime as a drop-in:
 
-- **krun** (libkrun, Podman-native): `ISOPOD_RUNTIME=krun isopod create …`
 - **Kata Containers** (pluggable Firecracker / Cloud Hypervisor / QEMU backend):
-  `ISOPOD_RUNTIME=kata isopod create …`
-- **crun-vm** (run a VM disk image as an OCI container): `ISOPOD_RUNTIME=crun-vm …`
+  `ISOPOD_RUNTIME=kata isopod create …` — the supported Tier 3 microVM; the default
+  when installed, and it works with VSCodium Remote-SSH (`isopod code`).
+- **krun** (libkrun, Podman-native): `ISOPOD_RUNTIME=krun isopod create …` — the
+  lightest microVM, but its TSI networking breaks `isopod code` (see below), so it
+  is never auto-selected and is only for `isopod shell`/copy/export.
+
+> **crun-vm is not usable with isopod.** It boots VM disk images (a containerdisk,
+> a `--rootfs` disk image, or a bootc container), not the plain OCI container image
+> isopod builds — so it cannot start an isopod box.
 
 Because isopod brings a box up entirely over SSH (no `engine exec`/`cp`), every
 operation — clone, copy-in, export, fetch, remap, shell — enters the guest
@@ -65,13 +71,20 @@ Both engines need **`/dev/kvm`** (bare metal or a KVM-enabled VM; nested virt is
 often off in cloud CI) and a microVM runtime **registered under the name you
 pass to `ISOPOD_RUNTIME`**. `isopod doctor` reports `/dev/kvm`, whether the
 configured runtime is found, and — when no runtime is set — **auto-detects which
-sandboxed runtimes (krun, crun-vm, kata, runsc) are already available to enable**,
+sandboxed runtimes (kata, krun, runsc) are already available to enable**,
 so you can see your options at a glance. Package names and binary paths vary by
 distro — doctor is the check that it's wired up.
 
-**Podman + krun** (lightest path — krun is a [crun](https://github.com/containers/crun)
+**Podman + krun** (lightest microVM — krun is a [crun](https://github.com/containers/crun)
 handler backed by [libkrun](https://github.com/containers/libkrun), so it's
 Podman-native):
+
+> **⚠ krun breaks `isopod code`.** libkrun's TSI networking stalls bulk data over
+> the SSH port-forward the IDE's remote server needs (upstream bugs
+> [libkrun#579](https://github.com/libkrun/libkrun/issues/579) and
+> [#510](https://github.com/libkrun/libkrun/issues/510)), so VSCodium/Cursor/
+> JetBrains fail to connect (WebSocket 1006). isopod never auto-selects krun; use
+> it only for `isopod shell`/copy/export, or use **Kata** for the IDE.
 
 Fedora example (more distros to come):
 ```sh
