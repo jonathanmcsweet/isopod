@@ -21,7 +21,7 @@ Usage:
   isopod help                         Show this help
 
 Secure by default: a box runs in a microVM (its own kernel) when a virtio-net
-microVM runtime (crun-vm/kata) and KVM are available, falling back to gVisor then
+microVM runtime (kata) and KVM are available, falling back to gVisor then
 a plain container; pass --container to force a plain container. (krun is a microVM
 too, but its TSI networking stalls bulk data over SSH port-forwards into the box,
 which breaks 'isopod code' Remote-SSH — so it is not auto-selected; pass

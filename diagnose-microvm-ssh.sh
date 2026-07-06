@@ -29,7 +29,7 @@
 #
 # Exit codes: 0 = bulk survives the forward (runtime is Remote-SSH capable),
 #             1 = bulk stalls in the forward (IDE will fail — e.g. krun/TSI; use
-#                 a virtio-net microVM (kata/crun-vm) or `--container`),
+#                 a virtio-net microVM (kata) or `--container`),
 #             2 = usage / setup error.
 
 set -uo pipefail
@@ -126,7 +126,7 @@ else
   echo "VSCodium / Cursor / JetBrains Remote-SSH ('isopod code') will fail (WebSocket 1006)," >&2
   echo "because they reach their remote server over exactly such a forward." >&2
   echo "isopod shell / copy / export (SSH exec channels) are unaffected. Fixes:" >&2
-  echo "  - recreate with a virtio-net microVM:  --runtime crun-vm   (or kata)" >&2
+  echo "  - recreate with a virtio-net microVM:  --runtime kata-runtime" >&2
   echo "  - or a plain container:                isopod create ... --container" >&2
   exit 1
 fi

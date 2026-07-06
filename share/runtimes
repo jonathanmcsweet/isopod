@@ -32,4 +32,8 @@ kata-qemu     3  virtio
 kata-fc       3  virtio
 kata-clh      3  virtio
 krun          3  tsi
-crun-vm       3  virtio
+
+# NOT listed: crun-vm. It runs VM DISK images (a "containerdisk", a --rootfs disk
+# image, or a bootc bootable container), not a plain OCI container image — which
+# is what isopod builds and hands the runtime. It cannot boot an isopod box, so it
+# is neither auto-selected nor suggested. kata is the supported Tier 3 microVM.

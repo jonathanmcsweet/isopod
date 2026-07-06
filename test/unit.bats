@@ -646,12 +646,14 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   assert_success
 }
 
-@test "detect_microvm_runtimes reports a registered Tier 3 runtime" {
-  _stub_podman_runtimes crun runc krun crun-vm
+@test "detect_microvm_runtimes reports registered Tier 3 runtimes, not crun-vm" {
+  _stub_podman_runtimes crun runc krun kata-runtime crun-vm
   run detect_microvm_runtimes
   assert_success
   assert_output --partial "krun"
-  assert_output --partial "crun-vm"
+  assert_output --partial "kata-runtime"
+  # crun-vm cannot boot isopod's OCI images, so it is never suggested.
+  refute_output --partial "crun-vm"
 }
 @test "detect_sandboxed_runtimes lists Tier 3 before Tier 2" {
   _stub_podman_runtimes crun runc runsc krun
@@ -665,12 +667,16 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
 @test "runtime_net classifies krun as tsi and virtio-net microVMs as virtio" {
   run runtime_net krun
   assert_output "tsi"
-  run runtime_net crun-vm
-  assert_output "virtio"
   run runtime_net kata-runtime
+  assert_output "virtio"
+  run runtime_net kata
   assert_output "virtio"
   run runtime_net runsc
   assert_output "netstack"
+  # crun-vm is deliberately unlisted (it boots VM disk images, not OCI images).
+  run runtime_net crun-vm
+  assert_failure
+  assert_output ""
 }
 @test "runtime_net echoes nothing for an unlisted runtime" {
   # Mirrors runtime_tier: unlisted -> no output, nonzero status (callers treat a
@@ -683,17 +689,17 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
 # ---- default runtime resolution (microVM by default, --container opt-out) -----
 @test "resolve_runtime selects a virtio-net microVM by default when one is runnable" {
   [ -e /dev/kvm ] || skip "no /dev/kvm on this host — microVM is not runnable"
-  _stub_podman_runtimes crun runc crun-vm
+  _stub_podman_runtimes crun runc kata-runtime
   resolve_runtime podman 0
   run active_runtime
-  assert_output "crun-vm"
+  assert_output "kata-runtime"
 }
 @test "resolve_runtime prefers a virtio-net microVM over krun (TSI)" {
   [ -e /dev/kvm ] || skip "no /dev/kvm on this host — microVM is not runnable"
-  _stub_podman_runtimes crun runc krun crun-vm
+  _stub_podman_runtimes crun runc krun kata-runtime
   resolve_runtime podman 0
   run active_runtime
-  assert_output "crun-vm"
+  assert_output "kata-runtime"
 }
 @test "resolve_runtime never auto-selects krun (TSI); falls back to gVisor" {
   [ -e /dev/kvm ] || skip "no /dev/kvm on this host — krun would not be runnable"
