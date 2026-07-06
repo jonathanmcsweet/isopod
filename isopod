@@ -6,6 +6,10 @@
 # Primary OS: Linux. macOS: works via podman machine / Docker Desktop.
 # Windows: run inside WSL2 (see README).
 #
+# This entry script is the shared constant surface: many globals below are read
+# only by the sourced lib/isopod.d/ modules, not here. shellcheck lints each file
+# alone, so it would flag those as SC2034 (unused) — disable that check file-wide.
+# shellcheck disable=SC2034
 set -euo pipefail
 
 ISOPOD_VERSION="2.2.0"
