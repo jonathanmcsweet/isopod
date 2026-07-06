@@ -703,7 +703,9 @@ apply_color() { # apply_color <name> <hexcolor>
 
 # Translate the hardening profile into `$ENGINE run` flags, printed one per line
 # for the caller to read into an array. Anti-fingerprinting (mask host-revealing
-# /proc and /sys paths) + an optional sandboxed runtime like gVisor.
+# /proc and /sys paths) + an optional sandboxed runtime like gVisor. The masks
+# are a Tier 1/2 measure only: a Tier 3 microVM has its own kernel and virtual
+# devices, so they are skipped there (see the tier check below).
 #
 # Layered: the shipped baseline (HARDENING_CONF) is read first, then the user's
 # own overrides (USER_HARDENING_CONF, in their config dir) on top — so a tweak
@@ -806,6 +808,14 @@ hardening_run_args() { # hardening_run_args <engine>
 
   [ -n "$HARD_RUNTIME" ] &&
     printf '%s\n' "--runtime" "$(resolve_runtime_flag "$engine" "$HARD_RUNTIME")"
+
+  # The masks below hide HOST hardware that a Tier 1 container reads through the
+  # shared kernel's /proc and /sys. A Tier 3 microVM has its own guest kernel and
+  # only virtual devices (krun's synthetic DMI, a virtio NIC/PCI bus), so those
+  # same paths expose nothing about the host — the VM boundary is the isolation,
+  # not the masks. Skip them there: they protect nothing, and emitting host-
+  # fingerprint masks under a microVM would misrepresent what is doing the work.
+  [ -n "$HARD_RUNTIME" ] && [ "$(runtime_tier "$HARD_RUNTIME" 2>/dev/null)" = 3 ] && return 0
 
   local p
   if [ "$engine" = "docker" ]; then
@@ -1471,7 +1481,7 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # Docker/runc can't bind-mask /proc files; hardening_run_args skipped them.
   # Warn once here (not inside that function, which also renders the reference
   # Compose file) so the user knows those paths stay readable on Docker.
-  if [ "$ENGINE" = docker ] && parse_hardening && [ "${#HARD_FMASKS[@]}" -gt 0 ]; then
+  if [ "$ENGINE" = docker ] && ! is_microvm_runtime && parse_hardening && [ "${#HARD_FMASKS[@]}" -gt 0 ]; then
     warn "Docker can't mask these host-info files (runc blocks /proc bind mounts): ${HARD_FMASKS[*]}
      — they stay readable inside the box. Use rootless podman, or a Tier 2/3 runtime
      (runsc/kata/krun), to close them. Directory masks (/sys/*) are applied normally."

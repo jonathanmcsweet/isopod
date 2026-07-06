@@ -195,6 +195,26 @@ teardown() { isopod_teardown_env; }
   assert_output --partial "runsc"
 }
 
+@test "hardening_run_args skips host masks under a Tier 3 microVM" {
+  # A microVM has its own kernel + virtual devices, so the host-fingerprint masks
+  # protect nothing there: emit the runtime flag, but none of the masks.
+  ISOPOD_RUNTIME=krun run hardening_run_args podman
+  assert_success
+  assert_output --partial "--runtime"
+  assert_output --partial "krun"
+  refute_output --partial "mask="
+  refute_output --partial "/proc/cmdline"
+  refute_output --partial "/sys/class"
+}
+
+@test "hardening_run_args keeps host masks under a Tier 2 runtime" {
+  # gVisor is not a separate-kernel VM, so the masks still apply.
+  ISOPOD_RUNTIME=runsc run hardening_run_args podman
+  assert_success
+  assert_output --partial "--runtime"
+  assert_output --partial "mask="
+}
+
 @test "hardening_run_args: a user mask: directive adds to the baseline" {
   mkdir -p "$ISOPOD_CONFIG_DIR"
   printf 'mask /sys/class/power_supply\n' >"$ISOPOD_CONFIG_DIR/hardening.conf"
