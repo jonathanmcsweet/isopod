@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-ISOPOD_VERSION="2.0.2"
+ISOPOD_VERSION="2.1.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -47,8 +47,14 @@ USER_HARDENING_CONF="$CONFIG_DIR/hardening.conf"
 # the shipped baseline. `isopod egress allow <domain>` appends to this file.
 USER_EGRESS_ALLOWLIST="$CONFIG_DIR/egress-allowlist.conf"
 DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
-IMAGE_LAYER_VERSION="2" # bump to force image rebuild when Dockerfile changes
+IMAGE_LAYER_VERSION="3" # bump to force image rebuild when Dockerfile changes
 CONTAINER_USER="dev"
+# Guest port sshd listens on inside the box (must match ISOPOD_SSHD_PORT in
+# share/Dockerfile). Non-privileged on purpose: a virtio-net microVM (krun +
+# passt) cannot forward a published host port to a privileged guest port like
+# 22, but forwards to a high port fine. Invisible to users — they connect via
+# the loopback host port isopod publishes.
+BOX_SSHD_PORT="2222"
 WORKSPACE="/home/dev/workspace"
 # Default guest memory when a Tier 3 microVM runtime is active and the user gave
 # no --memory (a microVM boots a fixed-size guest; without this it would be
@@ -417,6 +423,7 @@ build_image() { # build_image <base-image> -> echoes tag
   cp "$ISOPOD_ENTRYPOINT" "$ctx/isopod-entrypoint"
   if ! "$ENGINE" build "${extra_build[@]}" \
     --build-arg "ISOPOD_BASE=$base" --build-arg "ISOPOD_USER=$CONTAINER_USER" \
+    --build-arg "ISOPOD_SSHD_PORT=$BOX_SSHD_PORT" \
     -t "$tag" -f "$ISOPOD_DOCKERFILE" "$ctx" >&2; then
     rm -rf "$ctx"
     die "image build failed (see output above)"
@@ -520,9 +527,9 @@ meta_set_port() { # meta_set_port <name> <port>
   fi
 }
 
-resolve_port() { # resolve_port <name> -> echoes current host port for ctr :22
+resolve_port() { # resolve_port <name> -> echoes current host port for the box sshd
   local out
-  out=$("$ENGINE" port "$(ctr_name "$1")" 22/tcp 2>/dev/null | head -1) || return 1
+  out=$("$ENGINE" port "$(ctr_name "$1")" "$BOX_SSHD_PORT/tcp" 2>/dev/null | head -1) || return 1
   printf '%s' "${out##*:}"
 }
 
@@ -999,11 +1006,11 @@ resolve_runtime() { # resolve_runtime <engine> <container_opt 0|1>
   [ -n "$explicit" ] && return 0 # user picked a runtime; respect it
   # Default: pick the strongest RUNNABLE microVM whose guest networking carries
   # a bulk SSH port-forward into a loopback service — that is how VSCodium/Cursor/
-  # JetBrains ('isopod code') reach their remote server. krun's libkrun TSI
-  # networking stalls bulk data on exactly that path (a small forward works, a
-  # megabyte one hangs), even though SSH exec channels are fast — so a 'tsi'
-  # runtime is NEVER auto-selected. It stays usable on explicit request for
-  # 'isopod shell'/copy/export, which ride exec channels. The table drives this.
+  # JetBrains ('isopod code') reach their remote server. krun is driven with passt
+  # (a real virtio-net stack; build_run_args adds krun.use_passt), so it qualifies
+  # like kata. A runtime whose net is 'tsi' — libkrun's DEFAULT, which stalls that
+  # forward — is never auto-selected; no shipped runtime is 'tsi' now (krun uses
+  # passt), but the guard stays for any future/unlisted one. The table drives this.
   local tier net tsi_only=""
   while read -r rt tier net _; do
     case "$rt" in '' | '#'*) continue ;; esac
@@ -1474,9 +1481,20 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # Tier 3 microVM tuning: pass krun.* OCI annotations to the guest (podman only;
   # annotations are a crun/krun feature and docker run has no --annotation). e.g.
   # ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1".
-  if [ "$ENGINE" = podman ] && [ -n "$ISOPOD_MICROVM_ANNOTATIONS" ] && is_microvm_runtime; then
+  if [ "$ENGINE" = podman ] && is_microvm_runtime; then
+    local -a annotations=()
+    # krun defaults to libkrun TSI networking, which stalls the bulk SSH port-
+    # forward that Remote-SSH ('isopod code') rides. Force passt — a real virtio-
+    # net stack — so that forward works. krun-only (kata ignores it); the user can
+    # override by putting their own krun.use_passt in ISOPOD_MICROVM_ANNOTATIONS.
+    local rt
+    rt="$(active_runtime)"
+    if [ "${rt##*/}" = krun ] && [[ "$ISOPOD_MICROVM_ANNOTATIONS" != *use_passt* ]]; then
+      annotations+=("krun.use_passt=1")
+    fi
     local ann
-    for ann in $ISOPOD_MICROVM_ANNOTATIONS; do [ -n "$ann" ] && RUN_ARGS+=(--annotation "$ann"); done
+    for ann in $ISOPOD_MICROVM_ANNOTATIONS; do [ -n "$ann" ] && annotations+=("$ann"); done
+    for ann in "${annotations[@]:-}"; do [ -n "$ann" ] && RUN_ARGS+=(--annotation "$ann"); done
   fi
   # Docker/runc can't bind-mask /proc files; hardening_run_args skipped them.
   # Warn once here (not inside that function, which also renders the reference
@@ -1677,8 +1695,8 @@ cmd_create() {
   ssh-keygen -t ed25519 -N '' -C "isopod-$name" -f "$(box_dir "$name")/id_ed25519" -q
 
   # publish sshd on a loopback-only host port; random free port unless --port
-  local publish="127.0.0.1::22"
-  [ -n "$port" ] && publish="127.0.0.1:$port:22"
+  local publish="127.0.0.1::$BOX_SSHD_PORT"
+  [ -n "$port" ] && publish="127.0.0.1:$port:$BOX_SSHD_PORT"
 
   # A Tier 3 microVM runtime boots a fixed-size guest; if the user gave no
   # --memory, size it so the guest isn't starved.
@@ -2342,7 +2360,7 @@ cmd_reconfigure() {
   local port
   port=$(meta_get "$name" port)
   "$ENGINE" rm -f "$ctr" >/dev/null 2>&1 || true
-  build_run_args "$name" "$snap" "127.0.0.1:$port:22" "$d_memory" "$d_cpus" "${EXPOSE_SPECS[@]:-}"
+  build_run_args "$name" "$snap" "127.0.0.1:$port:$BOX_SSHD_PORT" "$d_memory" "$d_cpus" "${EXPOSE_SPECS[@]:-}"
   info "Recreating the container with the new settings ($ENGINE)..."
   if ! "$ENGINE" "${RUN_ARGS[@]}" >/dev/null; then
     die "recreate failed — your snapshot is saved as '$snap'"

@@ -36,7 +36,7 @@ INFO
            exit 1 ;;
   build)   exit 0 ;;
   run)     echo "deadbeefcontainerid"; exit 0 ;;
-  port)    echo "127.0.0.1:45678" ;;        # maps 22/tcp -> host 45678
+  port)    echo "127.0.0.1:45678" ;;        # maps 2222/tcp -> host 45678
   exec)    exit 0 ;;
   cp)      exit 0 ;;
   inspect) echo "running" ;;                # state status
@@ -117,7 +117,7 @@ EOF
   run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   # the run command must bind to 127.0.0.1, never 0.0.0.0 or a bare port
-  assert_stub_called 'podman run .*127\.0\.0\.1::22'
+  assert_stub_called 'podman run .*127\.0\.0\.1::2222'
   refute_output --partial "0.0.0.0"
 }
 

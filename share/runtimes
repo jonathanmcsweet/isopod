@@ -10,16 +10,16 @@
 # Remote-SSH (`isopod code`) and `isopod copy`/`export` all depend on both:
 #   virtio    real virtio-net interface — forwarding and bulk transfers work
 #   netstack  gVisor user-space netstack (Tier 2) — works
-#   tsi       libkrun Transparent Socket Impersonation — SSH exec channels are
-#             fast, but bulk data over an SSH TCP port-forward into a guest
-#             loopback service STALLS. That is exactly how VSCodium/Cursor/
-#             JetBrains reach their remote server, so `isopod code` (Remote-SSH)
-#             can't connect. isopod's own shell/copy/export/fetch use exec
-#             channels and are unaffected. isopod never auto-selects a `tsi`
-#             runtime as the default microVM; it stays usable on explicit request
-#             (--runtime / ISOPOD_RUNTIME) for those shell/data workflows.
-#             Upstream libkrun bugs: containers/libkrun#579 (TSI drops large
-#             transfers — BufDescTooSmall) + #510 (guest loopback wrongly proxied).
+#   tsi       libkrun Transparent Socket Impersonation (krun's DEFAULT) — SSH
+#             exec channels are fast, but bulk data over an SSH TCP port-forward
+#             into a guest loopback service STALLS. That is exactly how VSCodium/
+#             Cursor/JetBrains reach their remote server, so `isopod code`
+#             (Remote-SSH) can't connect over TSI. Upstream libkrun bugs:
+#             containers/libkrun#579 (TSI drops large transfers — BufDescTooSmall)
+#             + #510 (guest loopback wrongly proxied). isopod avoids TSI by
+#             running krun with passt (krun.use_passt=1), a real virtio-net stack
+#             — so krun is listed as `virtio` below, not `tsi`. (No runtime is
+#             `tsi` today; the classification stays documented for reference.)
 #
 # The name matches what you pass to --runtime (and the `runtime` directive /
 # ISOPOD_RUNTIME). Unlisted runtimes still work; doctor just cannot name their
@@ -31,7 +31,7 @@ kata-runtime  3  virtio
 kata-qemu     3  virtio
 kata-fc       3  virtio
 kata-clh      3  virtio
-krun          3  tsi
+krun          3  virtio  # via passt (krun.use_passt=1); libkrun default is TSI
 
 # NOT listed: crun-vm. It runs VM DISK images (a "containerdisk", a --rootfs disk
 # image, or a bootc bootable container), not a plain OCI container image — which

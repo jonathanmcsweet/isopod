@@ -2,9 +2,13 @@
 #
 # A standard Dockerfile, built unchanged by both `docker build` and
 # `podman build`. The isopod CLI builds it with two build args:
-#   ISOPOD_BASE  the Debian/Ubuntu base to layer on (default below; --image)
-#   ISOPOD_USER  the unprivileged in-box user (must match CONTAINER_USER in the
-#                isopod script)
+#   ISOPOD_BASE       the Debian/Ubuntu base to layer on (default below; --image)
+#   ISOPOD_USER       the unprivileged in-box user (must match CONTAINER_USER in
+#                     the isopod script)
+#   ISOPOD_SSHD_PORT  the guest port sshd listens on (must match BOX_SSHD_PORT in
+#                     the isopod script). A non-privileged port so a virtio-net
+#                     microVM (krun + passt) can forward to it — passt does not
+#                     forward to a privileged guest port like 22.
 # It installs an SSH server and common tooling, creates the in-box user, locks
 # sshd down to key-only single-user access, and runs sshd as PID 1.
 ARG ISOPOD_BASE=docker.io/library/debian:bookworm-slim
@@ -18,6 +22,7 @@ FROM ${ISOPOD_BASE}
 USER root
 
 ARG ISOPOD_USER=dev
+ARG ISOPOD_SSHD_PORT=2222
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Essentials: sshd (remote access) plus git and common CLI tooling.
@@ -38,6 +43,7 @@ RUN id -u "$ISOPOD_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$ISOPOD_USE
 # Lock down sshd: key-only auth, single user, no root login. Double-quote the
 # AllowUsers line so the build arg expands in the container shell.
 RUN printf '%s\n' \
+      "Port $ISOPOD_SSHD_PORT" \
       'PasswordAuthentication no' \
       'KbdInteractiveAuthentication no' \
       'PermitRootLogin no' \
@@ -56,5 +62,5 @@ RUN printf '%s\n' \
 COPY isopod-entrypoint /usr/local/bin/isopod-entrypoint
 RUN printf '%s\n' "$ISOPOD_USER" > /etc/isopod-user \
  && chmod +x /usr/local/bin/isopod-entrypoint
-EXPOSE 22
+EXPOSE ${ISOPOD_SSHD_PORT}
 CMD ["/usr/local/bin/isopod-entrypoint"]
