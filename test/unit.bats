@@ -621,6 +621,15 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   run runtime_available podman krun
   assert_failure
 }
+@test "runtime_available does not match a short name inside a longer one" {
+  # Only kata-runtime is registered; bare 'kata' must NOT read as available, or
+  # resolve_runtime would auto-select a runtime the engine cannot invoke.
+  _stub_podman_runtimes crun runc kata-runtime
+  run runtime_available podman kata
+  assert_failure
+  run runtime_available podman kata-runtime
+  assert_success
+}
 
 @test "runtime_preflight is a no-op when no runtime is configured" {
   run runtime_preflight podman
