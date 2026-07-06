@@ -140,7 +140,8 @@ flatpak override --user --filesystem=$HOME/.ssh:ro \
 The isopod install itself is laid out as:
 
 ```
-isopod                       # the CLI (bash)
+isopod                       # the CLI entry point (globals + module loader + main)
+lib/isopod.d/               # the CLI's function modules, sourced by isopod
 lib/apply_color.py          # window-color merge, run inside the container
 security/hardening.conf     # fingerprint-hardening profile (read at create time)
 test/                       # bats + pexpect test suite

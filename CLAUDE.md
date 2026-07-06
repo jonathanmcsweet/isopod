@@ -55,6 +55,14 @@ Follow the spec: <https://www.conventionalcommits.org/en/v1.0.0/#specification>
 ## Repo structure rules
 
 - `lib/` MUST sit beside the `isopod` script — it is streamed into the box.
+- CLI functions live in sourced modules under `lib/isopod.d/*.sh` (one file per
+  domain). The `isopod` entry script keeps only globals/constants (including
+  `ISOPOD_VERSION` — release tooling reads it from there), the module source
+  loop, and `main`. Helpers streamed into the box or executed as subprocesses
+  stay directly in `lib/`, never in `lib/isopod.d/`. New modules must be added
+  to the source loop in `isopod` and the lint lists in `test/run.sh`,
+  `.pre-commit-config.yaml`, `.gitlab-ci.yml`, and `.github/workflows/ci.yml`
+  cover them via the `lib/isopod.d/*.sh` glob.
 - Container hardening settings live in `security/hardening.conf` (declarative),
   not inline in the `isopod` script. `security/compose.yaml` is reference-only and
   is NOT executed by the CLI.
