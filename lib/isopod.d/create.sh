@@ -156,6 +156,8 @@ cmd_create() {
 
   # From here a partial box exists on disk; arm rollback so any failure below
   # (image build, sshd never coming up, clone error) leaves nothing behind.
+  # read by on_exit (util.sh) to unwind a half-built box; write-only here
+  # shellcheck disable=SC2034
   CREATE_ROLLBACK_NAME="$name"
   chmod 700 "$CONFIG_DIR" "$BOXES_DIR" "$(box_dir "$name")" 2>/dev/null || true
 
@@ -254,6 +256,7 @@ cmd_create() {
 
   # The box is functional now (container up, SSH authenticating, workspace
   # populated). Disarm rollback so the remaining cosmetic step can't undo it.
+  # shellcheck disable=SC2034  # read by on_exit (util.sh)
   CREATE_ROLLBACK_NAME=""
 
   info "Applying window color $hex (this box only)..."
