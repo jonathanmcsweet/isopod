@@ -29,7 +29,7 @@ active_egress() {
   fi
   # Nothing configured anywhere -> default to the strict allow-list.
   [ "$r" = "__unset__" ] && r="allow-list"
-  
+
   # Only the two known modes are "on"; anything else (off, blank, a typo) is
   # treated as disabled so a bad directive fails safe rather than half-enabling.
   case "$r" in lan-deny | allow-list) ;; *) r="" ;; esac
