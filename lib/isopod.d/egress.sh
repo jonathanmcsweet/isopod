@@ -316,6 +316,9 @@ egress_doctor_engines_and_fw() {
 # sees the achievable mode. Silence any degrade with ISOPOD_EGRESS=off.
 resolve_egress() { # resolve_egress <engine>
   local engine="$1" mode
+  # Set when default-on egress is walked all the way down to an OPEN network, so
+  # create/reconfigure can make that unmissable in their summary (egress_posture_note).
+  ISOPOD_EGRESS_DEGRADED=0
   mode="$(active_egress)"
   [ -n "$mode" ] || return 0        # already off
   egress_explicitly_set && return 0 # opt-in: leave fail-closed preflight in charge
@@ -325,6 +328,7 @@ resolve_egress() { # resolve_egress <engine>
      with an OPEN network. Use a rootful podman/docker for isolation, or set ISOPOD_EGRESS=off
      to silence this."
     export ISOPOD_EGRESS=off
+    ISOPOD_EGRESS_DEGRADED=1
     return 0
   fi
   # allow-list needs the filtering proxy; if it is definitively stopped, drop to
@@ -349,8 +353,30 @@ resolve_egress() { # resolve_egress <engine>
      in effect — continuing with an OPEN network. Load it with 'sudo isopod egress apply', or set
      ISOPOD_EGRESS=off to silence this."
     export ISOPOD_EGRESS=off
+    ISOPOD_EGRESS_DEGRADED=1
   fi
   return 0
+}
+
+# Print the box's EFFECTIVE network posture after resolve_egress, so a default-on
+# egress that silently degraded to an OPEN network is unmissable at create/
+# reconfigure time. Reads the resolved mode and the degrade flag resolve_egress set.
+egress_posture_note() { # egress_posture_note <name>
+  local name="$1"
+  case "$(active_egress)" in
+    allow-list) info "Network: egress allow-list ACTIVE — only allow-listed hosts reachable (host-filtered)." ;;
+    lan-deny) info "Network: egress lan-deny ACTIVE — LAN/host/metadata blocked, public internet reachable." ;;
+    *)
+      if [ "${ISOPOD_EGRESS_DEGRADED:-0}" = 1 ]; then
+        warn "Network: OPEN — egress isolation is ON by default but could NOT be enforced here, so
+     '$name' can reach your LAN and the internet unfiltered. Enable it (needs root, one time):
+       sudo isopod egress apply
+     then recreate the box (or: isopod reconfigure $name). Silence with ISOPOD_EGRESS=off."
+      else
+        info "Network: OPEN (egress disabled by config)."
+      fi
+      ;;
+  esac
 }
 
 # Preflight for a box that will run under `egress lan-deny`: the engine must be

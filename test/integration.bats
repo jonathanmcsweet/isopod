@@ -226,6 +226,23 @@ EOF
   assert_stub_called "podman build .*--build-arg ISOPOD_DEV_TOOLS=1"
 }
 
+@test "create makes a degraded OPEN network unmissable" {
+  # The stubbed podman reports rootless, so default-on egress cannot be enforced
+  # and resolve_egress degrades to an OPEN network. The create summary must say so.
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_output --partial "Network: OPEN"
+  assert_output --partial "could NOT be enforced"
+  assert_output --partial "sudo isopod egress apply"
+}
+
+@test "create with egress disabled by config notes OPEN without the degrade warning" {
+  ISOPOD_EGRESS=off run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_output --partial "Network: OPEN (egress disabled by config)"
+  refute_output --partial "could NOT be enforced"
+}
+
 # ---- --expose ----------------------------------------------------------------
 @test "create --expose publishes ports on loopback only" {
   run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --expose 8080 --color teal

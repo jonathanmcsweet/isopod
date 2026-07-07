@@ -267,6 +267,9 @@ cmd_create() {
   apply_color "$name" "$hex" || warn "could not apply window color (the sandbox is fine without it)"
 
   render_tmpl create-success.txt
+  # State the effective network posture plainly — a default-on egress that could
+  # not be enforced degraded to an OPEN network above, and that must not be missed.
+  egress_posture_note "$name"
 }
 
 do_copy_in() { # do_copy_in <name> <path>...

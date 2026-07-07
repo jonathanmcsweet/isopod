@@ -224,6 +224,7 @@ cmd_reconfigure() {
   esac
 
   info "reconfigured '$name' — see: isopod info $name"
+  egress_posture_note "$name"
 }
 
 cmd_shell() {
