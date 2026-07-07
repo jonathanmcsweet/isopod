@@ -119,7 +119,9 @@ cmd_fetch() {
     [ -d "$out" ] && out="${out%/}/isopod-$name.bundle"
     [ -e "$out" ] && die "destination already exists: $out (remove it or pick another path)"
     info "Bundling $repo inside the box..."
-    box_ssh "$name" -- git -C "$repo" bundle create - --branches --tags >"$out" || {
+    # HEAD is included so `git clone <bundle>` checks out the box's current
+    # branch instead of failing to resolve a remote HEAD.
+    box_ssh "$name" -- git -C "$repo" bundle create - HEAD --branches --tags >"$out" || {
       rm -f "$out"
       die "git bundle failed in the box (does $repo have any commits?)"
     }
