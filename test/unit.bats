@@ -123,6 +123,13 @@ teardown() { isopod_teardown_env; }
   run image_tag_for debian:bookworm-slim
   assert_output --partial "localhost/isopod-base:"
 }
+@test "image_tag_for gives the lean and --dev images distinct tags" {
+  lean="$(image_tag_for debian:bookworm-slim 0)"
+  dev="$(image_tag_for debian:bookworm-slim 1)"
+  [ "$lean" != "$dev" ]
+  # the default (no dev arg) matches the lean tag
+  assert_equal "$lean" "$(image_tag_for debian:bookworm-slim)"
+}
 
 # ---- ctr_name / box_dir ------------------------------------------------------
 @test "ctr_name prefixes with isopod-" {

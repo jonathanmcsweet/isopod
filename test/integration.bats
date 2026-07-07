@@ -214,6 +214,18 @@ EOF
   assert_stub_called "podman build .*-f $ISOPOD_ROOT/share/Dockerfile"
 }
 
+@test "create builds a lean base by default (no dev/test toolchain)" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called "podman build .*--build-arg ISOPOD_DEV_TOOLS=0"
+}
+
+@test "create --dev requests the dev/test toolchain in the image build" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal --dev
+  assert_success
+  assert_stub_called "podman build .*--build-arg ISOPOD_DEV_TOOLS=1"
+}
+
 # ---- --expose ----------------------------------------------------------------
 @test "create --expose publishes ports on loopback only" {
   run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --expose 8080 --color teal
