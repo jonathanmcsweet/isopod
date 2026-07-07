@@ -37,8 +37,30 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd
 
+# Dev/test tooling so a box can run isopod's own test suite (test/run.sh):
+# lint (shellcheck, shfmt), python checks (pyflakes), interactive tests
+# (pexpect), nft for the egress template parse check, and both engines for
+# the RUN_LIVE live suite — rootless podman (uidmap/slirp4netns/
+# fuse-overlayfs) and docker.io (CLI + dockerd; starting dockerd needs a
+# microVM or otherwise privileged box, the CLI alone works anywhere).
+# Nested podman also needs /dev/fuse and /dev/net/tun readable in the box
+# at runtime, and its storage on a non-FUSE filesystem (e.g. a tmpfs).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      shellcheck shfmt python3-pexpect python3-pyflakes nftables \
+      podman uidmap slirp4netns fuse-overlayfs docker.io \
+ && rm -rf /var/lib/apt/lists/*
+
 # Unprivileged in-box user (skip if the base image already has it).
 RUN id -u "$ISOPOD_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$ISOPOD_USER"
+
+# Subordinate IDs for rootless podman inside the box. useradd allocates them
+# for a new user; this covers a base image that already had the user. The
+# docker group (created by docker.io above) lets the user reach a dockerd
+# started via sudo without further setup.
+RUN { grep -q "^$ISOPOD_USER:" /etc/subuid \
+      || usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$ISOPOD_USER"; } \
+ && usermod -aG docker "$ISOPOD_USER"
 
 # Lock down sshd: key-only auth, single user, no root login. Double-quote the
 # AllowUsers line so the build arg expands in the container shell.

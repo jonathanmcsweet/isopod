@@ -51,10 +51,12 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # stops. inject_secrets streams values in over SSH after boot; nothing about
   # a secret (name or value) is visible to the engine or `inspect`. On create
   # the specs are in BOX_SECRETS; on reconfigure read the persisted meta.
+  # Ownership is applied by the entrypoint at boot: tmpfs uid=/gid= mount
+  # options need podman >= 4.9 and do not exist in docker.
   local box_secrets="${BOX_SECRETS:-}"
   [ -n "$box_secrets" ] || box_secrets="$(meta_get "$name" secrets 2>/dev/null || true)"
   [ -n "$box_secrets" ] &&
-    RUN_ARGS+=(--tmpfs "/run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=$CONTAINER_UID,gid=$CONTAINER_UID")
+    RUN_ARGS+=(--tmpfs "/run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700")
   [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
   [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
   # Anti-fingerprinting hardening from the hardening profile.
