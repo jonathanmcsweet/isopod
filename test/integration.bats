@@ -746,8 +746,8 @@ seed_secret() { # seed_secret <name> <value>
   # tmpfs mount on the engine command line (ownership is applied by the
   # entrypoint at boot; uid=/gid= mount options are not portable)
   assert_stub_called 'podman run .*--tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700'
-  # injection happens over SSH stdin into the tmpfs path
-  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  # injection happens over SSH stdin into the tmpfs path (path base64-armored)
+  assert_secret_injected /run/secrets/API_KEY
   # the VALUE never reaches any stubbed command's argv (engine, ssh, ...)
   assert_stub_not_called 's3kr1tv4lu3'
   # name:path pairs persist in meta for start/reconfigure re-injection
@@ -778,7 +778,7 @@ seed_secret() { # seed_secret <name> <value>
   : >"$STUB_LOG"
   run "$ISOPOD_ROOT/isopod" start demo
   assert_success
-  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  assert_secret_injected /run/secrets/API_KEY
   assert_stub_not_called 's3kr1tv4lu3'
 }
 
@@ -798,7 +798,7 @@ seed_secret() { # seed_secret <name> <value>
   run "$ISOPOD_ROOT/isopod" reconfigure demo
   assert_success
   assert_stub_called 'podman run .*--tmpfs /run/secrets:'
-  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  assert_secret_injected /run/secrets/API_KEY
   assert_stub_not_called 's3kr1tv4lu3'
 }
 

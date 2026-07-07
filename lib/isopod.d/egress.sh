@@ -52,6 +52,22 @@ egress_explicitly_set() {
   return 1
 }
 
+# Validate the egress network parameters before they are interpolated into an
+# nft ruleset that is loaded as root, or into the engine run args. These are
+# env-overridable; a malformed value (a typo in ISOPOD_EGRESS_SUBNET, say) would
+# otherwise render a silently-broken firewall loaded under sudo — fail closed
+# with a clear error instead of fail-open.
+egress_validate_vars() {
+  valid_cidr "$ISOPOD_EGRESS_SUBNET" ||
+    die "ISOPOD_EGRESS_SUBNET='$ISOPOD_EGRESS_SUBNET' is not a valid IPv4 CIDR (e.g. 10.88.7.0/24)"
+  valid_ipv4 "$ISOPOD_EGRESS_GATEWAY" ||
+    die "ISOPOD_EGRESS_GATEWAY='$ISOPOD_EGRESS_GATEWAY' is not a valid IPv4 address"
+  valid_ipv4 "$ISOPOD_EGRESS_DNS" ||
+    die "ISOPOD_EGRESS_DNS='$ISOPOD_EGRESS_DNS' is not a valid IPv4 address"
+  valid_port "$ISOPOD_EGRESS_PROXY_PORT" ||
+    die "ISOPOD_EGRESS_PROXY_PORT='$ISOPOD_EGRESS_PROXY_PORT' is not a valid TCP port (1-65535)"
+}
+
 # The active nftables ruleset for the current mode: the default LAN-deny rules,
 # or the default-deny allow-list rules that force traffic through the proxy.
 egress_ruleset() {
@@ -92,6 +108,15 @@ egress_can_enforce() { # egress_can_enforce <engine>
 egress_check_subnet() { # egress_check_subnet <engine> <subnets>
   local engine="$1" subnets="$2"
   [ -n "${subnets// /}" ] || return 0
+  # A pre-existing dual-stack network gives a box an IPv6 address with no v6
+  # route filtered by the v4-only ruleset — an unfiltered egress path around the
+  # whole firewall. Freshly created networks are v4-only (neither engine enables
+  # IPv6 by default); this catches a network created dual-stack out of band.
+  case "$subnets" in
+    *:*) warn "network '$ISOPOD_EGRESS_NET' has an IPv6 subnet — a box with a v6 address has an
+       unfiltered egress path around the v4 firewall. Recreate it v4-only:
+       $engine network rm $ISOPOD_EGRESS_NET" ;;
+  esac
   case " $subnets " in
     *" $ISOPOD_EGRESS_SUBNET "*) : ;;
     *) warn "network '$ISOPOD_EGRESS_NET' exists with subnet(s) [${subnets% }] but the egress
@@ -208,6 +233,7 @@ egress_write_filter() {
 # Load the active nftables ruleset (LAN-deny or allow-list) into the host netns.
 egress_load_nft() {
   local rs rendered
+  egress_validate_vars
   rs="$(egress_ruleset)"
   [ -f "$rs" ] || die "missing ruleset: $rs"
   have nft || die "nft (nftables) not found — install nftables to apply the egress firewall"
@@ -344,6 +370,7 @@ egress_preflight() { # egress_preflight <engine>
   mode="$(active_egress)"
   case "$mode" in lan-deny | allow-list) ;; *) return 0 ;; esac
   local engine="$1"
+  egress_validate_vars
   if ! egress_can_enforce "$engine"; then
     die "egress $mode needs a rootful engine (host-bridge networking); '$engine' here is rootless.
      A rootless engine routes boxes through a userspace stack with no host bridge, so the

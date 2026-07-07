@@ -39,6 +39,59 @@ teardown() { isopod_teardown_env; }
   assert_failure
 }
 
+# ---- valid_ipv4 / valid_cidr (egress parameter validation) -------------------
+@test "valid_ipv4 accepts a dotted quad" {
+  run valid_ipv4 "10.88.7.1"
+  assert_success
+}
+@test "valid_ipv4 rejects an out-of-range octet" {
+  run valid_ipv4 "10.88.7.256"
+  assert_failure
+}
+@test "valid_ipv4 rejects the wrong number of octets" {
+  run valid_ipv4 "10.88.7"
+  assert_failure
+  run valid_ipv4 "10.88.7.1.1"
+  assert_failure
+}
+@test "valid_ipv4 rejects non-numeric / metacharacters" {
+  run valid_ipv4 '10.0.0.$(id)'
+  assert_failure
+  run valid_ipv4 ""
+  assert_failure
+}
+@test "valid_cidr accepts an IPv4 network" {
+  run valid_cidr "10.88.7.0/24"
+  assert_success
+}
+@test "valid_cidr rejects a missing or oversized prefix length" {
+  run valid_cidr "10.88.7.0"
+  assert_failure
+  run valid_cidr "10.88.7.0/33"
+  assert_failure
+}
+@test "valid_cidr rejects a bad address part" {
+  run valid_cidr "10.88.7.999/24"
+  assert_failure
+}
+
+# ---- egress_validate_vars ----------------------------------------------------
+@test "egress_validate_vars passes with the shipped defaults" {
+  run egress_validate_vars
+  assert_success
+}
+@test "egress_validate_vars fails closed on a malformed subnet" {
+  ISOPOD_EGRESS_SUBNET="10.88.7.0/notacidr" run egress_validate_vars
+  assert_failure
+  assert_output --partial "ISOPOD_EGRESS_SUBNET"
+}
+@test "egress_validate_vars fails closed on a bad gateway or proxy port" {
+  ISOPOD_EGRESS_GATEWAY="10.88.7" run egress_validate_vars
+  assert_failure
+  ISOPOD_EGRESS_PROXY_PORT="99999" run egress_validate_vars
+  assert_failure
+}
+
 # ---- preset_color ------------------------------------------------------------
 @test "preset_color maps teal to a hex" {
   run preset_color teal
