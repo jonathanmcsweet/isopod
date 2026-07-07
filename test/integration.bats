@@ -743,8 +743,9 @@ seed_secret() { # seed_secret <name> <value>
   seed_secret API_KEY 's3kr1tv4lu3'
   run "$ISOPOD_ROOT/isopod" create demo --color teal --secret API_KEY
   assert_success
-  # tmpfs mount owned by the in-box user, on the engine command line
-  assert_stub_called 'podman run .*--tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1000'
+  # tmpfs mount on the engine command line (ownership is applied by the
+  # entrypoint at boot; uid=/gid= mount options are not portable)
+  assert_stub_called 'podman run .*--tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700'
   # injection happens over SSH stdin into the tmpfs path
   assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
   # the VALUE never reaches any stubbed command's argv (engine, ssh, ...)
