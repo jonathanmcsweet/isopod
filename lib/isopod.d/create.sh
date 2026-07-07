@@ -7,7 +7,7 @@
 cmd_create() {
   local name="" repo="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
-  local container_opt=0
+  local container_opt=0 dev_tools=0
   local -a copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
@@ -71,6 +71,10 @@ cmd_create() {
         ;;
       --container)
         container_opt=1
+        shift
+        ;;
+      --dev)
+        dev_tools=1
         shift
         ;;
       -h | --help)
@@ -162,7 +166,7 @@ cmd_create() {
   chmod 700 "$CONFIG_DIR" "$BOXES_DIR" "$(box_dir "$name")" 2>/dev/null || true
 
   local tag
-  tag=$(build_image "$base")
+  tag=$(build_image "$base" "$dev_tools")
 
   info "Generating dedicated SSH keypair for this box..."
   ssh-keygen -t ed25519 -N '' -C "isopod-$name" -f "$(box_dir "$name")/id_ed25519" -q

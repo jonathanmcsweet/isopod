@@ -52,9 +52,16 @@ secret_store_set() { # secret_store_set <name>  (value on stdin)
         die "secret-tool failed to store '$name'"
       ;;
     keychain-macos)
-      # `security` has no stdin mode; the value passing through argv is a
-      # momentary local exposure on a single-user host — accepted trade-off.
-      security add-generic-password -U -a "$USER" -s "isopod/$name" -w "$value" ||
+      # Keep the value out of argv (where `ps` would show it): `security -i` reads
+      # its command from stdin, so the value never becomes a process argument.
+      # base64-encode it first (openssl for macOS/Linux portability) — a
+      # whitespace-free alphabet the -i line tokenizer can't mis-split, so a value
+      # with spaces or quotes stores intact; secret_store_get decodes it back.
+      # NOTE: pre-2.4 boxes stored the value raw here, so after upgrading re-run
+      # 'isopod secret set <name>' on macOS to re-store it base64-encoded.
+      printf 'add-generic-password -U -a %s -s %s -w %s\n' \
+        "$USER" "isopod/$name" "$(printf '%s' "$value" | openssl base64 -A)" |
+        security -i ||
         die "security failed to store '$name'"
       ;;
     file)
@@ -76,7 +83,7 @@ secret_store_get() { # secret_store_get <name> -> value on stdout; rc 1 if absen
   local name="$1"
   case "$(secret_backend)" in
     keychain-linux) secret-tool lookup service isopod name "$name" ;;
-    keychain-macos) security find-generic-password -a "$USER" -s "isopod/$name" -w 2>/dev/null ;;
+    keychain-macos) security find-generic-password -a "$USER" -s "isopod/$name" -w 2>/dev/null | openssl base64 -d -A ;;
     file) cat "$SECRETS_DIR/$name" 2>/dev/null ;;
     *) return 1 ;;
   esac
