@@ -35,6 +35,9 @@ teardown() {
 # Connect using the box's own key/port/known_hosts explicitly — mirrors the
 # script's internal box_ssh, and avoids depending on ~/.ssh/config resolution
 # (OpenSSH reads the real user's config, not $HOME's, so -F is what we use).
+# The remote command is requoted with %q: ssh joins its arguments with plain
+# spaces, which would otherwise strip the quoting from `sh -c '<script>'` and
+# hand the script to the login shell instead of sh.
 bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   local cfg="$ISOPOD_CONFIG_DIR/boxes/$BOX"
   local port; port=$(sed -n 's/^port=//p' "$cfg/meta")
@@ -49,7 +52,7 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   done
   ssh -p "$port" -i "$cfg/id_ed25519" -o IdentitiesOnly=yes \
       -o UserKnownHostsFile="$cfg/known_hosts" -o StrictHostKeyChecking=yes \
-      "${opts[@]}" "dev@127.0.0.1" "${rcmd[@]}"
+      "${opts[@]}" "dev@127.0.0.1" "$(printf '%q ' "${rcmd[@]}")"
 }
 
 # Resolve a Tier 3 microVM runtime to test under, or skip. Honors
@@ -236,9 +239,12 @@ _microvm_runtime_or_skip() {
 
 @test "live: --expose publishes a box server to the host" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --expose 18081:8080
-  # serve a known string from :8080 inside the box
+  # serve a known string from :8080 inside the box. The whole backgrounded
+  # group is detached from the ssh session's stdout/stderr — a bare `cmd &`
+  # would keep the channel open (and this command hanging) for as long as
+  # the server runs.
   bssh -- sh -c 'cd /home/dev/workspace && echo expose-ok > index.html &&
-                 setsid python3 -m http.server 8080 >/dev/null 2>&1 < /dev/null &
+                 (setsid python3 -m http.server 8080 >/dev/null 2>&1 < /dev/null &) &&
                  sleep 1'
   run bash -c 'for i in $(seq 1 10); do
                  curl -fsS http://127.0.0.1:18081/ && exit 0; sleep 0.5; done; exit 1'
@@ -276,7 +282,8 @@ _microvm_runtime_or_skip() {
   assert_output "keep-me"
   # the newly-added forward is live
   bssh -- sh -c 'cd /home/dev/workspace && echo reconf-ok > index.html &&
-                 setsid python3 -m http.server 8080 >/dev/null 2>&1 < /dev/null & sleep 1'
+                 (setsid python3 -m http.server 8080 >/dev/null 2>&1 < /dev/null &) &&
+                 sleep 1'
   run bash -c 'for i in $(seq 1 10); do
                  curl -fsS http://127.0.0.1:18082/ && exit 0; sleep 0.5; done; exit 1'
   assert_success
