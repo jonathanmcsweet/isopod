@@ -41,6 +41,14 @@ elif [ "${ISOPOD_SUDO:-}" = "0" ]; then
   rm -f "/etc/sudoers.d/$iso_u"
 fi
 
+# Secrets tmpfs (mounted by the host only when the box has secrets): hand it
+# to the in-box user so inject_secrets can write over SSH. Ownership is set
+# here rather than via tmpfs uid=/gid= mount options, which need podman >= 4.9
+# and do not exist in docker. Runs on every boot — the tmpfs starts empty.
+if [ -d /run/secrets ]; then
+  chown "$iso_u:$iso_u" /run/secrets
+fi
+
 unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO
 mkdir -p /run/sshd
 exec /usr/sbin/sshd -D -e

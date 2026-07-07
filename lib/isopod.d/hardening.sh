@@ -91,7 +91,11 @@ parse_hardening() {
 # always passed through unchanged.
 resolve_runtime_flag() { # resolve_runtime_flag <engine> <name>
   local engine="$1" name="$2" path
-  case "$name" in '' | */*) printf '%s' "$name"; return 0 ;; esac
+  case "$name" in '' | */*)
+    printf '%s' "$name"
+    return 0
+    ;;
+  esac
   if [ "$engine" = "podman" ] && path="$(command -v "$name" 2>/dev/null)"; then
     printf '%s' "$path"
     return 0
