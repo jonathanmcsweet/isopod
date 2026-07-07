@@ -74,9 +74,9 @@ step "egress: firewall/proxy templates render (and parse where nft is present)"
 bash test/egress-render.sh
 
 # --- stubbed bats suite -----------------------------------------------------
-step "bats: unit + theming + integration (stubbed, no engine)"
+step "bats: unit + theming + integration + security-poc (stubbed, no engine)"
 [ -x "$BATS" ] || fail "vendored bats not found at $BATS"
-"$BATS" test/unit.bats test/theming.bats test/integration.bats
+"$BATS" test/unit.bats test/theming.bats test/integration.bats test/security-poc.bats
 
 # --- interactive (pexpect) --------------------------------------------------
 step "pexpect: interactive prompt tests"

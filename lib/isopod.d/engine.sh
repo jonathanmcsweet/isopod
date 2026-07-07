@@ -170,6 +170,24 @@ valid_cpus() { # valid_cpus <v> -> a positive (optionally fractional) CPU count
   [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "$1" != 0 && "$1" != 0.0 ]]
 }
 
+valid_ipv4() { # valid_ipv4 <a.b.c.d> -> true for a dotted-quad, each octet 0-255
+  local o1 o2 o3 o4 rest o IFS=.
+  read -r o1 o2 o3 o4 rest <<<"$1"
+  [ -z "$rest" ] || return 1
+  for o in "$o1" "$o2" "$o3" "$o4"; do
+    case "$o" in '' | *[!0-9]*) return 1 ;; esac
+    [ "${#o}" -le 3 ] && [ "$o" -ge 0 ] && [ "$o" -le 255 ] || return 1
+  done
+}
+
+valid_cidr() { # valid_cidr <a.b.c.d/nn> -> true for an IPv4 network in CIDR form
+  case "$1" in */*) ;; *) return 1 ;; esac
+  local ip="${1%/*}" bits="${1#*/}"
+  valid_ipv4 "$ip" || return 1
+  case "$bits" in '' | *[!0-9]*) return 1 ;; esac
+  [ "${#bits}" -le 2 ] && [ "$bits" -ge 0 ] && [ "$bits" -le 32 ]
+}
+
 # ---------------------------------------------------------------------------
 # image build (share/Dockerfile)
 # ---------------------------------------------------------------------------
