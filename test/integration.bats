@@ -820,6 +820,17 @@ seed_secret() { # seed_secret <name> <value>
   assert_stub_not_called '^ssh '
 }
 
+@test "start warns when an egress box's firewall protection is gone" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  # Mark the box as created under egress (create degrades to '' on the rootless
+  # stub). The rootless engine cannot enforce it, so start must flag it as OPEN
+  # rather than start it silently unprotected.
+  sed -i 's/^egress=.*/egress=lan-deny/' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" start demo
+  assert_success
+  assert_output --partial "OPEN network"
+}
+
 @test "start fails closed when the box's SSH host key changed" {
   "$ISOPOD_ROOT/isopod" create demo --color teal
   # Simulate a taken-over loopback port: the pinned key no longer matches the one

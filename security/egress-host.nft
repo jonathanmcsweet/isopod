@@ -27,9 +27,9 @@
 # interfaces) is untouched.
 #
 # NOT persistent across reboot / firewalld reload / engine restart. Re-run
-# "sudo isopod egress apply" after those, or include this file from
-# /etc/nftables.conf. "isopod doctor" and "isopod egress status" report whether it
-# is currently loaded.
+# "sudo isopod egress apply" after those, or "sudo isopod egress persist" to
+# re-apply it on boot via a systemd unit. "isopod doctor" and "isopod egress
+# status" report whether it is currently loaded.
 
 # Idempotent reload: ensure the table exists, drop it, then define it fresh, so a
 # re-apply never stacks duplicate chains.

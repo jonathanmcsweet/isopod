@@ -34,8 +34,8 @@
 #
 # NOT persistent across reboot / firewalld reload / engine restart. The systemd
 # unit isopod-egress-proxy keeps the proxy up; re-run "sudo isopod egress apply"
-# to reload these rules after such events, or include this file from
-# /etc/nftables.conf. "isopod egress status" reports whether both are active.
+# to reload these rules after such events, or "sudo isopod egress persist" to
+# re-apply them on boot. "isopod egress status" reports whether both are active.
 
 # Idempotent reload: ensure the table exists, drop it, then define it fresh, so a
 # re-apply never stacks duplicate chains. Same table name as egress-host.nft, so

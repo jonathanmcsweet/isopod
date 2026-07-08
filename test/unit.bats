@@ -467,6 +467,34 @@ teardown() { isopod_teardown_env; }
   [[ "$joined" != *"disable_ipv6"* ]]
 }
 
+# ---- egress_start_check (re-verify enforcement at start) ----------------------
+@test "egress_start_check warns when an egress box's firewall is not loaded" {
+  ENGINE=podman
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\negress=lan-deny\n' >"$(box_dir demo)/meta"
+  egress_can_enforce() { return 0; } # pretend rootful
+  egress_rules_loaded() { return 1; } # pretend firewall not loaded
+  run egress_start_check demo
+  assert_output --partial "OPEN network"
+  assert_output --partial "sudo isopod egress apply"
+}
+@test "egress_start_check warns when the engine is now rootless" {
+  ENGINE=podman
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\negress=allow-list\n' >"$(box_dir demo)/meta"
+  egress_can_enforce() { return 1; } # rootless
+  run egress_start_check demo
+  assert_output --partial "rootless"
+  assert_output --partial "OPEN network"
+}
+@test "egress_start_check is silent for a box created without egress" {
+  ENGINE=podman
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\negress=\n' >"$(box_dir demo)/meta"
+  run egress_start_check demo
+  assert_output ""
+}
+
 # ---- egress allow-list mode --------------------------------------------------
 @test "active_egress reads allow-list from the user override" {
   mkdir -p "$ISOPOD_CONFIG_DIR"
