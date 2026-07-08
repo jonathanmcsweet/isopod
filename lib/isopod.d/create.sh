@@ -7,7 +7,7 @@
 cmd_create() {
   local name="" repo="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
-  local container_opt=0
+  local container_opt=0 dev_tools=0
   local -a copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
@@ -71,6 +71,10 @@ cmd_create() {
         ;;
       --container)
         container_opt=1
+        shift
+        ;;
+      --dev)
+        dev_tools=1
         shift
         ;;
       -h | --help)
@@ -162,7 +166,7 @@ cmd_create() {
   chmod 700 "$CONFIG_DIR" "$BOXES_DIR" "$(box_dir "$name")" 2>/dev/null || true
 
   local tag
-  tag=$(build_image "$base")
+  tag=$(build_image "$base" "$dev_tools")
 
   info "Generating dedicated SSH keypair for this box..."
   ssh-keygen -t ed25519 -N '' -C "isopod-$name" -f "$(box_dir "$name")/id_ed25519" -q
@@ -213,6 +217,9 @@ cmd_create() {
     # Record the effective runtime so reconfigure reproduces the box's isolation
     # tier rather than re-defaulting. "container" == plain Tier 1 (no runtime).
     printf 'runtime=%s\n' "$(active_runtime 2>/dev/null | grep . || printf container)"
+    # Effective egress mode (post-resolve), so `start` can re-verify the host
+    # firewall is still enforcing it — a reboot / firewalld reload can drop it.
+    printf 'egress=%s\n' "$(active_egress)"
     printf 'port=%s\n' "$hostport"
     printf 'memory=%s\n' "$memory"
     printf 'cpus=%s\n' "$cpus"
@@ -263,6 +270,9 @@ cmd_create() {
   apply_color "$name" "$hex" || warn "could not apply window color (the sandbox is fine without it)"
 
   render_tmpl create-success.txt
+  # State the effective network posture plainly — a default-on egress that could
+  # not be enforced degraded to an OPEN network above, and that must not be missed.
+  egress_posture_note "$name"
 }
 
 do_copy_in() { # do_copy_in <name> <path>...

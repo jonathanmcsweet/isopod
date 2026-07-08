@@ -39,6 +39,78 @@ teardown() { isopod_teardown_env; }
   assert_failure
 }
 
+# ---- valid_ipv4 / valid_cidr (egress parameter validation) -------------------
+@test "valid_ipv4 accepts a dotted quad" {
+  run valid_ipv4 "10.88.7.1"
+  assert_success
+}
+@test "valid_ipv4 rejects an out-of-range octet" {
+  run valid_ipv4 "10.88.7.256"
+  assert_failure
+}
+@test "valid_ipv4 rejects the wrong number of octets" {
+  run valid_ipv4 "10.88.7"
+  assert_failure
+  run valid_ipv4 "10.88.7.1.1"
+  assert_failure
+}
+@test "valid_ipv4 rejects non-numeric / metacharacters" {
+  run valid_ipv4 '10.0.0.$(id)'
+  assert_failure
+  run valid_ipv4 ""
+  assert_failure
+}
+@test "valid_cidr accepts an IPv4 network" {
+  run valid_cidr "10.88.7.0/24"
+  assert_success
+}
+@test "valid_cidr rejects a missing or oversized prefix length" {
+  run valid_cidr "10.88.7.0"
+  assert_failure
+  run valid_cidr "10.88.7.0/33"
+  assert_failure
+}
+@test "valid_cidr rejects a bad address part" {
+  run valid_cidr "10.88.7.999/24"
+  assert_failure
+}
+@test "valid_ifname accepts a short netdev name" {
+  run valid_ifname "isopod-egr"
+  assert_success
+}
+@test "valid_ifname rejects over-long names and bad characters" {
+  run valid_ifname "thisnameiswaytoolong"
+  assert_failure
+  run valid_ifname 'br eth0'
+  assert_failure
+  run valid_ifname 'br/0'
+  assert_failure
+  run valid_ifname ""
+  assert_failure
+}
+
+# ---- egress_validate_vars ----------------------------------------------------
+@test "egress_validate_vars passes with the shipped defaults" {
+  run egress_validate_vars
+  assert_success
+}
+@test "egress_validate_vars fails closed on a malformed subnet" {
+  ISOPOD_EGRESS_SUBNET="10.88.7.0/notacidr" run egress_validate_vars
+  assert_failure
+  assert_output --partial "ISOPOD_EGRESS_SUBNET"
+}
+@test "egress_validate_vars fails closed on a bad gateway or proxy port" {
+  ISOPOD_EGRESS_GATEWAY="10.88.7" run egress_validate_vars
+  assert_failure
+  ISOPOD_EGRESS_PROXY_PORT="99999" run egress_validate_vars
+  assert_failure
+}
+@test "egress_validate_vars fails closed on a bad bridge interface name" {
+  ISOPOD_EGRESS_IFACE="way-too-long-ifname" run egress_validate_vars
+  assert_failure
+  assert_output --partial "ISOPOD_EGRESS_IFACE"
+}
+
 # ---- preset_color ------------------------------------------------------------
 @test "preset_color maps teal to a hex" {
   run preset_color teal
@@ -69,6 +141,13 @@ teardown() { isopod_teardown_env; }
 @test "image_tag_for uses the localhost/isopod-base prefix" {
   run image_tag_for debian:bookworm-slim
   assert_output --partial "localhost/isopod-base:"
+}
+@test "image_tag_for gives the lean and --dev images distinct tags" {
+  lean="$(image_tag_for debian:bookworm-slim 0)"
+  dev="$(image_tag_for debian:bookworm-slim 1)"
+  [ "$lean" != "$dev" ]
+  # the default (no dev arg) matches the lean tag
+  assert_equal "$lean" "$(image_tag_for debian:bookworm-slim)"
 }
 
 # ---- ctr_name / box_dir ------------------------------------------------------
@@ -372,6 +451,48 @@ teardown() { isopod_teardown_env; }
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" != *"--network isopod0"* ]]
   [[ "$joined" != *"--cap-drop NET_RAW"* ]]
+}
+@test "build_run_args disables in-box IPv6 when egress is active" {
+  [ -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ] || skip "host kernel has no IPv6 — sysctl is skipped by design"
+  ENGINE=podman
+  ISOPOD_EGRESS=lan-deny build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--sysctl net.ipv6.conf.all.disable_ipv6=1"* ]]
+  [[ "$joined" == *"--sysctl net.ipv6.conf.default.disable_ipv6=1"* ]]
+}
+@test "build_run_args leaves IPv6 alone when egress is off" {
+  ENGINE=podman
+  ISOPOD_EGRESS=off build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"disable_ipv6"* ]]
+}
+
+# ---- egress_start_check (re-verify enforcement at start) ----------------------
+@test "egress_start_check warns when an egress box's firewall is not loaded" {
+  ENGINE=podman
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\negress=lan-deny\n' >"$(box_dir demo)/meta"
+  egress_can_enforce() { return 0; } # pretend rootful
+  egress_rules_loaded() { return 1; } # pretend firewall not loaded
+  run egress_start_check demo
+  assert_output --partial "OPEN network"
+  assert_output --partial "sudo isopod egress apply"
+}
+@test "egress_start_check warns when the engine is now rootless" {
+  ENGINE=podman
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\negress=allow-list\n' >"$(box_dir demo)/meta"
+  egress_can_enforce() { return 1; } # rootless
+  run egress_start_check demo
+  assert_output --partial "rootless"
+  assert_output --partial "OPEN network"
+}
+@test "egress_start_check is silent for a box created without egress" {
+  ENGINE=podman
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\negress=\n' >"$(box_dir demo)/meta"
+  run egress_start_check demo
+  assert_output ""
 }
 
 # ---- egress allow-list mode --------------------------------------------------

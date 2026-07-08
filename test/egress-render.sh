@@ -43,6 +43,16 @@ case "$allow_list" in *"tcp dport 8118"*) : ;; *) fail "allow-list ruleset does 
 case "$allow_list" in *"ip saddr 10.88.7.0/24 drop"*) : ;; *) fail "allow-list ruleset does not default-deny box egress" ;; esac
 ok "allow-list ruleset renders, default-denies, opens only the proxy port"
 
+# Both rulesets must drop box-initiated IPv6 (scoped to the isopod bridge) and
+# spare host IPv6 on other interfaces — the host-enforced backstop to the v4 rules.
+for pair in "lan-deny:$lan_deny" "allow-list:$allow_list"; do
+  label="${pair%%:*}"
+  rs="${pair#*:}"
+  case "$rs" in *'meta nfproto ipv6 iifname "isopod-egr" drop'*) : ;; *) fail "$label ruleset does not drop box IPv6 egress on the isopod bridge" ;; esac
+  case "$rs" in *'meta nfproto ipv6 iifname != "isopod-egr" accept'*) : ;; *) fail "$label ruleset does not spare non-box host IPv6" ;; esac
+done
+ok "both rulesets drop box IPv6 egress (scoped to the isopod bridge), spare host IPv6"
+
 # --- tinyproxy config + systemd unit ----------------------------------------
 # Render exactly as egress_apply_proxy does: source isopod for render_tmpl and
 # set the variables the templates read via dynamic scope.
@@ -63,6 +73,14 @@ assert_no_unexpanded "systemd unit" "$unit"
 case "$unit" in *'kill -HUP $MAINPID'*) : ;; *) fail "systemd unit: \$MAINPID was not preserved literally" ;; esac
 case "$unit" in *"ExecStart=tinyproxy -d -c"*) : ;; *) fail "systemd unit: ExecStart is wrong" ;; esac
 ok "systemd unit renders (ExecStart + literal \$MAINPID)"
+
+# nft boot-persistence unit (isopod egress persist). The nft binary path is
+# resolved at persist time and passed via ISOPOD_NFT_BIN.
+nft_unit="$(ISOPOD_SOURCED=1 . ./isopod && ISOPOD_NFT_BIN=/usr/sbin/nft render_tmpl isopod-egress-nft.service.tmpl)"
+assert_no_unexpanded "egress nft unit" "$nft_unit"
+case "$nft_unit" in *"ExecStart=/usr/sbin/nft -f "*) : ;; *) fail "nft unit: ExecStart is wrong" ;; esac
+case "$nft_unit" in *"After=nftables.service firewalld.service"*) : ;; *) fail "nft unit: boot ordering is wrong" ;; esac
+ok "egress nft persistence unit renders (ExecStart + boot ordering)"
 
 # --- allow-list -> filter regexes -------------------------------------------
 regexes="$(ISOPOD_SOURCED=1 . ./isopod && egress_filter_regexes | sort -u)"
