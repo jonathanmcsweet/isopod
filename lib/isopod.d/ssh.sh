@@ -92,9 +92,21 @@ scan_host_key() { # scan_host_key <name>
       # field, which legitimately changes when the box gets a new published port.
       if [ -s "$kh" ] &&
         [ "$(awk '{print $2, $3}' "$kh" | sort -u)" != "$(awk '{print $2, $3}' "$tmp" | sort -u)" ]; then
-        warn "SSH host key for box '$name' CHANGED since it was pinned.
-     Expected only if you recreated the box. If you did not, another process may have
-     taken over its loopback port — stop and investigate. isopod is adopting the new key."
+        # A box's key is fixed at first boot and persists across start/stop/
+        # reconfigure, and a recreated box gets a fresh (empty) known_hosts, so an
+        # already-pinned box should never present a different key. If one does, the
+        # loopback port may have been taken over — fail CLOSED (refuse to adopt a
+        # possibly-hostile key) rather than pin it and connect. ISOPOD_ACCEPT_NEW_HOSTKEY=1
+        # restores the old adopt-and-warn behavior for a deliberate out-of-band rebuild.
+        if [ "${ISOPOD_ACCEPT_NEW_HOSTKEY:-0}" != 1 ]; then
+          rm -f "$tmp"
+          die "SSH host key for box '$name' CHANGED since it was pinned (127.0.0.1:$port).
+     A box's key persists across start/stop/reconfigure, so this should not happen unless you
+     recreated it — another process may have taken over its loopback port. Refusing to connect.
+     If you deliberately recreated it: rm -f '$kh'  then retry, or set
+     ISOPOD_ACCEPT_NEW_HOSTKEY=1 to adopt the new key this run."
+        fi
+        warn "SSH host key for box '$name' CHANGED — adopting it (ISOPOD_ACCEPT_NEW_HOSTKEY=1)."
       fi
       mv "$tmp" "$kh"
       chmod 600 "$kh"

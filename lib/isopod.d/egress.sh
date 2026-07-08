@@ -108,13 +108,12 @@ egress_can_enforce() { # egress_can_enforce <engine>
 egress_check_subnet() { # egress_check_subnet <engine> <subnets>
   local engine="$1" subnets="$2"
   [ -n "${subnets// /}" ] || return 0
-  # A pre-existing dual-stack network gives a box an IPv6 address with no v6
-  # route filtered by the v4-only ruleset — an unfiltered egress path around the
-  # whole firewall. Freshly created networks are v4-only (neither engine enables
-  # IPv6 by default); this catches a network created dual-stack out of band.
+  # A dual-stack network would hand a box a v6 address the v4-only ruleset can't
+  # filter. isopod disables IPv6 inside each isolated box (build_run_args sysctls)
+  # so this is closed even here, but a v4-only network is cleaner — flag it.
   case "$subnets" in
-    *:*) warn "network '$ISOPOD_EGRESS_NET' has an IPv6 subnet — a box with a v6 address has an
-       unfiltered egress path around the v4 firewall. Recreate it v4-only:
+    *:*) warn "network '$ISOPOD_EGRESS_NET' has an IPv6 subnet. isopod disables IPv6 inside the box
+       so egress stays filtered, but a v4-only network is cleaner. Recreate it v4-only:
        $engine network rm $ISOPOD_EGRESS_NET" ;;
   esac
   case " $subnets " in

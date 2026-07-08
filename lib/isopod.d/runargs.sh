@@ -114,6 +114,16 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
         -e "no_proxy=localhost,127.0.0.1,::1" -e "NO_PROXY=localhost,127.0.0.1,::1")
       ;;
   esac
+  # isopod's egress firewall is IPv4-only, so disable IPv6 inside an isolated box:
+  # a dual-stack bridge would otherwise give the box a v6 address with an
+  # unfiltered v6 path around the host rules. The box can't re-enable it (NET_ADMIN
+  # is dropped above). Network-namespaced sysctls, applied per container.
+  case "$(active_egress)" in
+    lan-deny | allow-list)
+      RUN_ARGS+=(--sysctl net.ipv6.conf.all.disable_ipv6=1
+        --sysctl net.ipv6.conf.default.disable_ipv6=1)
+      ;;
+  esac
   # Loopback-only app port publishings (from --expose / config.yaml).
   local spec
   for spec in "$@"; do [ -n "$spec" ] && RUN_ARGS+=(-p "127.0.0.1:$spec"); done
