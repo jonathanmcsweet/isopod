@@ -192,13 +192,7 @@ cmd_secret() {
       secret_store_rm "$name"
       info "removed secret '$name'"
       ;;
-    -h | --help | help)
-      printf 'usage: isopod secret set <NAME> | ls | rm <NAME>\n'
-      printf '  set   store a value (read from stdin or a hidden prompt — never argv)\n'
-      printf '  ls    list stored secret names (values are never printed)\n'
-      printf '  rm    delete a stored secret\n'
-      printf 'Inject into a box at create time: isopod create <name> --secret NAME[:path]\n'
-      ;;
+    -h | --help | help) render_tmpl secret-help.txt ;;
     *) die "unknown secret action: $action (try: isopod secret set|ls|rm)" ;;
   esac
 }

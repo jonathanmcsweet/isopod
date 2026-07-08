@@ -1,0 +1,6 @@
+isopod egress
+
+  mode:      ${mode:-off}
+  network:   $ISOPOD_EGRESS_NET ($ISOPOD_EGRESS_SUBNET), gateway $ISOPOD_EGRESS_GATEWAY
+${mode_block}  ruleset:   $(egress_ruleset)
+$fw_line

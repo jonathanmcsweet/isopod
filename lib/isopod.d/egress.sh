@@ -533,56 +533,45 @@ cmd_egress() {
     log) egress_log "$@" ;;
     denied) egress_denied ;;
     rules | show) render_tmpl "$(egress_ruleset)" ;;
-    -h | --help | help)
-      printf 'usage: isopod egress [status|apply|observe|persist|unpersist|allow <domain>|log [-f]|denied|rules]\n'
-      printf '  status     mode, network, and proxy/firewall state\n'
-      printf '  apply      load the host firewall; for allow-list also (re)start the filtering proxy\n'
-      printf '  persist    install a systemd unit that re-applies the firewall on boot\n'
-      printf '  unpersist  remove that boot unit\n'
-      printf '  observe    allow-list only: run the proxy permit-all but log everything, to discover\n'
-      printf '             which domains a workflow needs; then switch back with apply\n'
-      printf '  allow      add a domain to your allow-list override and reload the proxy\n'
-      printf '  log        tail the proxy access log (-f to follow)\n'
-      printf '  denied     show hostnames the proxy refused (candidates to allow)\n'
-      printf '  rules      print the rendered nftables ruleset that apply would load\n'
-      ;;
+    -h | --help | help) render_tmpl egress-help.txt ;;
     *) die "unknown egress action: $action (try: isopod egress status|apply|observe|persist|unpersist|allow|log|denied|rules)" ;;
   esac
 }
 
 egress_status() {
-  printf 'isopod egress\n\n'
-  local mode
+  # Build the mode-specific block and the firewall line as locals, then lay them
+  # out via share/egress-status.txt (static text lives in share/, not inline).
+  local mode mode_block="" fw_line
   mode="$(active_egress)"
-  printf '  mode:      %s\n' "${mode:-off}"
-  printf '  network:   %s (%s), gateway %s\n' "$ISOPOD_EGRESS_NET" "$ISOPOD_EGRESS_SUBNET" "$ISOPOD_EGRESS_GATEWAY"
   case "$mode" in
     allow-list)
-      printf '  proxy:     %s:%s (host-side, hostname allow-list)\n' "$ISOPOD_EGRESS_GATEWAY" "$ISOPOD_EGRESS_PROXY_PORT"
-      local prc=0
+      local prc=0 svc n
       egress_proxy_active || prc=$?
       case "$prc" in
-        0) printf '  proxy svc: active (%s)\n' "$ISOPOD_EGRESS_PROXY_UNIT" ;;
-        1) printf '  proxy svc: NOT running — run: sudo isopod egress apply\n' ;;
-        2) printf '  proxy svc: unknown (systemctl not found)\n' ;;
+        0) svc="active ($ISOPOD_EGRESS_PROXY_UNIT)" ;;
+        1) svc="NOT running — run: sudo isopod egress apply" ;;
+        *) svc="unknown (systemctl not found)" ;;
       esac
-      local n
       n="$(egress_filter_regexes | sort -u | grep -c . || true)"
-      printf '  allowlist: %s domains (%s + %s)\n' "$n" "$ISOPOD_EGRESS_ALLOWLIST" "$USER_EGRESS_ALLOWLIST"
-      printf '  log:       %s\n' "$ISOPOD_EGRESS_PROXY_LOG"
+      mode_block+="  proxy:     $ISOPOD_EGRESS_GATEWAY:$ISOPOD_EGRESS_PROXY_PORT (host-side, hostname allow-list)"$'\n'
+      mode_block+="  proxy svc: $svc"$'\n'
+      mode_block+="  allowlist: $n domains ($ISOPOD_EGRESS_ALLOWLIST + $USER_EGRESS_ALLOWLIST)"$'\n'
+      mode_block+="  log:       $ISOPOD_EGRESS_PROXY_LOG"$'\n'
       ;;
     lan-deny)
-      printf '  dns:       %s (public resolver — box cannot query the host/LAN resolver)\n' "$ISOPOD_EGRESS_DNS"
+      mode_block="  dns:       $ISOPOD_EGRESS_DNS (public resolver — box cannot query the host/LAN resolver)"$'\n'
       ;;
   esac
-  printf '  ruleset:   %s\n' "$(egress_ruleset)"
   local rc=0
   egress_rules_loaded || rc=$?
   case "$rc" in
-    0) printf '  firewall:  loaded (table inet isopod)\n' ;;
-    1) printf '  firewall:  NOT loaded — run: sudo isopod egress apply\n' ;;
-    2) printf '  firewall:  unknown (need root to read nftables; try: sudo isopod egress status)\n' ;;
+    0) fw_line="  firewall:  loaded (table inet isopod)" ;;
+    1) fw_line="  firewall:  NOT loaded — run: sudo isopod egress apply" ;;
+    *) fw_line="  firewall:  unknown (need root to read nftables; try: sudo isopod egress status)" ;;
   esac
+  # Consumed by egress-status.txt via render_tmpl's dynamic scope (invisible to the linter).
+  : "$mode" "$mode_block" "$fw_line"
+  render_tmpl egress-status.txt
 }
 
 # Load the firewall (and, for allow-list, the proxy). <want> is enforce|observe.
