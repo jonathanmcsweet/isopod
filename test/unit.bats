@@ -74,6 +74,20 @@ teardown() { isopod_teardown_env; }
   run valid_cidr "10.88.7.999/24"
   assert_failure
 }
+@test "valid_ifname accepts a short netdev name" {
+  run valid_ifname "isopod-egr"
+  assert_success
+}
+@test "valid_ifname rejects over-long names and bad characters" {
+  run valid_ifname "thisnameiswaytoolong"
+  assert_failure
+  run valid_ifname 'br eth0'
+  assert_failure
+  run valid_ifname 'br/0'
+  assert_failure
+  run valid_ifname ""
+  assert_failure
+}
 
 # ---- egress_validate_vars ----------------------------------------------------
 @test "egress_validate_vars passes with the shipped defaults" {
@@ -90,6 +104,11 @@ teardown() { isopod_teardown_env; }
   assert_failure
   ISOPOD_EGRESS_PROXY_PORT="99999" run egress_validate_vars
   assert_failure
+}
+@test "egress_validate_vars fails closed on a bad bridge interface name" {
+  ISOPOD_EGRESS_IFACE="way-too-long-ifname" run egress_validate_vars
+  assert_failure
+  assert_output --partial "ISOPOD_EGRESS_IFACE"
 }
 
 # ---- preset_color ------------------------------------------------------------
@@ -434,6 +453,7 @@ teardown() { isopod_teardown_env; }
   [[ "$joined" != *"--cap-drop NET_RAW"* ]]
 }
 @test "build_run_args disables in-box IPv6 when egress is active" {
+  [ -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ] || skip "host kernel has no IPv6 — sysctl is skipped by design"
   ENGINE=podman
   ISOPOD_EGRESS=lan-deny build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"

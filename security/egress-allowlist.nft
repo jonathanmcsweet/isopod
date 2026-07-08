@@ -26,7 +26,11 @@
 # traffic, dropped below). It does not need one — the proxy resolves allow-listed
 # names itself from the CONNECT/Host hostname. This also closes DNS-tunnel exfil.
 #
-# IPv4-only by design (no IPv6 route for a box to slip around these v4 rules).
+# IPv4-only by default. As a host-enforced backstop, box-initiated IPv6 is dropped
+# too — the box reaches the proxy only over IPv4, so it needs no v6, and the proxy
+# (running in the host netns) makes any v6 upstream connection on the box's behalf.
+# The ip6 drops are scoped to the isopod bridge ($ISOPOD_EGRESS_IFACE); non-box
+# IPv6 is untouched.
 #
 # NOT persistent across reboot / firewalld reload / engine restart. The systemd
 # unit isopod-egress-proxy keeps the proxy up; re-run "sudo isopod egress apply"
@@ -49,6 +53,9 @@ table inet isopod {
 		ip saddr != $ISOPOD_EGRESS_SUBNET accept
 		ct state established,related accept
 		ip saddr $ISOPOD_EGRESS_SUBNET drop
+		# Box-initiated IPv6 (any destination) — dropped (the box egresses only via
+		# the v4 proxy). Scoped to the isopod bridge; replies accepted above.
+		meta nfproto ipv6 iifname "$ISOPOD_EGRESS_IFACE" drop
 	}
 
 	# Box -> the HOST itself, reached on the bridge gateway IP. The ONLY new flow
@@ -57,6 +64,10 @@ table inet isopod {
 	chain input {
 		type filter hook input priority -5; policy accept;
 		ip saddr != $ISOPOD_EGRESS_SUBNET accept
+		# IPv6 not from the isopod bridge is host traffic — accept it so this table
+		# never breaks the host's own inbound v6. Box v6 (from the bridge) falls
+		# through to the new-connection drop below (the proxy is reached over v4).
+		meta nfproto ipv6 iifname != "$ISOPOD_EGRESS_IFACE" accept
 		ct state established,related accept
 		ip daddr $ISOPOD_EGRESS_GATEWAY tcp dport $ISOPOD_EGRESS_PROXY_PORT ct state new accept
 		ct state new drop

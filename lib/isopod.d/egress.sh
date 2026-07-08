@@ -66,6 +66,8 @@ egress_validate_vars() {
     die "ISOPOD_EGRESS_DNS='$ISOPOD_EGRESS_DNS' is not a valid IPv4 address"
   valid_port "$ISOPOD_EGRESS_PROXY_PORT" ||
     die "ISOPOD_EGRESS_PROXY_PORT='$ISOPOD_EGRESS_PROXY_PORT' is not a valid TCP port (1-65535)"
+  valid_ifname "$ISOPOD_EGRESS_IFACE" ||
+    die "ISOPOD_EGRESS_IFACE='$ISOPOD_EGRESS_IFACE' is not a valid interface name (<=15 chars, [A-Za-z0-9._-])"
 }
 
 # The active nftables ruleset for the current mode: the default LAN-deny rules,
@@ -108,12 +110,14 @@ egress_can_enforce() { # egress_can_enforce <engine>
 egress_check_subnet() { # egress_check_subnet <engine> <subnets>
   local engine="$1" subnets="$2"
   [ -n "${subnets// /}" ] || return 0
-  # A dual-stack network would hand a box a v6 address the v4-only ruleset can't
-  # filter. isopod disables IPv6 inside each isolated box (build_run_args sysctls)
-  # so this is closed even here, but a v4-only network is cleaner — flag it.
+  # A dual-stack network hands a box a v6 address. isopod drops box IPv6 egress at
+  # the host firewall (scoped to its bridge '$ISOPOD_EGRESS_IFACE') and disables
+  # IPv6 in the box, so this stays closed — but a network recreated out of band may
+  # not carry the fixed bridge name the nft rules target. A v4-only network is
+  # cleaner; flag it.
   case "$subnets" in
-    *:*) warn "network '$ISOPOD_EGRESS_NET' has an IPv6 subnet. isopod disables IPv6 inside the box
-       so egress stays filtered, but a v4-only network is cleaner. Recreate it v4-only:
+    *:*) warn "network '$ISOPOD_EGRESS_NET' has an IPv6 subnet. isopod drops box IPv6 egress at the
+       host firewall and disables IPv6 in the box, but a v4-only network is cleaner. Recreate it:
        $engine network rm $ISOPOD_EGRESS_NET" ;;
   esac
   case " $subnets " in
@@ -143,13 +147,17 @@ ensure_egress_network() { # ensure_egress_network <engine>
     fi
   fi
   info "Creating dedicated egress network '$ISOPOD_EGRESS_NET' ($ISOPOD_EGRESS_SUBNET)..."
+  # Pin a fixed host-bridge interface name so the nft rulesets can statically scope
+  # their IPv6 drop to it (iifname). Without this the engines pick an unpredictable
+  # name (podman1 / br-<id>) the rules could not target.
   if [ "$engine" = docker ]; then
     docker network create --subnet "$ISOPOD_EGRESS_SUBNET" --gateway "$ISOPOD_EGRESS_GATEWAY" \
-      -o com.docker.network.bridge.enable_icc=false "$ISOPOD_EGRESS_NET" >/dev/null ||
+      -o com.docker.network.bridge.enable_icc=false \
+      -o com.docker.network.bridge.name="$ISOPOD_EGRESS_IFACE" "$ISOPOD_EGRESS_NET" >/dev/null ||
       die "could not create docker network '$ISOPOD_EGRESS_NET'"
   else
     podman network create --subnet "$ISOPOD_EGRESS_SUBNET" --gateway "$ISOPOD_EGRESS_GATEWAY" \
-      "$ISOPOD_EGRESS_NET" >/dev/null ||
+      --interface-name "$ISOPOD_EGRESS_IFACE" "$ISOPOD_EGRESS_NET" >/dev/null ||
       die "could not create podman network '$ISOPOD_EGRESS_NET'"
   fi
 }

@@ -188,6 +188,11 @@ valid_cidr() { # valid_cidr <a.b.c.d/nn> -> true for an IPv4 network in CIDR for
   [ "${#bits}" -le 2 ] && [ "$bits" -ge 0 ] && [ "$bits" -le 32 ]
 }
 
+valid_ifname() { # valid_ifname <name> -> a Linux netdev name (<=15 chars, safe charset)
+  case "$1" in '' | *[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#1}" -le 15 ]
+}
+
 # ---------------------------------------------------------------------------
 # image build (share/Dockerfile)
 # ---------------------------------------------------------------------------
