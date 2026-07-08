@@ -43,6 +43,16 @@ case "$allow_list" in *"tcp dport 8118"*) : ;; *) fail "allow-list ruleset does 
 case "$allow_list" in *"ip saddr 10.88.7.0/24 drop"*) : ;; *) fail "allow-list ruleset does not default-deny box egress" ;; esac
 ok "allow-list ruleset renders, default-denies, opens only the proxy port"
 
+# Both rulesets must drop box-initiated IPv6 (scoped to the isopod bridge) and
+# spare host IPv6 on other interfaces — the host-enforced backstop to the v4 rules.
+for pair in "lan-deny:$lan_deny" "allow-list:$allow_list"; do
+  label="${pair%%:*}"
+  rs="${pair#*:}"
+  case "$rs" in *'meta nfproto ipv6 iifname "isopod-egr" drop'*) : ;; *) fail "$label ruleset does not drop box IPv6 egress on the isopod bridge" ;; esac
+  case "$rs" in *'meta nfproto ipv6 iifname != "isopod-egr" accept'*) : ;; *) fail "$label ruleset does not spare non-box host IPv6" ;; esac
+done
+ok "both rulesets drop box IPv6 egress (scoped to the isopod bridge), spare host IPv6"
+
 # --- tinyproxy config + systemd unit ----------------------------------------
 # Render exactly as egress_apply_proxy does: source isopod for render_tmpl and
 # set the variables the templates read via dynamic scope.
