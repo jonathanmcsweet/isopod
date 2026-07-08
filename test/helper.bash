@@ -88,3 +88,13 @@ assert_stub_not_called() {
     return 1
   fi
 }
+
+# Assert inject_secrets streamed a value to <path> over ssh in the base64-armored
+# form: the target path is delivered as base64 and reconstructed in the box
+# (base64 -d), so it never appears as a raw shell token. See inject_secrets in
+# lib/isopod.d/secret.sh.
+assert_secret_injected() {
+  local path="$1" b64
+  b64=$(printf '%s' "$path" | base64 | tr -d '\n')
+  assert_stub_called "ssh .*$b64.*base64 -d.*chmod 400"
+}

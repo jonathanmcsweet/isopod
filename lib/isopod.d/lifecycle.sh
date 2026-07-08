@@ -52,6 +52,10 @@ cmd_start() {
   acquire_lock # refresh_port may rewrite the shared ssh_config
   "$ENGINE" start "$(ctr_name "$name")" >/dev/null
   refresh_port "$name"
+  # A box created with egress is on the isopod bridge; its isolation is the host
+  # firewall, which a reboot / firewalld reload can silently drop. Say so loudly
+  # rather than start it OPEN in silence.
+  egress_start_check "$name"
   scan_host_key "$name" >/dev/null || true # keeps stderr: a key-change warning must show
   # The secrets tmpfs is memory-backed, so a stopped box holds no secrets —
   # re-inject them on every start. Boxes without secrets skip the SSH wait.
@@ -196,6 +200,7 @@ cmd_reconfigure() {
   meta_set "$name" image "$snap"
   meta_set "$name" port "$hostport"
   meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
+  meta_set "$name" egress "$(active_egress)"
   meta_set "$name" memory "$d_memory"
   meta_set "$name" cpus "$d_cpus"
   meta_set "$name" color "$hex"
@@ -224,6 +229,7 @@ cmd_reconfigure() {
   esac
 
   info "reconfigured '$name' — see: isopod info $name"
+  egress_posture_note "$name"
 }
 
 cmd_shell() {

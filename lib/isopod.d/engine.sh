@@ -170,6 +170,29 @@ valid_cpus() { # valid_cpus <v> -> a positive (optionally fractional) CPU count
   [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "$1" != 0 && "$1" != 0.0 ]]
 }
 
+valid_ipv4() { # valid_ipv4 <a.b.c.d> -> true for a dotted-quad, each octet 0-255
+  local o1 o2 o3 o4 rest o IFS=.
+  read -r o1 o2 o3 o4 rest <<<"$1"
+  [ -z "$rest" ] || return 1
+  for o in "$o1" "$o2" "$o3" "$o4"; do
+    case "$o" in '' | *[!0-9]*) return 1 ;; esac
+    [ "${#o}" -le 3 ] && [ "$o" -ge 0 ] && [ "$o" -le 255 ] || return 1
+  done
+}
+
+valid_cidr() { # valid_cidr <a.b.c.d/nn> -> true for an IPv4 network in CIDR form
+  case "$1" in */*) ;; *) return 1 ;; esac
+  local ip="${1%/*}" bits="${1#*/}"
+  valid_ipv4 "$ip" || return 1
+  case "$bits" in '' | *[!0-9]*) return 1 ;; esac
+  [ "${#bits}" -le 2 ] && [ "$bits" -ge 0 ] && [ "$bits" -le 32 ]
+}
+
+valid_ifname() { # valid_ifname <name> -> a Linux netdev name (<=15 chars, safe charset)
+  case "$1" in '' | *[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#1}" -le 15 ]
+}
+
 # ---------------------------------------------------------------------------
 # image build (share/Dockerfile)
 # ---------------------------------------------------------------------------
@@ -182,13 +205,15 @@ image_exists() { # image_exists <tag>
   "$ENGINE" image exists "$1" 2>/dev/null || "$ENGINE" image inspect "$1" >/dev/null 2>&1
 }
 
-image_tag_for() { # image_tag_for <base-image>
+image_tag_for() { # image_tag_for <base-image> [dev-tools 0|1]
   [ -f "$ISOPOD_DOCKERFILE" ] || die "missing Dockerfile: $ISOPOD_DOCKERFILE"
   [ -f "$ISOPOD_ENTRYPOINT" ] || die "missing entrypoint: $ISOPOD_ENTRYPOINT"
-  local hash
+  local dev="${2:-0}" hash
+  # The dev-tools flag is part of the cache key: the lean and --dev images are
+  # built from the same Dockerfile but differ, so they must not share a tag.
   hash=$({
     cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT"
-    printf '%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION"
+    printf '%s\0%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION" "$dev"
   } | sha_hex)
   printf 'localhost/isopod-base:%s' "$hash"
 }
@@ -202,14 +227,14 @@ engine_build_extra() {
   printf '%s\n' $ISOPOD_BUILD_ARGS
 }
 
-build_image() { # build_image <base-image> -> echoes tag
-  local base="$1" tag
-  tag=$(image_tag_for "$base")
+build_image() { # build_image <base-image> [dev-tools 0|1] -> echoes tag
+  local base="$1" dev="${2:-0}" tag
+  tag=$(image_tag_for "$base" "$dev")
   if image_exists "$tag"; then
     printf '%s' "$tag"
     return 0
   fi
-  info "Building sandbox base image from $base (one-time)..." >&2
+  info "Building sandbox base image from $base (one-time$([ "$dev" = 1 ] && printf ', with --dev toolchain'))..." >&2
   local -a extra_build=()
   mapfile -t extra_build < <(engine_build_extra)
   # Minimal build context: just the entrypoint the Dockerfile COPYs in.
@@ -218,7 +243,7 @@ build_image() { # build_image <base-image> -> echoes tag
   cp "$ISOPOD_ENTRYPOINT" "$ctx/isopod-entrypoint"
   if ! "$ENGINE" build "${extra_build[@]}" \
     --build-arg "ISOPOD_BASE=$base" --build-arg "ISOPOD_USER=$CONTAINER_USER" \
-    --build-arg "ISOPOD_SSHD_PORT=$BOX_SSHD_PORT" \
+    --build-arg "ISOPOD_SSHD_PORT=$BOX_SSHD_PORT" --build-arg "ISOPOD_DEV_TOOLS=$dev" \
     -t "$tag" -f "$ISOPOD_DOCKERFILE" "$ctx" >&2; then
     rm -rf "$ctx"
     die "image build failed (see output above)"

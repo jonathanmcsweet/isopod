@@ -60,7 +60,7 @@ _isopod() {
   if [[ "$cur" == -* ]]; then
     local opts=""
     case "$sub" in
-      create) opts="--repo --branch --copy --color --image --dockerfile --expose --secret --engine --memory --cpus --port --no-sudo --container" ;;
+      create) opts="--repo --branch --copy --color --image --dockerfile --expose --secret --engine --memory --cpus --port --no-sudo --container --dev" ;;
       reconfigure) opts="--expose --memory --cpus --color" ;;
       code) opts="--app" ;;
       rm) opts="--force" ;;
@@ -77,7 +77,7 @@ _isopod() {
       mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
       ;;
     egress)
-      mapfile -t COMPREPLY < <(compgen -W "status apply observe allow log denied rules" -- "$cur")
+      mapfile -t COMPREPLY < <(compgen -W "status apply observe persist unpersist allow log denied rules" -- "$cur")
       ;;
     secret)
       if [ "$cword" -eq 2 ]; then

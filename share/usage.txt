@@ -59,6 +59,10 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
   --container           Run as a PLAIN container instead of the default microVM
                         (lower isolation). Use when no microVM runtime/KVM is
                         available, or you accept a shared-kernel sandbox.
+  --dev                 Add the dev/test toolchain (nested podman/docker, the
+                        docker group, shellcheck/shfmt/pexpect/nftables) so the
+                        box can run isopod's own test suite. Off by default —
+                        the lean base has none of this extra attack surface.
   --port <n>            Fixed host port for SSH (default: random free port,
                         bound to 127.0.0.1 only)
   --secret NAME[:path]  Inject secret NAME (stored via 'isopod secret set') into

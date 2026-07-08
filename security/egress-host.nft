@@ -20,14 +20,16 @@
 # (which knows your internal PTRs and split-horizon names) unreachable, so a rogue
 # agent cannot enumerate the network over DNS.
 #
-# The isopod egress network is IPv4-only by design: a box has no IPv6 route, so
-# there is no v6 path to slip around these v4 rules. If you deliberately make the
-# network dual-stack, also load the commented ip6 rules below.
+# The isopod egress network is IPv4-only by default. As a host-enforced backstop,
+# box-initiated IPv6 is also dropped: the rules below match traffic on the isopod
+# bridge ($ISOPOD_EGRESS_IFACE) by nfproto, so even a dual-stack bridge cannot give
+# a box an unfiltered v6 path around these v4 rules. Non-box IPv6 (other host
+# interfaces) is untouched.
 #
 # NOT persistent across reboot / firewalld reload / engine restart. Re-run
-# "sudo isopod egress apply" after those, or include this file from
-# /etc/nftables.conf. "isopod doctor" and "isopod egress status" report whether it
-# is currently loaded.
+# "sudo isopod egress apply" after those, or "sudo isopod egress persist" to
+# re-apply it on boot via a systemd unit. "isopod doctor" and "isopod egress
+# status" report whether it is currently loaded.
 
 # Idempotent reload: ensure the table exists, drop it, then define it fresh, so a
 # re-apply never stacks duplicate chains.
@@ -58,7 +60,10 @@ table inet isopod {
 		ip daddr @lan4 drop
 		ip daddr 224.0.0.0/4 drop
 		ip daddr 255.255.255.255 drop
-		# ip6 daddr { ::1, fe80::/10, fc00::/7, fec0::/10, ff00::/8 } drop  # dual-stack only
+		# Box-initiated IPv6 (any destination) — dropped. Scoped to the isopod
+		# bridge so host IPv6 forwarding on other interfaces is untouched; replies
+		# are already accepted by the ct state rule above.
+		meta nfproto ipv6 iifname "$ISOPOD_EGRESS_IFACE" drop
 	}
 
 	# Box -> the HOST itself, reached on the bridge gateway IP. This is the INPUT
@@ -67,6 +72,10 @@ table inet isopod {
 	chain input {
 		type filter hook input priority -5; policy accept;
 		ip saddr != $ISOPOD_EGRESS_SUBNET accept
+		# IPv6 not from the isopod bridge is host traffic — accept it, so loading
+		# this table never breaks the host's own inbound v6. Box v6 (from the
+		# bridge) falls through to the new-connection drop below.
+		meta nfproto ipv6 iifname != "$ISOPOD_EGRESS_IFACE" accept
 		ct state established,related accept
 		ct state new drop
 	}

@@ -214,6 +214,35 @@ EOF
   assert_stub_called "podman build .*-f $ISOPOD_ROOT/share/Dockerfile"
 }
 
+@test "create builds a lean base by default (no dev/test toolchain)" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called "podman build .*--build-arg ISOPOD_DEV_TOOLS=0"
+}
+
+@test "create --dev requests the dev/test toolchain in the image build" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal --dev
+  assert_success
+  assert_stub_called "podman build .*--build-arg ISOPOD_DEV_TOOLS=1"
+}
+
+@test "create makes a degraded OPEN network unmissable" {
+  # The stubbed podman reports rootless, so default-on egress cannot be enforced
+  # and resolve_egress degrades to an OPEN network. The create summary must say so.
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_output --partial "Network: OPEN"
+  assert_output --partial "could NOT be enforced"
+  assert_output --partial "sudo isopod egress apply"
+}
+
+@test "create with egress disabled by config notes OPEN without the degrade warning" {
+  ISOPOD_EGRESS=off run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_output --partial "Network: OPEN (egress disabled by config)"
+  refute_output --partial "could NOT be enforced"
+}
+
 # ---- --expose ----------------------------------------------------------------
 @test "create --expose publishes ports on loopback only" {
   run "$ISOPOD_ROOT/isopod" create demo --expose 3001:3000 --expose 8080 --color teal
@@ -746,8 +775,8 @@ seed_secret() { # seed_secret <name> <value>
   # tmpfs mount on the engine command line (ownership is applied by the
   # entrypoint at boot; uid=/gid= mount options are not portable)
   assert_stub_called 'podman run .*--tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700'
-  # injection happens over SSH stdin into the tmpfs path
-  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  # injection happens over SSH stdin into the tmpfs path (path base64-armored)
+  assert_secret_injected /run/secrets/API_KEY
   # the VALUE never reaches any stubbed command's argv (engine, ssh, ...)
   assert_stub_not_called 's3kr1tv4lu3'
   # name:path pairs persist in meta for start/reconfigure re-injection
@@ -778,7 +807,7 @@ seed_secret() { # seed_secret <name> <value>
   : >"$STUB_LOG"
   run "$ISOPOD_ROOT/isopod" start demo
   assert_success
-  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  assert_secret_injected /run/secrets/API_KEY
   assert_stub_not_called 's3kr1tv4lu3'
 }
 
@@ -791,6 +820,36 @@ seed_secret() { # seed_secret <name> <value>
   assert_stub_not_called '^ssh '
 }
 
+@test "start warns when an egress box's firewall protection is gone" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  # Mark the box as created under egress (create degrades to '' on the rootless
+  # stub). The rootless engine cannot enforce it, so start must flag it as OPEN
+  # rather than start it silently unprotected.
+  sed -i 's/^egress=.*/egress=lan-deny/' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" start demo
+  assert_success
+  assert_output --partial "OPEN network"
+}
+
+@test "start fails closed when the box's SSH host key changed" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  # Simulate a taken-over loopback port: the pinned key no longer matches the one
+  # ssh-keyscan now reports (the stub always reports AAAAfakehostkey).
+  printf '[127.0.0.1]:45678 ssh-ed25519 AAAAdifferenthostkey\n' >"$ISOPOD_CONFIG_DIR/boxes/demo/known_hosts"
+  run "$ISOPOD_ROOT/isopod" start demo
+  assert_failure
+  assert_output --partial "host key for box 'demo' CHANGED"
+  assert_output --partial "Refusing to connect"
+}
+
+@test "start adopts a changed host key only with ISOPOD_ACCEPT_NEW_HOSTKEY=1" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  printf '[127.0.0.1]:45678 ssh-ed25519 AAAAdifferenthostkey\n' >"$ISOPOD_CONFIG_DIR/boxes/demo/known_hosts"
+  ISOPOD_ACCEPT_NEW_HOSTKEY=1 run "$ISOPOD_ROOT/isopod" start demo
+  assert_success
+  assert_output --partial "adopting it"
+}
+
 @test "reconfigure recreates the tmpfs and re-injects secrets" {
   seed_secret API_KEY 's3kr1tv4lu3'
   "$ISOPOD_ROOT/isopod" create demo --color teal --secret API_KEY
@@ -798,7 +857,7 @@ seed_secret() { # seed_secret <name> <value>
   run "$ISOPOD_ROOT/isopod" reconfigure demo
   assert_success
   assert_stub_called 'podman run .*--tmpfs /run/secrets:'
-  assert_stub_called "ssh .*cat >./run/secrets/API_KEY.*chmod 400 ./run/secrets/API_KEY"
+  assert_secret_injected /run/secrets/API_KEY
   assert_stub_not_called 's3kr1tv4lu3'
 }
 

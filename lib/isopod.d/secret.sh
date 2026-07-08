@@ -52,9 +52,16 @@ secret_store_set() { # secret_store_set <name>  (value on stdin)
         die "secret-tool failed to store '$name'"
       ;;
     keychain-macos)
-      # `security` has no stdin mode; the value passing through argv is a
-      # momentary local exposure on a single-user host — accepted trade-off.
-      security add-generic-password -U -a "$USER" -s "isopod/$name" -w "$value" ||
+      # Keep the value out of argv (where `ps` would show it): `security -i` reads
+      # its command from stdin, so the value never becomes a process argument.
+      # base64-encode it first (openssl for macOS/Linux portability) — a
+      # whitespace-free alphabet the -i line tokenizer can't mis-split, so a value
+      # with spaces or quotes stores intact; secret_store_get decodes it back.
+      # NOTE: pre-2.4 boxes stored the value raw here, so after upgrading re-run
+      # 'isopod secret set <name>' on macOS to re-store it base64-encoded.
+      printf 'add-generic-password -U -a %s -s %s -w %s\n' \
+        "$USER" "isopod/$name" "$(printf '%s' "$value" | openssl base64 -A)" |
+        security -i ||
         die "security failed to store '$name'"
       ;;
     file)
@@ -76,7 +83,7 @@ secret_store_get() { # secret_store_get <name> -> value on stdout; rc 1 if absen
   local name="$1"
   case "$(secret_backend)" in
     keychain-linux) secret-tool lookup service isopod name "$name" ;;
-    keychain-macos) security find-generic-password -a "$USER" -s "isopod/$name" -w 2>/dev/null ;;
+    keychain-macos) security find-generic-password -a "$USER" -s "isopod/$name" -w 2>/dev/null | openssl base64 -d -A ;;
     file) cat "$SECRETS_DIR/$name" 2>/dev/null ;;
     *) return 1 ;;
   esac
@@ -133,15 +140,26 @@ parse_secret_specs() { # parse_secret_specs <spec...>
 # Runs after sshd is reachable; the tmpfs mount comes from build_run_args.
 # Values pass through SSH stdin only — never argv, env, or the engine.
 inject_secrets() { # inject_secrets <boxname>
-  local name="$1" specs spec sname spath
+  local name="$1" specs spec sname spath p_b64
   specs="$(meta_get "$name" secrets 2>/dev/null || true)"
   [ -n "$specs" ] || return 0
   local IFS=,
   for spec in $specs; do
     sname="${spec%%:*}"
     spath="${spec#*:}"
+    # Re-validate the spec read from meta. valid_secret_* guard the create path,
+    # but inject also runs on start/reconfigure straight from the stored meta,
+    # which a second tool or a hand-edit could have corrupted — refuse a bad spec
+    # rather than carry it onward.
+    valid_secret_name "$sname" || die "corrupt secret spec for '$name': bad name '$sname'"
+    valid_secret_path "$spath" || die "corrupt secret spec for '$name': bad path '$spath'"
+    # Deliver the target path as base64 — a shell-metacharacter-free alphabet — and
+    # reconstruct it inside the box, so no host-controlled string is ever parsed by
+    # the box's login shell (the remote command re-parses its argv as one string).
+    # The value still passes over SSH stdin only — never argv, env, or the engine.
+    p_b64="$(printf '%s' "$spath" | base64 | tr -d '\n')"
     secret_store_get "$sname" | box_ssh "$name" -- \
-      "umask 277 && mkdir -p '$(dirname "$spath")' && cat >'$spath' && chmod 400 '$spath'" ||
+      "t=\$(printf %s '$p_b64' | base64 -d) && umask 277 && mkdir -p \"\$(dirname \"\$t\")\" && cat >\"\$t\" && chmod 400 \"\$t\"" ||
       die "failed to inject secret '$sname' into '$name'"
   done
   info "injected $(printf '%s' "$specs" | awk -F, '{print NF}') secret(s) into '$name'"
@@ -174,13 +192,7 @@ cmd_secret() {
       secret_store_rm "$name"
       info "removed secret '$name'"
       ;;
-    -h | --help | help)
-      printf 'usage: isopod secret set <NAME> | ls | rm <NAME>\n'
-      printf '  set   store a value (read from stdin or a hidden prompt — never argv)\n'
-      printf '  ls    list stored secret names (values are never printed)\n'
-      printf '  rm    delete a stored secret\n'
-      printf 'Inject into a box at create time: isopod create <name> --secret NAME[:path]\n'
-      ;;
+    -h | --help | help) render_tmpl secret-help.txt ;;
     *) die "unknown secret action: $action (try: isopod secret set|ls|rm)" ;;
   esac
 }

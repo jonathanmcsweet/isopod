@@ -114,6 +114,19 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
         -e "no_proxy=localhost,127.0.0.1,::1" -e "NO_PROXY=localhost,127.0.0.1,::1")
       ;;
   esac
+  # Box IPv6 egress is dropped host-side by the nft rulesets (scoped to the egress
+  # bridge). As a belt, also disable IPv6 inside the box so it can't form a v6
+  # address at all — covering intra-bridge link-local the forward hook won't see.
+  # Best-effort: skip when the host kernel has no IPv6, where the sysctl does not
+  # exist and --sysctl would abort container start (and there is no v6 anyway).
+  case "$(active_egress)" in
+    lan-deny | allow-list)
+      if [ -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ]; then
+        RUN_ARGS+=(--sysctl net.ipv6.conf.all.disable_ipv6=1
+          --sysctl net.ipv6.conf.default.disable_ipv6=1)
+      fi
+      ;;
+  esac
   # Loopback-only app port publishings (from --expose / config.yaml).
   local spec
   for spec in "$@"; do [ -n "$spec" ] && RUN_ARGS+=(-p "127.0.0.1:$spec"); done
