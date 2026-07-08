@@ -99,6 +99,8 @@ ISOPOD_EGRESS_RULESET="${ISOPOD_EGRESS_RULESET:-$ISOPOD_DIR/security/egress-host
 ISOPOD_EGRESS_PROXY_PORT="${ISOPOD_EGRESS_PROXY_PORT:-8118}"
 ISOPOD_EGRESS_PROXY_BIN="${ISOPOD_EGRESS_PROXY_BIN:-tinyproxy}"
 ISOPOD_EGRESS_PROXY_UNIT="isopod-egress-proxy"
+# systemd unit that re-applies the nft ruleset on boot (isopod egress persist).
+ISOPOD_EGRESS_NFT_UNIT="isopod-egress-nft"
 ISOPOD_EGRESS_ALLOWLIST_RULESET="${ISOPOD_EGRESS_ALLOWLIST_RULESET:-$ISOPOD_DIR/security/egress-allowlist.nft}"
 # Shipped allow-list baseline (do not edit); layered with USER_EGRESS_ALLOWLIST.
 ISOPOD_EGRESS_ALLOWLIST="${ISOPOD_EGRESS_ALLOWLIST:-$ISOPOD_DIR/security/egress-allowlist.conf}"

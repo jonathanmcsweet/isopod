@@ -84,7 +84,7 @@ _isopod() {
           _arguments '--path[in-box repo path]:path:' '1:sandbox:_isopod_boxes'
           ;;
         egress)
-          _arguments '1:action:(status apply observe allow log denied rules)'
+          _arguments '1:action:(status apply observe persist unpersist allow log denied rules)'
           ;;
         secret)
           _arguments '1:action:(set ls rm)'

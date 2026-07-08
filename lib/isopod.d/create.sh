@@ -217,6 +217,9 @@ cmd_create() {
     # Record the effective runtime so reconfigure reproduces the box's isolation
     # tier rather than re-defaulting. "container" == plain Tier 1 (no runtime).
     printf 'runtime=%s\n' "$(active_runtime 2>/dev/null | grep . || printf container)"
+    # Effective egress mode (post-resolve), so `start` can re-verify the host
+    # firewall is still enforcing it — a reboot / firewalld reload can drop it.
+    printf 'egress=%s\n' "$(active_egress)"
     printf 'port=%s\n' "$hostport"
     printf 'memory=%s\n' "$memory"
     printf 'cpus=%s\n' "$cpus"

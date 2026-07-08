@@ -249,7 +249,51 @@ egress_load_nft() {
   printf '%s\n' "$rendered" | egr_run_root nft -f - || die "nft failed to load the ruleset"
   info "egress firewall loaded (table inet isopod)."
   warn "not persistent across reboot / firewalld reload — re-run 'sudo isopod egress apply' after
-       those, or include $rs from /etc/nftables.conf."
+       those. For reboot persistence, run: sudo isopod egress persist"
+}
+
+# --- boot persistence (isopod egress persist) -------------------------------
+# SCAFFOLD — installs a systemd unit that re-applies the nft ruleset on boot,
+# after firewalld/nftables set up, so a box's isolation survives a reboot. It does
+# NOT survive a live 'firewalld --reload' / 'nft flush' (no reliable systemd hook
+# for those). This path touches root-owned systemd state and has NOT been exercised
+# on a live host from CI — validate with RUN_LIVE / on a real systemd + nft host.
+egress_persist() {
+  local mode rs rendered nftbin
+  mode="$(active_egress)"
+  case "$mode" in
+    lan-deny | allow-list) ;;
+    *) die "egress is off — configure 'egress lan-deny'/'allow-list' (or ISOPOD_EGRESS=...) before persisting" ;;
+  esac
+  have systemctl || die "egress persist needs systemd (systemctl) to install a boot unit"
+  nftbin="$(command -v nft)" || die "nft (nftables) not found — install nftables"
+  egress_validate_vars
+  rs="$(egress_ruleset)"
+  [ -f "$rs" ] || die "missing ruleset: $rs"
+  rendered="$(render_tmpl "$rs")"
+  # Write the fully-rendered ruleset to a fixed root-owned file the unit loads.
+  egr_run_root mkdir -p "$ISOPOD_EGRESS_STATE_DIR"
+  printf '%s\n' "$rendered" | egr_write_root "$ISOPOD_EGRESS_STATE_DIR/egress.nft"
+  # ISOPOD_NFT_BIN is read by the unit template via dynamic scope at render time.
+  # shellcheck disable=SC2034
+  local ISOPOD_NFT_BIN="$nftbin"
+  render_tmpl isopod-egress-nft.service.tmpl |
+    egr_write_root "/etc/systemd/system/$ISOPOD_EGRESS_NFT_UNIT.service"
+  egr_run_root systemctl daemon-reload
+  egr_run_root systemctl enable "$ISOPOD_EGRESS_NFT_UNIT" ||
+    die "failed to enable $ISOPOD_EGRESS_NFT_UNIT — check: systemctl status $ISOPOD_EGRESS_NFT_UNIT"
+  info "egress firewall will re-apply on boot (systemd unit '$ISOPOD_EGRESS_NFT_UNIT')."
+  warn "this does NOT survive a live 'firewalld --reload' / 'nft flush' — re-run 'sudo isopod egress
+       apply' after those. The unit loads a snapshot: run 'persist' again if you change the egress
+       mode or allow-list."
+}
+
+egress_unpersist() {
+  have systemctl || die "needs systemd (systemctl)"
+  egr_run_root systemctl disable --now "$ISOPOD_EGRESS_NFT_UNIT" 2>/dev/null || true
+  egr_run_root rm -f "/etc/systemd/system/$ISOPOD_EGRESS_NFT_UNIT.service"
+  egr_run_root systemctl daemon-reload
+  info "removed the egress boot unit ('$ISOPOD_EGRESS_NFT_UNIT'). A currently-loaded ruleset stays until flushed."
 }
 
 # Render the proxy config + filter + systemd unit and (re)start the service.
@@ -386,6 +430,36 @@ egress_posture_note() { # egress_posture_note <name>
   esac
 }
 
+# Re-verify egress enforcement when STARTING an existing box. A box created with
+# egress is already attached to the isopod bridge, so its isolation is the HOST
+# firewall — which a reboot / 'firewalld --reload' / 'nft flush' can silently drop.
+# start rebuilds nothing, so without this the box would run OPEN with no signal.
+# We WARN (loud) rather than fail closed: the box already exists and the fix is one
+# root command. The box's effective mode is recorded in meta at create/reconfigure.
+egress_start_check() { # egress_start_check <name>
+  local name="$1" mode
+  mode="$(meta_get "$name" egress 2>/dev/null || true)"
+  case "$mode" in lan-deny | allow-list) ;; *) return 0 ;; esac
+  if ! egress_can_enforce "$ENGINE"; then
+    warn "box '$name' was created with egress $mode, but '$ENGINE' is rootless now and cannot enforce
+     it — this box is running with an OPEN network. Use a rootful podman/docker for isolation."
+    return 0
+  fi
+  local rc=0
+  egress_rules_loaded || rc=$?
+  if [ "$rc" = 1 ]; then
+    warn "box '$name' expects egress $mode, but the host firewall is NOT loaded — it is running with
+     an OPEN network (a reboot or 'firewalld --reload' drops the rules). Reload it (needs root):
+       sudo isopod egress apply"
+  fi
+  if [ "$mode" = allow-list ]; then
+    local prc=0
+    egress_proxy_active || prc=$?
+    [ "$prc" = 1 ] && warn "box '$name' expects the egress allow-list proxy ($ISOPOD_EGRESS_PROXY_UNIT),
+     which is NOT running — the box may have no route out. Start it:  sudo isopod egress apply"
+  fi
+}
+
 # Preflight for a box that will run under `egress lan-deny`: the engine must be
 # able to enforce it, the dedicated network must exist, and the host firewall
 # should already be loaded. Called before build_run_args in create/reconfigure.
@@ -450,6 +524,8 @@ cmd_egress() {
     status | "") egress_status ;;
     apply) egress_apply enforce ;;
     observe) egress_apply observe ;;
+    persist) egress_persist ;;
+    unpersist) egress_unpersist ;;
     allow)
       [ -n "${1:-}" ] || die "usage: isopod egress allow <domain>"
       egress_allow "$1"
@@ -458,17 +534,19 @@ cmd_egress() {
     denied) egress_denied ;;
     rules | show) render_tmpl "$(egress_ruleset)" ;;
     -h | --help | help)
-      printf 'usage: isopod egress [status|apply|observe|allow <domain>|log [-f]|denied|rules]\n'
-      printf '  status   mode, network, and proxy/firewall state\n'
-      printf '  apply    load the host firewall; for allow-list also (re)start the filtering proxy\n'
-      printf '  observe  allow-list only: run the proxy permit-all but log everything, to discover\n'
-      printf '           which domains a workflow needs; then switch back with apply\n'
-      printf '  allow    add a domain to your allow-list override and reload the proxy\n'
-      printf '  log      tail the proxy access log (-f to follow)\n'
-      printf '  denied   show hostnames the proxy refused (candidates to allow)\n'
-      printf '  rules    print the rendered nftables ruleset that apply would load\n'
+      printf 'usage: isopod egress [status|apply|observe|persist|unpersist|allow <domain>|log [-f]|denied|rules]\n'
+      printf '  status     mode, network, and proxy/firewall state\n'
+      printf '  apply      load the host firewall; for allow-list also (re)start the filtering proxy\n'
+      printf '  persist    install a systemd unit that re-applies the firewall on boot\n'
+      printf '  unpersist  remove that boot unit\n'
+      printf '  observe    allow-list only: run the proxy permit-all but log everything, to discover\n'
+      printf '             which domains a workflow needs; then switch back with apply\n'
+      printf '  allow      add a domain to your allow-list override and reload the proxy\n'
+      printf '  log        tail the proxy access log (-f to follow)\n'
+      printf '  denied     show hostnames the proxy refused (candidates to allow)\n'
+      printf '  rules      print the rendered nftables ruleset that apply would load\n'
       ;;
-    *) die "unknown egress action: $action (try: isopod egress status|apply|observe|allow|log|denied|rules)" ;;
+    *) die "unknown egress action: $action (try: isopod egress status|apply|observe|persist|unpersist|allow|log|denied|rules)" ;;
   esac
 }
 

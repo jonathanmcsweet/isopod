@@ -74,6 +74,14 @@ case "$unit" in *'kill -HUP $MAINPID'*) : ;; *) fail "systemd unit: \$MAINPID wa
 case "$unit" in *"ExecStart=tinyproxy -d -c"*) : ;; *) fail "systemd unit: ExecStart is wrong" ;; esac
 ok "systemd unit renders (ExecStart + literal \$MAINPID)"
 
+# nft boot-persistence unit (isopod egress persist). The nft binary path is
+# resolved at persist time and passed via ISOPOD_NFT_BIN.
+nft_unit="$(ISOPOD_SOURCED=1 . ./isopod && ISOPOD_NFT_BIN=/usr/sbin/nft render_tmpl isopod-egress-nft.service.tmpl)"
+assert_no_unexpanded "egress nft unit" "$nft_unit"
+case "$nft_unit" in *"ExecStart=/usr/sbin/nft -f "*) : ;; *) fail "nft unit: ExecStart is wrong" ;; esac
+case "$nft_unit" in *"After=nftables.service firewalld.service"*) : ;; *) fail "nft unit: boot ordering is wrong" ;; esac
+ok "egress nft persistence unit renders (ExecStart + boot ordering)"
+
 # --- allow-list -> filter regexes -------------------------------------------
 regexes="$(ISOPOD_SOURCED=1 . ./isopod && egress_filter_regexes | sort -u)"
 [ -n "$regexes" ] || fail "allow-list produced no filter regexes"
