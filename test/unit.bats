@@ -433,6 +433,19 @@ teardown() { isopod_teardown_env; }
   [[ "$joined" != *"--network isopod0"* ]]
   [[ "$joined" != *"--cap-drop NET_RAW"* ]]
 }
+@test "build_run_args disables in-box IPv6 when egress is active" {
+  ENGINE=podman
+  ISOPOD_EGRESS=lan-deny build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--sysctl net.ipv6.conf.all.disable_ipv6=1"* ]]
+  [[ "$joined" == *"--sysctl net.ipv6.conf.default.disable_ipv6=1"* ]]
+}
+@test "build_run_args leaves IPv6 alone when egress is off" {
+  ENGINE=podman
+  ISOPOD_EGRESS=off build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"disable_ipv6"* ]]
+}
 
 # ---- egress allow-list mode --------------------------------------------------
 @test "active_egress reads allow-list from the user override" {
