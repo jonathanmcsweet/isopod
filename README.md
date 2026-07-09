@@ -4,7 +4,9 @@
 
 `isopod` is a bash script that creates a Podman (or Docker) container with an SSH server inside, puts your code in it, and turns [VSCodium](https://vscodium.com/) into a GUI for that container. 
 
-The IDE's server component, your terminals, and any AI agent extensions all execute inside the container. This favors copying and exporting to your local host vs binding to a folder to prevent access to your local file system. Includes hardening that limits hardware fingerprinting.
+The IDE's server component, your terminals, and any AI agent extensions all execute inside the container. This favors copying and exporting to your local host vs binding to a folder to prevent access to your local file system. 
+
+Includes hardening options using microVMs that limit hardware fingerprinting and security exploits.
 
 Each sandbox gets its own window color to discern between environments and other VSCodium windows.
 
