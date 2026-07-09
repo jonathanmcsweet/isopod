@@ -10,6 +10,9 @@ Includes hardening options using microVMs that limit hardware fingerprinting and
 
 Each sandbox gets its own window color to discern between environments and other VSCodium windows.
 
+<img width="1920" height="1080" alt="Screenshot From 2026-07-09 16-44-49" src="https://github.com/user-attachments/assets/5925e432-1f9c-4347-b289-54049c6be2f1" />
+
+
 ## Install
 
 ### Homebrew (macOS / Linux)
