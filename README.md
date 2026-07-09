@@ -80,7 +80,7 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 - **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless you've created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. To narrow this, [`egress allow-list`](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list) forces the box through a host-side filtering proxy that permits only allow-listed hostnames — it limits, but does not eliminate, exfiltration (a secret can still be sent *into* an allowed host). Reconnaissance in the *other* direction — a rogue agent scanning your **local network**, the host, or cloud metadata — can be blocked with host-enforced [network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny), while keeping published ports and public internet working.
 
-- **A misbehaving agent inside the container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above — but anything inside the container (including data you copied in) is fully exposed to it. If you don't need in-container package installs, create the container with **`--no-sudo`** to drop that privilege. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
+- **A misbehaving agent inside the container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above — but anything inside the container (including data you copied in) is fully exposed to it. If you don't need the agent to have root, create the container with **`--no-sudo`** to drop that privilege — you can still add system packages from the host with [`isopod install`](#adding-a-system-package-without-a-rebuild-isopod-install), so lockdown isn't a dead end for dependencies. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
 
 - **Container escape.** Containers share the host kernel. Rootless Podman makes escapes very hard, but a container is not a VM. For "agent might be actively malicious and sophisticated," use a full VM. For "agent might do dumb destructive things or over-collect data" this is the right tool.
 
@@ -245,6 +245,23 @@ Your Dockerfile must use a Debian/Ubuntu (`apt`) base, since isopod's layer inst
 Because the image is built before the container exists (and `--repo` clones *inside* the box afterward), the Dockerfile is a host-side file you point at — not something read from the cloned repo. For quick one-offs you can still install toolchains interactively with `isopod shell`.
 
 isopod runs box operations (clone, copy-in, export, fetch) over a non-interactive SSH command, which uses the system `PATH`, not the one your `~/.bashrc` builds. Install tools system-wide (in the Dockerfile, or with `sudo` in the box) so these operations can find them; a tool only on a shell-rc `PATH` is still available in `isopod shell`, just not to box operations.
+
+### Adding a system package without a rebuild (`isopod install`)
+
+Most dependencies don't need root: install language packages (`pip install --user`, `npm`, `cargo`) into your home directory from `isopod shell`. For the system packages that *do* need root — a `-dev` header, a CLI tool like `jq` — how you add them depends on the box's privilege posture:
+
+- **Default (sudo) box:** the in-box user has passwordless sudo, so `isopod shell <name> -- 'sudo apt-get update && sudo apt-get install -y jq'` just works.
+- **`--no-sudo` box:** the in-box user has no root, so the install comes from the host instead:
+
+```sh
+isopod install <name> jq ripgrep    # runs the box's package manager as root, from the host
+```
+
+`isopod install` runs the box's package manager (`apt-get`/`apk`/`dnf`) as root **through the container engine from the host** — the same trust boundary as [egress](#network-egress-isolation-egress-lan-deny) and [secrets](#secrets). Because it enters through the engine rather than sshd, the boxed (unprivileged) agent can't reach it: the box stays locked down, but you can still add a forgotten dependency without recreating it.
+
+**Why a host-mediated *named-package* install, rather than giving the agent sudo (or a root shell)?** In isopod's model the untrusted party is the agent running inside the box. Passwordless sudo hands *the agent* root for the whole session, not just you. And a root shell in the box — however you get it — can still be tricked into running agent-controlled code as root the moment you execute the project (a build, `npm install`, a `Makefile`) in the workspace the agent controls. Installing a *named package* through a host channel avoids both: the agent never gets root, and you're running the distro's package manager on a name **you** chose, not the box's code. It is the smaller, safer capability — so on a locked-down box, prefer `isopod install jq` over dropping into a root shell and building.
+
+Two caveats. Installs are **ephemeral** — a fresh `create` starts without them (`reconfigure` snapshots the box, so they survive *that*). For a dependency you always need, bake it into a [`--dockerfile`](#customizing-the-container) instead. And `isopod install` needs a **container** box: the engine can't exec into a microVM guest, so on a microVM runtime add the package with `--dockerfile` and recreate.
 
 ### Reaching a server in the box (port forwarding)
 
