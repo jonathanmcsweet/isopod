@@ -12,7 +12,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-ISOPOD_VERSION="2.4.0"
+ISOPOD_VERSION="2.5.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -115,7 +115,7 @@ ISOPOD_EGRESS_PROXY_LOG="${ISOPOD_EGRESS_PROXY_LOG:-$ISOPOD_EGRESS_PROXY_LOG_DIR
 # exists for everything after it). Each defines functions and their globals
 # only; no module runs code at source time.
 # ---------------------------------------------------------------------------
-for _mod in util engine ssh color hardening egress runargs secret create transfer lifecycle admin; do
+for _mod in util engine ssh color hardening egress runargs secret create transfer lifecycle install admin; do
   if [ ! -f "$ISOPOD_LIB/isopod.d/$_mod.sh" ]; then
     # raw printf, not die: die() itself lives in the first module
     printf 'error: missing module: %s (is your isopod install complete?)\n' \
@@ -152,6 +152,7 @@ main() {
     fetch) cmd_fetch "$@" ;;
     remap) cmd_remap "$@" ;;
     copy-in) cmd_copy_in "$@" ;;
+    install) cmd_install "$@" ;;
     rm | remove | delete) cmd_rm "$@" ;;
     gc) cmd_gc "$@" ;;
     egress) cmd_egress "$@" ;;

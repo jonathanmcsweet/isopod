@@ -14,6 +14,7 @@ Usage:
   isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
   isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
   isopod copy-in <name> <path>...     Copy more host folders INTO the sandbox
+  isopod install <name> <pkg>...      Install system packages into a box (host-mediated, no in-box sudo)
   isopod rm <name> [--force]          Delete a sandbox (container + keys + snapshots)
   isopod gc [--dry-run] [--force]     Remove isopod images no box still references
   isopod egress [status|apply|allow …]  Manage the network egress firewall/proxy
