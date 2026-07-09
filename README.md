@@ -20,11 +20,6 @@ brew tap jonathanmcsweet/isopod
 brew install isopod          # or: brew install --HEAD isopod  (latest master)
 ```
 
-The formula lives in the separate [`homebrew-isopod`](https://github.com/jonathanmcsweet/homebrew-isopod)
-tap and installs `bash`/`zsh` shell completions. You still need a container engine
-(`brew install podman`). See [docs/RELEASING.md](docs/RELEASING.md) for how the tap is created
-and maintained.
-
 ### install.sh (any Linux/macOS, no Homebrew)
 
 ```sh
@@ -62,7 +57,7 @@ isopod rm myproj                    # destroy container + its keys + ssh config 
 
 ## The isolation model
 
-The container cannot see the host filesystem at all. Files cross the boundary in five ways:
+The container cannot see the host filesystem. Files cross the boundary in five ways:
 
 1. `--repo <url>` — a `git clone` executed *inside* the container.
 2. `--copy <path>` / `isopod copy-in` — a one-time **copy** of folders you name.
