@@ -86,6 +86,9 @@ RUN printf '%s\n' \
 # (host keys, authorized key, sudo policy) before sshd; see that file. The
 # in-box user is baked into /etc/isopod-user for the entrypoint to read.
 COPY isopod-entrypoint /usr/local/bin/isopod-entrypoint
+# Default kernel-hardening profile (guest sysctls). The entrypoint applies these
+# only on microVM boxes (their own guest kernel); see share/hardening-sysctl.conf.
+COPY hardening-sysctl.conf /etc/isopod/hardening-sysctl.conf
 RUN printf '%s\n' "$ISOPOD_USER" > /etc/isopod-user \
  && chmod +x /usr/local/bin/isopod-entrypoint
 EXPOSE ${ISOPOD_SSHD_PORT}
