@@ -1,5 +1,5 @@
 Host $(ctr_name "$name")
-  HostName 127.0.0.1
+  HostName $host
   Port $port
   User $CONTAINER_USER
   IdentityFile "$(box_dir "$name")/id_ed25519"

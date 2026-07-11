@@ -831,6 +831,40 @@ EOF
   assert_stub_called "container system status"
 }
 
+# ---- SSH addressing abstraction (podman loopback vs Apple container vmnet IP) --
+# podman/docker publish the box sshd to 127.0.0.1:<port>; Apple `container` gives
+# the box its own vmnet IP reached on the in-box sshd port. box_ssh_addr is the one
+# place the two models diverge; the rest of the SSH transport is engine-agnostic.
+@test "box_ssh_addr: podman box resolves to 127.0.0.1 + published port" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
+  printf 'engine=podman\nport=8022\n' >"$ISOPOD_CONFIG_DIR/boxes/web/meta"
+  run box_ssh_addr web
+  assert_output "127.0.0.1 8022"
+}
+@test "box_ssh_addr: Apple container box resolves to the vmnet IP + in-box sshd port" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/vm"
+  printf 'engine=container\n' >"$ISOPOD_CONFIG_DIR/boxes/vm/meta"
+  make_stub container 0 '{ "networks": [ { "address": "192.168.64.5/24" } ] }'
+  run box_ssh_addr vm
+  assert_output "192.168.64.5 $BOX_SSHD_PORT"
+}
+@test "container_box_ip parses the first IPv4 from container inspect" {
+  make_stub container 0 '{ "address": "192.168.64.7" }'
+  run container_box_ip anybox
+  assert_output "192.168.64.7"
+}
+@test "box_ssh targets the container vmnet IP, not 127.0.0.1" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/vm"
+  printf 'engine=container\n' >"$ISOPOD_CONFIG_DIR/boxes/vm/meta"
+  : >"$ISOPOD_CONFIG_DIR/boxes/vm/id_ed25519"
+  : >"$ISOPOD_CONFIG_DIR/boxes/vm/known_hosts"
+  make_stub container 0 '{ "address": "192.168.64.9" }'
+  make_stub ssh 0 ""
+  run box_ssh vm -- true
+  assert_success
+  assert_stub_called "ssh .*@192.168.64.9"
+}
+
 # ---- per-box config.yaml (Compose-shaped, isopod-parsed) ---------------------
 @test "config.yaml round-trips through the parsers" {
   mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
