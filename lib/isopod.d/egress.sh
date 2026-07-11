@@ -215,6 +215,56 @@ egress_vm_root() { # egress_vm_root <cmd...>
   podman machine ssh -- sudo "$@"
 }
 
+# Fixed in-VM paths for the macOS persistence unit (parity with the Linux boot
+# unit, but living inside the podman machine VM's systemd, not the Mac's).
+ISOPOD_VM_NFT_FILE="/etc/isopod/egress.nft"
+ISOPOD_VM_NFT_UNIT="isopod-egress"
+
+# macOS boot persistence: install a systemd unit INSIDE the podman machine VM
+# that re-loads the ruleset on VM boot — the equivalent of the Linux
+# egress_persist host unit. The FCOS podman machine ships systemd, so this is the
+# natural home. Only lan-deny is enforced on macOS, so persist the lan-deny
+# ruleset regardless of a configured allow-list (which has no macOS proxy).
+egress_persist_macos() {
+  egress_vm_ready ||
+    die "podman machine VM is not reachable — start it (podman machine start), then retry."
+  egress_validate_vars
+  local rendered
+  rendered="$(ISOPOD_EGRESS=lan-deny render_tmpl "$ISOPOD_EGRESS_RULESET")"
+  info "Installing the egress firewall as a boot unit inside the podman machine VM..."
+  egress_vm_root mkdir -p "$(dirname "$ISOPOD_VM_NFT_FILE")" ||
+    die "could not prepare state dir inside the VM"
+  printf '%s\n' "$rendered" | egress_vm_root tee "$ISOPOD_VM_NFT_FILE" >/dev/null ||
+    die "could not write the ruleset inside the VM"
+  printf '%s\n' \
+    '[Unit]' \
+    'Description=isopod egress firewall (nftables)' \
+    'After=network-pre.target nftables.service' \
+    'Wants=network-pre.target' \
+    '[Service]' \
+    'Type=oneshot' \
+    "ExecStart=/usr/sbin/nft -f $ISOPOD_VM_NFT_FILE" \
+    'RemainAfterExit=yes' \
+    '[Install]' \
+    'WantedBy=multi-user.target' |
+    egress_vm_root tee "/etc/systemd/system/$ISOPOD_VM_NFT_UNIT.service" >/dev/null ||
+    die "could not install the systemd unit inside the VM"
+  egress_vm_root systemctl daemon-reload
+  egress_vm_root systemctl enable --now "$ISOPOD_VM_NFT_UNIT.service" ||
+    die "failed to enable $ISOPOD_VM_NFT_UNIT inside the VM — check: podman machine ssh sudo systemctl status $ISOPOD_VM_NFT_UNIT"
+  info "egress firewall will re-load on VM boot (unit '$ISOPOD_VM_NFT_UNIT' inside the podman machine)."
+  warn "the snapshot is loaded as-is: re-run 'isopod egress persist' if you change ISOPOD_EGRESS_* vars."
+}
+
+egress_unpersist_macos() {
+  egress_vm_ready ||
+    die "podman machine VM is not reachable — start it (podman machine start), then retry."
+  egress_vm_root systemctl disable --now "$ISOPOD_VM_NFT_UNIT.service" 2>/dev/null || true
+  egress_vm_root rm -f "/etc/systemd/system/$ISOPOD_VM_NFT_UNIT.service" "$ISOPOD_VM_NFT_FILE"
+  egress_vm_root systemctl daemon-reload
+  info "removed the in-VM egress boot unit ('$ISOPOD_VM_NFT_UNIT'). A loaded ruleset stays until flushed or 'podman machine stop'."
+}
+
 # --- egress allow-list: host-side filtering proxy ---------------------------
 # The allow-list mode adds a filtering proxy the host firewall forces boxes
 # through. Applying it writes root-owned host state (proxy config/filter, a
@@ -318,11 +368,13 @@ egress_persist() {
     lan-deny | allow-list) ;;
     *) die "egress is off — configure 'egress lan-deny'/'allow-list' (or ISOPOD_EGRESS=...) before persisting" ;;
   esac
-  # macOS: persistence would be a host systemd unit, which does not apply — the
-  # ruleset lives inside the podman machine VM. Re-apply after the VM restarts.
-  egress_enforce_in_vm &&
-    die "egress persist installs a host systemd unit, which does not apply on macOS (the ruleset lives
-     inside the podman machine VM). Re-run 'isopod egress apply' after 'podman machine start'."
+  # macOS: the firewall lives inside the podman machine VM, so boot persistence is
+  # an in-VM systemd unit rather than a host one (egress_persist_macos persists
+  # lan-deny, the only mode enforced on macOS).
+  if egress_enforce_in_vm; then
+    egress_persist_macos
+    return 0
+  fi
   have systemctl || die "egress persist needs systemd (systemctl) to install a boot unit"
   nftbin="$(command -v nft)" || die "nft (nftables) not found — install nftables"
   egress_validate_vars
@@ -347,6 +399,10 @@ egress_persist() {
 }
 
 egress_unpersist() {
+  if egress_enforce_in_vm; then
+    egress_unpersist_macos
+    return 0
+  fi
   have systemctl || die "needs systemd (systemctl)"
   egr_run_root systemctl disable --now "$ISOPOD_EGRESS_NFT_UNIT" 2>/dev/null || true
   egr_run_root rm -f "/etc/systemd/system/$ISOPOD_EGRESS_NFT_UNIT.service"
