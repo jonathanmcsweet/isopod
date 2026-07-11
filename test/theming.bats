@@ -128,7 +128,9 @@ JSONC
 
 @test "find_ide_bin falls back through codium/vscodium names" {
   make_stub vscodium 0
-  find_ide_bin codium
+  # ide_lookup hides any host-installed codium so the stubbed vscodium is the
+  # first name that resolves.
+  ide_lookup codium
   assert_equal "${IDE_CMD[*]}" "vscodium"
 }
 
@@ -144,7 +146,9 @@ esac
 exit 0
 EOF
   chmod +x "$STUB_DIR/flatpak"
-  find_ide_bin codium
+  # ide_lookup hides a host codium binary AND a host /Applications/VSCodium.app,
+  # so the Flatpak fallback is what resolves.
+  ide_lookup codium
   assert_equal "${IDE_CMD[*]}" "flatpak run com.vscodium.codium"
 }
 
@@ -160,7 +164,9 @@ EOF
 }
 
 @test "find_ide_bin fails cleanly when nothing is installed" {
-  run find_ide_bin codium
+  # Nothing is stubbed; ide_lookup hides any host codium binary or .app so the
+  # lookup genuinely finds nothing.
+  run ide_lookup codium
   assert_failure
 }
 

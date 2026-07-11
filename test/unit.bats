@@ -946,6 +946,10 @@ YAML
 
 # ---- egress_preflight fails closed (§3.4) ------------------------------------
 _egress_stub_rootful_unloaded() {
+  # These tests exercise the Linux host-firewall path (nft on the host). Pin the
+  # OS so they behave the same on a macOS host, where egress_preflight would
+  # otherwise branch to the in-VM path (covered by the macOS egress tests).
+  make_stub uname 0 "Linux"
   # podman: rootful (Rootless=false); the egress network already exists.
   cat >"$STUB_DIR/podman" <<'EOF'
 #!/usr/bin/env bash
@@ -1310,7 +1314,7 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
 @test "file backend: set stores 0600, get round-trips, rm removes" {
   export ISOPOD_SECRET_BACKEND=file
   printf 'hunter2' | secret_store_set TOK
-  [ "$(stat -c '%a' "$ISOPOD_CONFIG_DIR/secrets/TOK")" = "600" ]
+  [ "$(file_mode "$ISOPOD_CONFIG_DIR/secrets/TOK")" = "600" ]
   run secret_store_get TOK
   assert_output "hunter2"
   run secret_store_ls
