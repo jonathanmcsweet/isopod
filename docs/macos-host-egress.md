@@ -15,9 +15,28 @@ subnet is available:
   or `ISOPOD_PF_SUBNET` set); otherwise the weaker **in-VM nft** fallback. Override
   with `ISOPOD_EGRESS_BACKEND=pf|vm`.
 - Apple `container` is recognised as an (experimental) engine: `isopod doctor`
-  reports it and the host-pf availability. The **box lifecycle** (create / code /
-  shell / export through the `container` CLI) is **not yet ported** — that is the
-  next increment.
+  reports it and the host-pf availability.
+
+### Box lifecycle port (in progress)
+
+Because isopod drives every box operation over **SSH** (never `engine exec`), the
+engine-specific surface for the lifecycle is small. The keystone — **SSH
+addressing** — is done:
+
+- `box_ssh_addr()` resolves a box's SSH target per engine: `127.0.0.1 + published
+  port` for podman/docker (unchanged), or the box's **vmnet IP + in-box sshd port**
+  for Apple `container` (`container_box_ip()` parses `container inspect`). `box_ssh`,
+  `scan_host_key`, `write_ssh_include`, and the generated `~/.ssh/config` entry all
+  now go through it, so VSCodium Remote-SSH targets the box's real IP directly —
+  which also sidesteps the loopback port-forward fragility (the krun/TSI failure
+  mode) entirely.
+
+Still to port (the `container` CLI specifics — highest risk to write without a Mac,
+so left for on-device iteration): image build (`container build`), box run
+(`container run` flags: `--network`, name, env, volumes), and `rm`/`list`. Once
+those land, `ISOPOD_ENGINE=container isopod create` + `isopod code` will bring up a
+per-box VM with host-pf egress and a directly-SSH'able IP. Validate incrementally
+on a Mac (or via Claude Code running natively there).
 
 Validate on a real Mac with `test/macos-egress-check.sh` (read-only: renders the
 ruleset and parse-checks it with `pfctl -n`, no firewall changes). None of this

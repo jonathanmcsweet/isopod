@@ -35,12 +35,15 @@ write_ssh_include() {
   tmp=$(mktemp)
   {
     printf '# Managed by isopod — do not edit (regenerated on every change)\n\n'
-    local d name port
+    local d name host port
     for d in "$BOXES_DIR"/*/; do
       [ -d "$d" ] || continue
       name=$(basename "$d")
-      port=$(meta_get "$name" port || true)
-      [ -n "$port" ] || continue
+      # Engine-abstracted address: 127.0.0.1 + published port (podman/docker) or
+      # the box's vmnet IP + in-box sshd port (Apple `container`). Skip boxes whose
+      # address can't be resolved yet (no port / not running).
+      read -r host port < <(box_ssh_addr "$name") || continue
+      [ -n "$host" ] && [ -n "$port" ] || continue
       render_tmpl ssh-entry.txt
     done
   } >"$tmp"
@@ -64,8 +67,46 @@ resolve_port() { # resolve_port <name> -> echoes current host port for the box s
   printf '%s' "${out##*:}"
 }
 
+# The engine a box runs under (its meta, else the ambient ENGINE). Used by the
+# address resolver so podman/docker and Apple `container` boxes are reached the
+# right way.
+box_engine() { # box_engine <name>
+  meta_get "$1" engine 2>/dev/null || printf '%s' "${ENGINE:-}"
+}
+
+# The vmnet IP of an Apple `container` box, parsed from `container inspect`. Apple
+# `container` runs each box in its own VM with its own routable IP (no loopback
+# port publish), so this IP — not 127.0.0.1 — is the SSH target. Best-effort JSON
+# parse (first IPv4 in the inspect output); NEEDS validation against a real
+# `container inspect` on macOS. Echoes the IP, empty on failure.
+container_box_ip() { # container_box_ip <name>
+  local ip
+  ip="$(container inspect "$(ctr_name "$1")" 2>/dev/null |
+    grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -n1)"
+  [ -n "$ip" ] && printf '%s' "$ip"
+}
+
+# The SSH transport address for a box, echoed as "HOST PORT". podman/docker publish
+# the box sshd to a loopback host port, so it's 127.0.0.1 + the published port
+# (from meta). Apple `container` gives the box its own vmnet IP reached directly on
+# the in-box sshd port (BOX_SSHD_PORT), no publish — so it's that IP + BOX_SSHD_PORT.
+# This is the single place the two networking models diverge for SSH.
+box_ssh_addr() { # box_ssh_addr <name> -> "host port"
+  local name="$1" ip
+  if [ "$(box_engine "$name")" = container ]; then
+    ip="$(container_box_ip "$name")" || return 1
+    [ -n "$ip" ] || return 1
+    printf '%s %s\n' "$ip" "$BOX_SSHD_PORT"
+  else
+    printf '127.0.0.1 %s\n' "$(meta_get "$name" port)"
+  fi
+}
+
 refresh_port() { # refresh stored port + ssh config if the mapping changed
   local name="$1" port
+  # Apple `container` boxes have no published loopback port to refresh (they're
+  # reached at their vmnet IP directly) — nothing to do.
+  [ "$(box_engine "$name")" = container ] && return 0
   port=$(resolve_port "$name") || return 0
   [ -n "$port" ] || return 0
   if [ "$port" != "$(meta_get "$name" port || true)" ]; then
@@ -82,12 +123,13 @@ refresh_port() { # refresh stored port + ssh config if the mapping changed
 # is the honest signal that the loopback port may have been taken over. isopod
 # still adopts the new key so the tool keeps working; the warning is the alert.
 scan_host_key() { # scan_host_key <name>
-  local name="$1" port kh tmp tries=0 max="${ISOPOD_SSH_WAIT_TRIES:-30}"
-  port=$(meta_get "$name" port)
+  local name="$1" host port kh tmp tries=0 max="${ISOPOD_SSH_WAIT_TRIES:-30}"
+  read -r host port < <(box_ssh_addr "$name") || return 1
+  [ -n "$host" ] && [ -n "$port" ] || return 1
   kh="$(box_dir "$name")/known_hosts"
   tmp="$kh.scan"
   while [ $tries -lt "$max" ]; do
-    if ssh-keyscan -p "$port" -T 3 127.0.0.1 2>/dev/null >"$tmp" && [ -s "$tmp" ]; then
+    if ssh-keyscan -p "$port" -T 3 "$host" 2>/dev/null >"$tmp" && [ -s "$tmp" ]; then
       # Compare only the key material (type + blob), not the leading [host]:port
       # field, which legitimately changes when the box gets a new published port.
       if [ -s "$kh" ] &&
@@ -100,9 +142,9 @@ scan_host_key() { # scan_host_key <name>
         # restores the old adopt-and-warn behavior for a deliberate out-of-band rebuild.
         if [ "${ISOPOD_ACCEPT_NEW_HOSTKEY:-0}" != 1 ]; then
           rm -f "$tmp"
-          die "SSH host key for box '$name' CHANGED since it was pinned (127.0.0.1:$port).
+          die "SSH host key for box '$name' CHANGED since it was pinned ($host:$port).
      A box's key persists across start/stop/reconfigure, so this should not happen unless you
-     recreated it — another process may have taken over its loopback port. Refusing to connect.
+     recreated it — another process may have taken over its address. Refusing to connect.
      If you deliberately recreated it: rm -f '$kh'  then retry, or set
      ISOPOD_ACCEPT_NEW_HOSTKEY=1 to adopt the new key this run."
         fi
@@ -131,8 +173,8 @@ scan_host_key() { # scan_host_key <name>
 box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
   local name="$1"
   shift
-  local port
-  port=$(meta_get "$name" port)
+  local host port
+  read -r host port < <(box_ssh_addr "$name") || die "could not resolve SSH address for box '$name'"
   # Split leading ssh options from the remote command: everything up to the
   # first non-option (or '--') is an ssh option; the rest is the command.
   local -a opts=() rcmd=()
@@ -163,7 +205,7 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
     -o UserKnownHostsFile="$(box_dir "$name")/known_hosts" \
     -o StrictHostKeyChecking=yes \
     -o ForwardAgent=no -o ForwardX11=no \
-    "${opts[@]}" "$CONTAINER_USER@127.0.0.1" "${rcmd[@]}"
+    "${opts[@]}" "$CONTAINER_USER@$host" "${rcmd[@]}"
 }
 
 # Stream a tar archive between host and box over SSH. File transfer uses tar
