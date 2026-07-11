@@ -47,6 +47,31 @@ jobs:
           bash test/run.sh
 
   # -------------------------------------------------------------------------
+  # Stage 2 (macOS): the same lint + stubbed + interactive suite on a real Mac.
+  # macOS ships a BSD userland (stat/sed differ from GNU) and its own git
+  # default branch, and several code paths branch on is_macos(); this job keeps
+  # those portability paths green. No container engine runs here — the live
+  # suite needs `podman machine`, i.e. Hypervisor.framework / nested virt, which
+  # GitHub-hosted macOS runners do not provide. Run live on a podman-capable Mac
+  # (or self-hosted runner) with:  RUN_LIVE=1 test/run.sh
+  # -------------------------------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: lint + stubbed bats + interactive (macOS / BSD userland)
+        run: |
+          # bats is vendored under test/libs; only the linters and pexpect are
+          # extra. Homebrew is preinstalled on macOS runners.
+          brew install shellcheck shfmt
+          # pexpect drives the interactive prompt tests; if it can't install,
+          # test/run.sh skips them rather than failing.
+          python3 -m pip install pexpect \
+            || python3 -m pip install --break-system-packages pexpect \
+            || true
+          bash test/run.sh
+
+  # -------------------------------------------------------------------------
   # Homebrew formula: install isopod through the real tap formula, built from
   # this checkout, then `brew test`. Catches a formula whose install method
   # omits something the code needs at runtime (e.g. share/) — a class of bug the
