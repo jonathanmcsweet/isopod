@@ -140,6 +140,25 @@ ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=krun isopod creat
 > krun still reaches your LAN the same way — pair it with egress isolation below to
 > stop network reconnaissance.
 
+### macOS: the engine VM is already the boundary
+
+macOS has no `/dev/kvm`. The equivalent capability — hardware virtualization — is
+Apple's **Hypervisor.framework**, and there is no device node for it; `isopod
+doctor` probes it with `sysctl kern.hv_support` (1 = available). More importantly,
+on macOS **every box already runs inside the `podman machine` / Docker Desktop
+Linux VM**, which is itself a hardware VM built on Hypervisor.framework. That VM
+boundary *is* the Tier-3-class isolation on a Mac — a kernel exploit or container
+escape inside a box lands in the engine VM, not on macOS. So a plain container on
+macOS is already VM-isolated from your machine in a way it is not on Linux.
+
+Running a **nested** per-box microVM runtime (`runtime kata`/`krun`) *inside* that
+VM is a separate, still-maturing capability: it needs an Apple **M3 or later** chip
+on **macOS 15+** plus a VMM that exposes nested virtualization to the guest. Until
+that path is broadly available, `isopod doctor` reports Tier-3-in-a-box as N/A on
+macOS and points at the engine VM as the boundary that is already in force. (This
+is why isopod's `/dev/kvm` preflight is Linux-only — a Mac has no such node, and
+the missing-device check would be a false negative.)
+
 ## Network egress isolation (`egress lan-deny`)
 
 Stops a rogue in-box agent from **mapping or fingerprinting your local network**:
@@ -187,6 +206,25 @@ isopod doctor                 # also reports enforcement + loaded state
 The rules are **not persistent** across reboot, a `firewalld` reload, or an engine
 restart — re-run `sudo isopod egress apply` afterward, or include the ruleset from
 `/etc/nftables.conf`. `isopod doctor` flags when it isn't loaded.
+
+#### macOS
+
+On macOS the Mac host has no nftables and the box bridge is not on it — the boxes
+run inside the `podman machine` Linux VM, so that VM is where the firewall belongs.
+`isopod egress apply` therefore loads the **same** `security/egress-host.nft`
+ruleset **inside the podman machine VM** over podman's management SSH (`podman
+machine ssh sudo nft -f -`); the ruleset's subnet, gateway, and bridge interface
+all refer to the VM, so nothing else changes. No `sudo` on the Mac and no local
+nftables are needed — just a running machine (`podman machine start`).
+
+The Mac-native packet filter, **pf** (`pfctl`), is *not* the right layer: by the
+time a box's traffic reaches the Mac it has already been NAT'd and is sourced from
+the VM, so pf can neither tell a box-initiated flow from the VM's own nor match the
+per-box subnet the rules key on. Enforcement stays inside the VM, where the box
+identity is still intact. The rules are not persistent across `podman machine stop`
+— re-run `isopod egress apply` after starting the machine. Docker Desktop's VM is
+not a general SSH target, so host-enforced egress on macOS currently requires
+podman machine.
 
 **Fails closed.** If a box is configured for `egress lan-deny` but the host firewall
 is not loaded, `isopod create` (and `reconfigure`) **refuse**, rather than starting a
@@ -300,5 +338,9 @@ rules, the systemd unit is what keeps the proxy up across reboots; re-run
   reach arbitrary services (e.g. `ssh` on 22).
 - Clients that ignore `http_proxy` get no network (that's fail-closed). The common
   tools — `apt`, `pip`, `git`, `curl`, `wget` — all honor it.
-- Same platform matrix as `lan-deny`: Linux host (or the `podman machine` VM on
-  macOS / the WSL2 distro on Windows). There is no Windows-native path.
+- **Linux only.** Unlike `lan-deny`, the allow-list's filtering proxy is a host
+  `systemd` service (`tinyproxy`), which is not ported to macOS. On macOS `isopod
+  egress apply` falls back to `lan-deny` (loaded inside the `podman machine` VM),
+  and an *explicit* `egress allow-list` fails closed with a steer to `lan-deny`
+  rather than silently starting a box the proxy isn't filtering. There is no
+  Windows-native path (run isopod inside WSL2).

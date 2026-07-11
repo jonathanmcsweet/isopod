@@ -650,6 +650,71 @@ EOF
   assert_output --partial "unknown egress action"
 }
 
+# ---- platform detection (os_kind / is_macos / is_linux) ----------------------
+# The `isopod` script runs on the Mac, but boxes run inside the podman machine /
+# Docker Desktop Linux VM, so egress (nftables) and Tier-3 virt (/dev/kvm) live
+# in that VM — several callers branch on the host OS. uname is stubbed to drive it.
+@test "os_kind reports macos on Darwin" {
+  make_stub uname 0 "Darwin"
+  run os_kind
+  assert_output "macos"
+}
+@test "os_kind reports linux on Linux" {
+  make_stub uname 0 "Linux"
+  run os_kind
+  assert_output "linux"
+}
+@test "os_kind reports other on an unrecognized kernel" {
+  make_stub uname 0 "OpenBSD"
+  run os_kind
+  assert_output "other"
+}
+@test "is_macos/is_linux agree with uname" {
+  make_stub uname 0 "Darwin"
+  run is_macos
+  assert_success
+  run is_linux
+  assert_failure
+}
+
+# ---- macos_hv_support (the macOS /dev/kvm equivalent probe) -------------------
+@test "macos_hv_support echoes the kern.hv_support sysctl value" {
+  make_stub sysctl 0 "1"
+  run macos_hv_support
+  assert_output "1"
+}
+
+# ---- egress: macOS enforces inside the podman machine VM ----------------------
+@test "egress_enforce_in_vm is true on macOS, false on Linux" {
+  make_stub uname 0 "Darwin"
+  run egress_enforce_in_vm
+  assert_success
+  make_stub uname 0 "Linux"
+  run egress_enforce_in_vm
+  assert_failure
+}
+@test "egress_rules_loaded is 'unknown' (2) on macOS when the VM is unreachable" {
+  make_stub uname 0 "Darwin"
+  make_stub podman 1 "" # `podman machine ssh -- true` fails -> VM not ready
+  run egress_rules_loaded
+  assert_equal "$status" 2
+}
+@test "egress apply on macOS steers the default allow-list to lan-deny in the VM" {
+  make_stub uname 0 "Darwin"
+  make_stub podman 0 "" # VM reachable; stands in for `podman machine ssh ...`
+  run egress_apply enforce
+  assert_success
+  assert_output --partial "lan-deny"
+  assert_stub_called "podman machine ssh"
+}
+@test "egress_preflight fails closed for an EXPLICIT allow-list on macOS" {
+  make_stub uname 0 "Darwin"
+  make_stub podman 0 "false"
+  ISOPOD_EGRESS=allow-list run egress_preflight podman
+  assert_failure
+  assert_output --partial "lan-deny"
+}
+
 # ---- per-box config.yaml (Compose-shaped, isopod-parsed) ---------------------
 @test "config.yaml round-trips through the parsers" {
   mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
