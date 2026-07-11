@@ -69,6 +69,43 @@ EOF
   chmod +x "$STUB_DIR/$name"
 }
 
+# Portable userland shims: keep tests green on both GNU (Linux) and BSD (macOS)
+# coreutils, whose flags differ. Prefer these over calling stat/sed directly.
+
+# Echo a file's permission bits in octal (e.g. 600). GNU stat uses -c '%a';
+# BSD/macOS stat uses -f '%Lp'. Try GNU first, fall back to BSD.
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+# In-place edit of a file with a sed script. GNU sed wants `-i`, BSD sed wants
+# `-i ''` — so sidestep the difference entirely with a temp file.
+sed_i() {
+  local script="$1" file="$2" tmp
+  tmp="$(mktemp)"
+  sed "$script" "$file" >"$tmp" && mv "$tmp" "$file"
+}
+
+# Look up an IDE binary (find_ide_bin) in an environment isolated from the host's
+# real editors, so these tests pass whether or not the developer has codium etc.
+# installed. Two host leaks are closed: PATH is reduced to the test stubs plus
+# the base system dirs (hiding a host codium/cursor in /opt/homebrew, /usr/local,
+# ...), and the target table is copied with its macOS .app paths blanked (so an
+# installed /Applications/*.app cannot satisfy the lookup either). The base dirs
+# are kept on PATH so stub shebangs (/usr/bin/env bash) still run. Sets IDE_CMD
+# like find_ide_bin and returns its exit status.
+ide_lookup() {
+  local _path="$PATH" _share="$ISOPOD_SHARE" _rc=0
+  mkdir -p "$TEST_TMP/ide-share"
+  awk 'NF==0 || $1 ~ /^#/ { print; next } { $3="-"; print }' \
+    "$ISOPOD_ROOT/share/ide-targets" >"$TEST_TMP/ide-share/ide-targets"
+  ISOPOD_SHARE="$TEST_TMP/ide-share" PATH="$STUB_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    find_ide_bin "$@" || _rc=$?
+  PATH="$_path"
+  ISOPOD_SHARE="$_share"
+  return "$_rc"
+}
+
 # Assert that the stub log contains a line matching a regex.
 assert_stub_called() {
   local pattern="$1"
