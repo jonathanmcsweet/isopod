@@ -57,6 +57,9 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
   --memory <size>       Memory limit, e.g. 4g
   --cpus <n>            CPU limit, e.g. 2
   --no-sudo             Do not give the in-box user passwordless sudo
+  --harden <level>      Kernel-hardening profile: 'default' (on for every box —
+                        reduced-surface guest sysctls on microVM boxes) or 'off'.
+                        'strict' is reserved for a future release.
   --container           Run as a PLAIN container instead of the default microVM
                         (lower isolation). Use when no microVM runtime/KVM is
                         available, or you accept a shared-kernel sandbox.
