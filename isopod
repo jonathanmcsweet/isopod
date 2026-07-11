@@ -92,6 +92,19 @@ ISOPOD_EGRESS_DNS="${ISOPOD_EGRESS_DNS:-1.1.1.1}"
 ISOPOD_EGRESS_IFACE="${ISOPOD_EGRESS_IFACE:-isopod-egr}"
 ISOPOD_EGRESS_RULESET="${ISOPOD_EGRESS_RULESET:-$ISOPOD_DIR/security/egress-host.nft}"
 
+# macOS host-level egress (pf). When boxes run on a routable vmnet subnet (Apple
+# `container` / vmnet), egress is enforced with pf on the Mac HOST — outside every
+# guest VM — in a dedicated pf anchor, instead of nft inside a guest VM. This is
+# the escape-resistant boundary; see docs/macos-host-egress.md. The anchor rules
+# are rendered from egress-host.pf; the anchor is referenced from pf.conf so it
+# survives reboot. ISOPOD_PF_SUBNET overrides the detected box vmnet subnet.
+ISOPOD_EGRESS_PF_RULESET="${ISOPOD_EGRESS_PF_RULESET:-$ISOPOD_DIR/security/egress-host.pf}"
+ISOPOD_PF_ANCHOR="${ISOPOD_PF_ANCHOR:-com.isopod.egress}"
+ISOPOD_PF_ANCHOR_FILE="${ISOPOD_PF_ANCHOR_FILE:-/etc/pf.anchors/com.isopod.egress}"
+ISOPOD_PF_CONF="${ISOPOD_PF_CONF:-/etc/pf.conf}"
+# Apple `container`'s default vmnet subnet; override detection with ISOPOD_PF_SUBNET.
+ISOPOD_PF_SUBNET_DEFAULT="${ISOPOD_PF_SUBNET_DEFAULT:-192.168.64.0/24}"
+
 # Egress allow-list mode (`egress allow-list`): a host-side filtering proxy
 # (tinyproxy) on the bridge gateway is the box's ONLY route out, and only
 # allow-listed hostnames pass. Enforced host-side (firewall + proxy), so an

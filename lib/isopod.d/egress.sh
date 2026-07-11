@@ -166,6 +166,11 @@ ensure_egress_network() { # ensure_egress_network <engine>
 # (nft missing, or reading it needs root we don't have — a false "not loaded"
 # would be misleading, so we report unknown instead).
 egress_rules_loaded() {
+  if egress_enforce_host_pf; then
+    # macOS host-pf backend: the rules live in the Mac's pf anchor.
+    egress_pf_loaded
+    return
+  fi
   if egress_enforce_in_vm; then
     # macOS: the rules live inside the podman machine VM. Unreachable VM -> unknown
     # (2), not "not loaded" (1), so a stopped machine never reads as a firewall gap.
@@ -182,24 +187,48 @@ egress_rules_loaded() {
   esac
 }
 
-# --- macOS: enforce inside the podman machine VM ----------------------------
-# On macOS the `isopod` script runs on the Mac, but boxes run inside the podman
-# machine Linux VM — which is where nftables, the box bridge, and the ruleset's
-# subnet/gateway/interface actually live. The Mac host has no nftables and no box
-# bridge, so the SAME egress ruleset is loaded and inspected INSIDE that VM over
-# podman's management SSH rather than on the Mac. (The Mac-native packet filter,
-# pf, is the wrong layer: it only sees post-NAT traffic already sourced from the
-# VM, so it cannot tell a box-initiated flow from the VM's own and cannot match
-# the per-box subnet the rules key on.) The allow-list's filtering proxy is a
-# host systemd service and is not ported here, so only lan-deny is VM-enforced.
+# --- macOS: two egress backends ---------------------------------------------
+# On macOS the `isopod` script runs on the Mac, but boxes run inside a guest VM,
+# so there is no single obvious place for the firewall. isopod has two backends:
 #
-# Windows/WSL users run isopod inside the Linux side, so they take the native
-# Linux path above; only macOS routes through the VM.
+#   pf  — HOST-level. When boxes run on a ROUTABLE vmnet subnet (Apple `container`,
+#         or a vmnet vfkit/krunkit/krunvm setup), pf on the Mac filters the box
+#         subnet in a dedicated anchor, OUTSIDE every guest VM. A box that escapes
+#         its container AND its VM still cannot flush it without root on macOS —
+#         the escape-resistant boundary. This is the preferred backend.
+#   vm  — IN-VM fallback. Under podman machine's default gvproxy networking a box's
+#         traffic is host-originated with no routable subnet for pf to scope, so
+#         the only place to enforce is INSIDE the podman machine VM (nft, over
+#         `podman machine ssh`). That is outside the box container but only a
+#         CONTAINER ESCAPE away — weaker than pf. Used when pf can't be scoped.
 #
-# NOTE: the Linux host path is covered by CI; this podman-machine path has NOT
-# been exercised from CI (no macOS runner) — validate on a real Mac. Docker
-# Desktop's VM is not a general SSH target, so only podman machine is wired.
-egress_enforce_in_vm() { is_macos; }
+# The allow-list's filtering proxy is a Linux systemd service on either backend,
+# so on macOS both enforce lan-deny only (see egress_apply). Windows/WSL users run
+# isopod inside the Linux side and take the native Linux path above.
+#
+# NOTE: the Linux host path is covered by CI; both macOS paths (podman-machine ssh,
+# and pfctl) have NOT been exercised from CI (no macOS runner) — validate on a real
+# Mac. See docs/macos-host-egress.md and test/macos-egress-check.sh.
+
+# Which macOS backend is in force: 'pf' (host-level) or 'vm' (in-VM fallback).
+# Override with ISOPOD_EGRESS_BACKEND=pf|vm. Default: pf when a routable box subnet
+# is available (Apple `container` present, ENGINE=container, or ISOPOD_PF_SUBNET
+# set) and pfctl exists; otherwise the in-VM fallback.
+egress_macos_backend() {
+  case "${ISOPOD_EGRESS_BACKEND:-}" in pf | vm)
+    printf '%s' "$ISOPOD_EGRESS_BACKEND"
+    return 0
+    ;;
+  esac
+  if egress_host_pf_supported &&
+    { [ -n "${ISOPOD_PF_SUBNET:-}" ] || [ "${ENGINE:-}" = container ] || have container; }; then
+    printf 'pf'
+  else
+    printf 'vm'
+  fi
+}
+egress_enforce_in_vm() { is_macos && [ "$(egress_macos_backend)" = vm ]; }
+egress_enforce_host_pf() { is_macos && [ "$(egress_macos_backend)" = pf ]; }
 
 # Is the podman machine VM present and running (a usable nft target)?
 egress_vm_ready() {
@@ -263,6 +292,92 @@ egress_unpersist_macos() {
   egress_vm_root rm -f "/etc/systemd/system/$ISOPOD_VM_NFT_UNIT.service" "$ISOPOD_VM_NFT_FILE"
   egress_vm_root systemctl daemon-reload
   info "removed the in-VM egress boot unit ('$ISOPOD_VM_NFT_UNIT'). A loaded ruleset stays until flushed or 'podman machine stop'."
+}
+
+# --- macOS host-level backend: pf on the Mac (Apple container / vmnet) -------
+# True when host pf egress is usable here: macOS with pfctl.
+egress_host_pf_supported() { is_macos && have pfctl; }
+
+# The box vmnet subnet pf scopes to. Order: explicit ISOPOD_PF_SUBNET, else the
+# Apple `container` default network's subnet (best-effort parse), else the
+# documented default (192.168.64.0/24). Echoes a CIDR.
+macos_box_subnet() {
+  [ -n "${ISOPOD_PF_SUBNET:-}" ] && {
+    printf '%s' "$ISOPOD_PF_SUBNET"
+    return 0
+  }
+  if have container; then
+    local s
+    s="$(container network inspect default 2>/dev/null |
+      grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -n1)"
+    valid_cidr "$s" 2>/dev/null && {
+      printf '%s' "$s"
+      return 0
+    }
+  fi
+  printf '%s' "$ISOPOD_PF_SUBNET_DEFAULT"
+}
+
+# Is the isopod pf anchor loaded? 0 = loaded, 1 = not loaded, 2 = unknown (pfctl
+# absent, or reading needs root we don't have — a false "not loaded" would mislead).
+egress_pf_loaded() {
+  have pfctl || return 2
+  local out
+  out="$(pfctl -a "$ISOPOD_PF_ANCHOR" -s rules 2>&1)" || {
+    case "$out" in
+      *[Pp]"ermission"* | *"Operation not permitted"* | *root*) return 2 ;;
+      *) return 1 ;;
+    esac
+  }
+  [ -n "$out" ] && return 0 || return 1
+}
+
+# Idempotently reference the isopod anchor from pf.conf so its rules are actually
+# evaluated (and reloaded on boot). Adds an `anchor` + `load anchor` pair once,
+# marked with a comment so unpersist can strip it cleanly.
+egress_pf_ensure_anchor_ref() {
+  egr_run_root grep -q "\"$ISOPOD_PF_ANCHOR\"" "$ISOPOD_PF_CONF" 2>/dev/null && return 0
+  printf '\n# isopod egress — added by `isopod egress apply` (remove with: isopod egress unpersist)\nanchor "%s"\nload anchor "%s" from "%s"\n' \
+    "$ISOPOD_PF_ANCHOR" "$ISOPOD_PF_ANCHOR" "$ISOPOD_PF_ANCHOR_FILE" |
+    egr_run_root tee -a "$ISOPOD_PF_CONF" >/dev/null ||
+    die "could not add the isopod anchor to $ISOPOD_PF_CONF"
+}
+
+egress_pf_remove_anchor_ref() {
+  # macOS sed needs an explicit (empty) -i backup suffix.
+  egr_run_root sed -i '' \
+    -e '/isopod egress — added by/d' \
+    -e "\\|\"$ISOPOD_PF_ANCHOR\"|d" \
+    "$ISOPOD_PF_CONF" 2>/dev/null || true
+}
+
+# Load the host pf egress rules into the isopod anchor and enable pf. Escape-proof:
+# a box can't flush this without root on macOS. Writes root-owned /etc/pf.anchors
+# and edits pf.conf (so it survives reboot), then reloads pf.
+egress_load_pf() {
+  local ISOPOD_PF_SUBNET rendered
+  ISOPOD_PF_SUBNET="$(macos_box_subnet)"
+  valid_cidr "$ISOPOD_PF_SUBNET" ||
+    die "box vmnet subnet '$ISOPOD_PF_SUBNET' is not valid IPv4 CIDR — set ISOPOD_PF_SUBNET (check: container network inspect default)"
+  [ -f "$ISOPOD_EGRESS_PF_RULESET" ] || die "missing pf ruleset: $ISOPOD_EGRESS_PF_RULESET"
+  have pfctl || die "pfctl not found — host-level egress needs macOS pf"
+  rendered="$(render_tmpl "$ISOPOD_EGRESS_PF_RULESET")"
+  info "Loading isopod egress firewall on the macOS HOST (pf anchor '$ISOPOD_PF_ANCHOR', box subnet $ISOPOD_PF_SUBNET)..."
+  printf '%s\n' "$rendered" | egr_write_root "$ISOPOD_PF_ANCHOR_FILE"
+  egress_pf_ensure_anchor_ref
+  egr_run_root pfctl -f "$ISOPOD_PF_CONF" >/dev/null 2>&1 ||
+    die "pfctl failed to load $ISOPOD_PF_CONF — check syntax with: sudo pfctl -n -f $ISOPOD_PF_CONF"
+  egr_run_root pfctl -E >/dev/null 2>&1 || true # enable pf (idempotent; -E refcounts)
+  info "egress firewall loaded on the host (pf anchor '$ISOPOD_PF_ANCHOR'); referenced from $ISOPOD_PF_CONF so it re-loads on boot."
+}
+
+egress_unload_pf() {
+  have pfctl || die "pfctl not found"
+  egr_run_root pfctl -a "$ISOPOD_PF_ANCHOR" -F rules >/dev/null 2>&1 || true
+  egress_pf_remove_anchor_ref
+  egr_run_root rm -f "$ISOPOD_PF_ANCHOR_FILE"
+  egr_run_root pfctl -f "$ISOPOD_PF_CONF" >/dev/null 2>&1 || true
+  info "removed isopod host pf egress (anchor '$ISOPOD_PF_ANCHOR' flushed and de-referenced from $ISOPOD_PF_CONF)."
 }
 
 # --- egress allow-list: host-side filtering proxy ---------------------------
@@ -329,13 +444,18 @@ egress_write_filter() {
 
 # Load the active nftables ruleset (LAN-deny or allow-list) into the host netns.
 egress_load_nft() {
+  # macOS host-pf backend renders and loads its own pf ruleset on the Mac.
+  if egress_enforce_host_pf; then
+    egress_load_pf
+    return 0
+  fi
   local rs rendered
   egress_validate_vars
   rs="$(egress_ruleset)"
   [ -f "$rs" ] || die "missing ruleset: $rs"
   rendered="$(render_tmpl "$rs")"
-  # macOS: load the ruleset inside the podman machine VM (where nftables and the
-  # box bridge live), not on the Mac host.
+  # macOS in-VM fallback: load the ruleset inside the podman machine VM (where
+  # nftables and the box bridge live), not on the Mac host.
   if egress_enforce_in_vm; then
     egress_vm_ready || die "on macOS the egress firewall loads inside the podman machine VM, but that
      VM is not reachable. Start it with:  podman machine start
@@ -368,9 +488,15 @@ egress_persist() {
     lan-deny | allow-list) ;;
     *) die "egress is off — configure 'egress lan-deny'/'allow-list' (or ISOPOD_EGRESS=...) before persisting" ;;
   esac
-  # macOS: the firewall lives inside the podman machine VM, so boot persistence is
-  # an in-VM systemd unit rather than a host one (egress_persist_macos persists
-  # lan-deny, the only mode enforced on macOS).
+  # macOS host-pf backend: `egress apply` already writes the anchor into pf.conf,
+  # which macOS re-reads on boot — so persistence is just (re)loading it now.
+  if egress_enforce_host_pf; then
+    egress_load_pf
+    info "host pf egress is referenced from $ISOPOD_PF_CONF, so it re-loads on reboot (no extra unit)."
+    return 0
+  fi
+  # macOS in-VM fallback: boot persistence is an in-VM systemd unit, not a host one
+  # (egress_persist_macos persists lan-deny, the only mode enforced on macOS).
   if egress_enforce_in_vm; then
     egress_persist_macos
     return 0
@@ -399,6 +525,10 @@ egress_persist() {
 }
 
 egress_unpersist() {
+  if egress_enforce_host_pf; then
+    egress_unload_pf
+    return 0
+  fi
   if egress_enforce_in_vm; then
     egress_unpersist_macos
     return 0
@@ -450,6 +580,25 @@ egress_apply_proxy() { # egress_apply_proxy <Yes|No>
 # Shared `isopod doctor` reporting for both egress modes: which engines can
 # enforce it (rootful host bridge) and whether the host firewall is loaded.
 egress_doctor_engines_and_fw() {
+  # macOS: report which backend enforces egress and where it lives.
+  if is_macos; then
+    local backend erc=0
+    backend="$(egress_macos_backend)"
+    if [ "$backend" = pf ]; then
+      printf '  [ok]      macOS egress backend: pf on the HOST (anchor %s, box subnet %s) — outside the guest VM\n' \
+        "$ISOPOD_PF_ANCHOR" "$(macos_box_subnet)"
+    else
+      printf '  [--]      macOS egress backend: in-VM nft (podman machine) — weaker; a container escape reaches it.\n'
+      printf '            For host-level enforcement install Apple `container` (per-box vmnet subnet). See docs/macos-host-egress.md\n'
+    fi
+    egress_rules_loaded || erc=$?
+    case "$erc" in
+      0) printf '  [ok]      egress firewall loaded (%s)\n' "$([ "$backend" = pf ] && printf 'pf anchor %s' "$ISOPOD_PF_ANCHOR" || printf 'table inet isopod, in VM')" ;;
+      1) printf '  [warn]    egress firewall NOT loaded — run: isopod egress apply\n' ;;
+      2) printf '  [--]      egress firewall status unknown (need root, or VM/pf unreachable; try: isopod egress status)\n' ;;
+    esac
+    return 0
+  fi
   local eng seen=0
   for eng in podman docker; do
     have "$eng" && "$eng" info >/dev/null 2>&1 || continue
@@ -496,14 +645,14 @@ resolve_egress() { # resolve_egress <engine>
     ISOPOD_EGRESS_DEGRADED=1
     return 0
   fi
-  # macOS: the allow-list filtering proxy is Linux-only, so the achievable strict
-  # mode is lan-deny (enforced inside the podman machine VM). Downgrade the
-  # default allow-list to lan-deny here so the posture reported later is honest
-  # (rather than claiming allow-list ACTIVE while nothing filters by hostname).
-  if egress_enforce_in_vm && [ "$mode" = allow-list ]; then
+  # macOS: the allow-list filtering proxy is Linux-only (both backends), so the
+  # achievable strict mode is lan-deny. Downgrade the default allow-list to lan-deny
+  # here so the posture reported later is honest (rather than claiming allow-list
+  # ACTIVE while nothing filters by hostname).
+  if is_macos && [ "$mode" = allow-list ]; then
     warn "egress is on by default as allow-list, but its host filtering proxy is Linux-only; on macOS
-     isopod enforces lan-deny (LAN/host/metadata blocked) inside the podman machine VM instead. Make
-     it explicit with ISOPOD_EGRESS=lan-deny, or disable with ISOPOD_EGRESS=off."
+     isopod enforces lan-deny (LAN/host/metadata blocked) via the $(egress_macos_backend) backend
+     instead. Make it explicit with ISOPOD_EGRESS=lan-deny, or disable with ISOPOD_EGRESS=off."
     export ISOPOD_EGRESS=lan-deny
     mode=lan-deny
   fi
@@ -605,10 +754,10 @@ egress_preflight() { # egress_preflight <engine>
   egress_validate_vars
   # macOS: an EXPLICIT allow-list can't be honored (its host proxy is Linux-only).
   # Fail closed with a clear steer rather than silently starting an unfiltered box.
-  if egress_enforce_in_vm && [ "$mode" = allow-list ]; then
+  if is_macos && [ "$mode" = allow-list ]; then
     die "egress allow-list is configured, but its host filtering proxy is a Linux systemd service not
-     yet supported on macOS. Use 'egress lan-deny' (enforced inside the podman machine VM) on macOS,
-     or set ISOPOD_EGRESS=lan-deny."
+     yet supported on macOS. Use 'egress lan-deny' (host pf, or in-VM nft) on macOS, or set
+     ISOPOD_EGRESS=lan-deny."
   fi
   if ! egress_can_enforce "$engine"; then
     die "egress $mode needs a rootful engine (host-bridge networking); '$engine' here is rootless.
@@ -664,7 +813,17 @@ cmd_egress() {
       ;;
     log) egress_log "$@" ;;
     denied) egress_denied ;;
-    rules | show) render_tmpl "$(egress_ruleset)" ;;
+    rules | show)
+      # On the macOS host-pf backend, show the pf ruleset (with the box subnet
+      # substituted); otherwise the active nft ruleset.
+      if egress_enforce_host_pf; then
+        local ISOPOD_PF_SUBNET
+        ISOPOD_PF_SUBNET="$(macos_box_subnet)"
+        render_tmpl "$ISOPOD_EGRESS_PF_RULESET"
+      else
+        render_tmpl "$(egress_ruleset)"
+      fi
+      ;;
     -h | --help | help) render_tmpl egress-help.txt ;;
     *) die "unknown egress action: $action (try: isopod egress status|apply|observe|persist|unpersist|allow|log|denied|rules)" ;;
   esac
@@ -711,14 +870,14 @@ egress_apply() { # egress_apply <enforce|observe>
   local want="$1" mode
   mode="$(active_egress)"
   # macOS: the allow-list filtering proxy is a Linux systemd service and is not
-  # ported yet, so there is no proxy to observe or enforce. Fall back to lan-deny
-  # (loaded inside the podman machine VM) rather than failing on missing systemctl.
-  if egress_enforce_in_vm && [ "$mode" = allow-list ]; then
+  # ported to either backend, so there is no proxy to observe or enforce. Fall back
+  # to lan-deny (host pf, or in-VM nft) rather than failing on missing systemctl.
+  if is_macos && [ "$mode" = allow-list ]; then
     [ "$want" = observe ] &&
       die "egress observe needs the filtering proxy, which is Linux-only — not available on macOS yet."
     warn "egress allow-list uses a host filtering proxy (a Linux systemd service) not yet ported to
      macOS. Applying lan-deny instead (LAN/host/cloud-metadata/internal-DNS blocked; public internet
-     reachable), loaded inside the podman machine VM."
+     reachable), via the $(egress_macos_backend) backend ($([ "$(egress_macos_backend)" = pf ] && printf 'host pf' || printf 'in-VM nft'))."
     ISOPOD_EGRESS=lan-deny egress_load_nft
     return 0
   fi
