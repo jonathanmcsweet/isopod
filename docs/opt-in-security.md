@@ -264,6 +264,17 @@ service and is not ported to the VM yet, so on macOS `apply`/`persist` enforce
 lan-deny rather than silently starting an unfiltered box. Porting the proxy into
 the VM (which has systemd) is the natural follow-up.
 
+> **Caveat — this is in-VM enforcement, not escape-proof.** Loading the ruleset
+> inside the podman machine VM keeps it out of reach of an in-box agent with root
+> and sudo, but on macOS a box is a plain container inside that shared VM (no
+> per-box microVM), so the rules are only a **container escape** away — weaker than
+> the Linux host firewall, which sits beyond a Tier-3 microVM boundary. Enforcing
+> egress on the **macOS host** (pf, outside every guest VM) needs boxes on a
+> routable vmnet subnet, which podman machine's default gvproxy networking does not
+> provide. See **[docs/macos-host-egress.md](macos-host-egress.md)** for the full
+> analysis, the `security/egress-host.pf` ruleset, and the Apple `container` path
+> that enforces on the host.
+
 **Fails closed.** If a box is configured for `egress lan-deny` but the host firewall
 is not loaded, `isopod create` (and `reconfigure`) **refuse**, rather than starting a
 box that only *looks* isolated. Load the firewall first, or — to start on the bridge

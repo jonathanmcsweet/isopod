@@ -1,0 +1,38 @@
+#
+# security/egress-host.pf — macOS HOST-side egress firewall for isopod, the pf
+# analog of security/egress-host.nft. Loaded with pfctl on the Mac, OUTSIDE the
+# guest VM(s), so a box that escapes its container AND the guest VM still cannot
+# flush it without root on macOS itself. This is the escape-resistant boundary the
+# in-VM nft ruleset (security/egress-host.nft loaded via `podman machine ssh`) does
+# NOT provide.
+#
+# REQUIREMENT: boxes must be on a ROUTABLE vmnet subnet the Mac can see — i.e. a
+# per-box VM runtime such as Apple `container` (github.com/apple/container) or a
+# vmnet-based vfkit/krunkit/krunvm setup. It does NOT work with podman machine's
+# default gvproxy user-mode networking, where a box's traffic is host-originated
+# and has no subnet/interface for pf to scope. See docs/macos-host-egress.md.
+#
+# Rendered by `isopod egress apply` on macOS (the box vmnet subnet and interface
+# are substituted in). Anchored under the "isopod" pf anchor so it can be loaded
+# and flushed independently of the user's own /etc/pf.conf.
+#
+# NOT persistent across reboot: re-run `isopod egress apply`, or install the
+# anchor into /etc/pf.conf. `isopod doctor` / `isopod egress status` report whether
+# it is loaded.
+
+# Private / link-local / metadata / CGNAT destinations a box may not reach.
+# (169.254.169.254 is cloud metadata; 100.64/10 is CGNAT.)
+table <isopod_lan> const { 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 }
+
+# Box-initiated flows are matched INBOUND at the vmnet interface with the box
+# subnet as the source (per the Apple container pf findings, discussion #719):
+# pf sees the guest's packets arriving on the vmnet interface as "in".
+#
+# Drop box -> LAN / link-local / metadata / CGNAT. Everything else the box
+# initiates (the public internet) is allowed, so apt/pip/git keep working.
+block drop in quick on $ISOPOD_EGRESS_IFACE inet from $ISOPOD_EGRESS_SUBNET to <isopod_lan>
+pass       in quick on $ISOPOD_EGRESS_IFACE inet from $ISOPOD_EGRESS_SUBNET to any keep state
+
+# Box IPv6 is dropped as a backstop (isopod runs boxes v4-only); scoped to the
+# vmnet interface so the Mac's own IPv6 is untouched.
+block drop in quick on $ISOPOD_EGRESS_IFACE inet6 from any to any
