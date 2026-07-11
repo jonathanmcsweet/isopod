@@ -84,6 +84,31 @@ New macOS `doctor` virtualization block:
             `runtime kata`/`krun` is generally N/A on macOS today — the engine VM is the boundary
 ```
 
+## Status: implemented in branch `macos-egress-and-tier3` (2 commits)
+
+Both goals are now built, not just described:
+
+**Egress (nftables equivalent) — complete for lan-deny.**
+`isopod egress apply` loads `security/egress-host.nft` inside the podman machine
+VM; `isopod egress persist`/`unpersist` install/remove an in-VM systemd unit
+(`isopod-egress.service`) so it survives `podman machine stop`/reboot — parity
+with the Linux host boot unit. `status`/`doctor` report the in-VM state
+accurately, and the old false "allow-list ACTIVE" is gone. allow-list still
+degrades to lan-deny on macOS (its proxy is Linux systemd) — porting the proxy
+into the VM is the tracked next step.
+
+**Tier-3 for macOS — detection + guidance, with the real options surfaced.**
+`doctor` now probes `kern.hv_support`, the chip generation, and the macOS version,
+and recommends the strongest per-box isolation your Mac supports:
+- **krunvm** — each box as its own microVM directly on Hypervisor.framework (any
+  Apple Silicon, no nested virt). This is the genuine "Tier 3 for macOS." isopod's
+  krunvm *integration* is experimental — krunvm is a separate engine from
+  podman/docker, so wiring it into create/code/export is the next build, not a
+  drop-in `--runtime`. Doctor detects and points at it.
+- **nested `krun`** inside the engine VM when the Mac is Apple M3+/macOS 15+
+  (experimental; needs a krunkit that surfaces nested virt).
+- otherwise, the engine VM itself as the boundary.
+
 ## Scope / caveats
 
 - Everything is gated behind `is_macos()`, so **Linux paths are byte-for-byte
