@@ -114,6 +114,31 @@ EOF
   }
 }
 
+@test "#1: inject_secrets keeps the box SSH port under its IFS=, scope" {
+  # Regression: inject_secrets sets IFS=, to parse the secret spec list, then
+  # streams the value over box_ssh. box_ssh reads box_ssh_addr's "host port" with
+  # `read`, which used to inherit that IFS=, and drop the port — so it ran
+  # `ssh -p ''` and `create --secret` aborted with "failed to inject secret".
+  # Confirm the published port reaches the ssh call.
+  export ISOPOD_SECRET_BACKEND=file
+  mkdir -p "$ISOPOD_CONFIG_DIR/secrets"
+  printf 'secret-value' >"$ISOPOD_CONFIG_DIR/secrets/TOK"
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\nsecrets=TOK:/run/secrets/TOK\n' \
+    >"$(box_dir demo)/meta"
+
+  _install_ssh_recorder
+  : >"$TEST_TMP/ssh-calls.log"
+
+  inject_secrets demo
+
+  grep -q -- '-p 2222' "$TEST_TMP/ssh-calls.log" || {
+    echo "FAIL: the published port did not reach ssh (IFS leak?):" >&2
+    cat "$TEST_TMP/ssh-calls.log" >&2
+    return 1
+  }
+}
+
 @test "#1 POC: valid_secret_path currently blocks quote-breakout (the only guard)" {
   # Demonstrate that the charset guard is the SOLE barrier: a path containing a
   # single quote (which would break out of the single-quoted interpolation) is
