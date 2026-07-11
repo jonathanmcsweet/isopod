@@ -610,6 +610,12 @@ EOF
 }
 @test "egress_preflight creates the network on a rootful engine" {
   make_stub podman 0 "false" # rootful; also stands in for network exists/create
+  # Stub nft so egress_rules_loaded is deterministic regardless of the host's
+  # nftables/privilege state. Without this the real nft is consulted: a root host
+  # with working nftables (or an nf_tables-less container) reports the firewall as
+  # "not loaded" and egress_preflight fails closed, so the test would pass only on
+  # a host with no nft or an unprivileged one.
+  make_stub nft 0 # firewall reads as loaded
   ISOPOD_EGRESS=lan-deny run egress_preflight podman
   assert_success
   assert_stub_called "podman network (exists|create)"

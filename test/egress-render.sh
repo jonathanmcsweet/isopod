@@ -93,8 +93,10 @@ fi
 ok "allow-list generates anchored filter regexes (rejects look-alike hosts)"
 
 # --- optional: real nft parse where the binary is usable --------------------
-# nft check-mode still talks to the kernel, so it needs privilege; classify a
-# permission failure as skip (unprivileged CI / act) and only fail on a genuine
+# nft check-mode still talks to the kernel: it needs privilege AND a working
+# nf_tables/netlink subsystem. Classify both "no privilege" (unprivileged CI)
+# and "no nf_tables kernel" (containers / emulated runners, where nft is
+# installed but netlink won't initialize) as skip, and only fail on a genuine
 # parse error. Strip the add/delete idempotency preamble so we validate the rule
 # syntax itself, independent of current kernel state.
 nft_check() { # nft_check <label> <rendered ruleset>
@@ -105,8 +107,8 @@ nft_check() { # nft_check <label> <rendered ruleset>
     return 0
   fi
   case "$err" in
-    *"permission denied"* | *"Operation not permitted"* | *"not permitted"* | *"Could not"*)
-      skip "$label: nft -c needs privilege here — parse check skipped"
+    *"permission denied"* | *"Operation not permitted"* | *"not permitted"* | *"Could not"* | *"Unable to initialize Netlink"* | *"Protocol not supported"*)
+      skip "$label: nft -c can't reach nf_tables here (no privilege or no kernel support) — parse check skipped"
       ;;
     *) fail "$label: nft rejected the ruleset:
 $err" ;;
