@@ -166,6 +166,13 @@ ensure_egress_network() { # ensure_egress_network <engine>
 # (nft missing, or reading it needs root we don't have — a false "not loaded"
 # would be misleading, so we report unknown instead).
 egress_rules_loaded() {
+  if egress_enforce_in_vm; then
+    # macOS: the rules live inside the podman machine VM. Unreachable VM -> unknown
+    # (2), not "not loaded" (1), so a stopped machine never reads as a firewall gap.
+    egress_vm_ready || return 2
+    egress_vm_root nft list table inet isopod >/dev/null 2>&1 && return 0
+    return 1
+  fi
   have nft || return 2
   local err
   err=$(nft list table inet isopod 2>&1 >/dev/null) && return 0
@@ -173,6 +180,39 @@ egress_rules_loaded() {
     *"permission denied"* | *"Operation not permitted"* | *"not permitted"*) return 2 ;;
     *) return 1 ;;
   esac
+}
+
+# --- macOS: enforce inside the podman machine VM ----------------------------
+# On macOS the `isopod` script runs on the Mac, but boxes run inside the podman
+# machine Linux VM — which is where nftables, the box bridge, and the ruleset's
+# subnet/gateway/interface actually live. The Mac host has no nftables and no box
+# bridge, so the SAME egress ruleset is loaded and inspected INSIDE that VM over
+# podman's management SSH rather than on the Mac. (The Mac-native packet filter,
+# pf, is the wrong layer: it only sees post-NAT traffic already sourced from the
+# VM, so it cannot tell a box-initiated flow from the VM's own and cannot match
+# the per-box subnet the rules key on.) The allow-list's filtering proxy is a
+# host systemd service and is not ported here, so only lan-deny is VM-enforced.
+#
+# Windows/WSL users run isopod inside the Linux side, so they take the native
+# Linux path above; only macOS routes through the VM.
+#
+# NOTE: the Linux host path is covered by CI; this podman-machine path has NOT
+# been exercised from CI (no macOS runner) — validate on a real Mac. Docker
+# Desktop's VM is not a general SSH target, so only podman machine is wired.
+egress_enforce_in_vm() { is_macos; }
+
+# Is the podman machine VM present and running (a usable nft target)?
+egress_vm_ready() {
+  have podman || return 1
+  podman machine ssh -- true >/dev/null 2>&1
+}
+
+# Run a command as root inside the podman machine VM. Stdin is forwarded, so
+# `... | egress_vm_root nft -f -` loads a rendered ruleset. Returns 127 when the
+# VM is unreachable so callers can tell "can't reach VM" from a real failure.
+egress_vm_root() { # egress_vm_root <cmd...>
+  have podman || return 127
+  podman machine ssh -- sudo "$@"
 }
 
 # --- egress allow-list: host-side filtering proxy ---------------------------
@@ -243,8 +283,21 @@ egress_load_nft() {
   egress_validate_vars
   rs="$(egress_ruleset)"
   [ -f "$rs" ] || die "missing ruleset: $rs"
-  have nft || die "nft (nftables) not found — install nftables to apply the egress firewall"
   rendered="$(render_tmpl "$rs")"
+  # macOS: load the ruleset inside the podman machine VM (where nftables and the
+  # box bridge live), not on the Mac host.
+  if egress_enforce_in_vm; then
+    egress_vm_ready || die "on macOS the egress firewall loads inside the podman machine VM, but that
+     VM is not reachable. Start it with:  podman machine start
+     (Docker Desktop's VM is not supported for host-enforced egress — use podman machine.)"
+    info "Loading isopod egress firewall inside the podman machine VM (nftables)..."
+    printf '%s\n' "$rendered" | egress_vm_root nft -f - ||
+      die "nft failed to load the ruleset inside the podman machine VM"
+    info "egress firewall loaded inside the VM (table inet isopod)."
+    warn "not persistent across 'podman machine stop' / reboot — re-run 'isopod egress apply' after those."
+    return 0
+  fi
+  have nft || die "nft (nftables) not found — install nftables to apply the egress firewall"
   info "Loading isopod egress firewall into the host network namespace..."
   printf '%s\n' "$rendered" | egr_run_root nft -f - || die "nft failed to load the ruleset"
   info "egress firewall loaded (table inet isopod)."
@@ -265,6 +318,11 @@ egress_persist() {
     lan-deny | allow-list) ;;
     *) die "egress is off — configure 'egress lan-deny'/'allow-list' (or ISOPOD_EGRESS=...) before persisting" ;;
   esac
+  # macOS: persistence would be a host systemd unit, which does not apply — the
+  # ruleset lives inside the podman machine VM. Re-apply after the VM restarts.
+  egress_enforce_in_vm &&
+    die "egress persist installs a host systemd unit, which does not apply on macOS (the ruleset lives
+     inside the podman machine VM). Re-run 'isopod egress apply' after 'podman machine start'."
   have systemctl || die "egress persist needs systemd (systemctl) to install a boot unit"
   nftbin="$(command -v nft)" || die "nft (nftables) not found — install nftables"
   egress_validate_vars
@@ -382,6 +440,17 @@ resolve_egress() { # resolve_egress <engine>
     ISOPOD_EGRESS_DEGRADED=1
     return 0
   fi
+  # macOS: the allow-list filtering proxy is Linux-only, so the achievable strict
+  # mode is lan-deny (enforced inside the podman machine VM). Downgrade the
+  # default allow-list to lan-deny here so the posture reported later is honest
+  # (rather than claiming allow-list ACTIVE while nothing filters by hostname).
+  if egress_enforce_in_vm && [ "$mode" = allow-list ]; then
+    warn "egress is on by default as allow-list, but its host filtering proxy is Linux-only; on macOS
+     isopod enforces lan-deny (LAN/host/metadata blocked) inside the podman machine VM instead. Make
+     it explicit with ISOPOD_EGRESS=lan-deny, or disable with ISOPOD_EGRESS=off."
+    export ISOPOD_EGRESS=lan-deny
+    mode=lan-deny
+  fi
   # allow-list needs the filtering proxy; if it is definitively stopped, drop to
   # lan-deny (LAN block without the proxy) rather than leaving the box no route out.
   if [ "$mode" = allow-list ]; then
@@ -478,6 +547,13 @@ egress_preflight() { # egress_preflight <engine>
   case "$mode" in lan-deny | allow-list) ;; *) return 0 ;; esac
   local engine="$1"
   egress_validate_vars
+  # macOS: an EXPLICIT allow-list can't be honored (its host proxy is Linux-only).
+  # Fail closed with a clear steer rather than silently starting an unfiltered box.
+  if egress_enforce_in_vm && [ "$mode" = allow-list ]; then
+    die "egress allow-list is configured, but its host filtering proxy is a Linux systemd service not
+     yet supported on macOS. Use 'egress lan-deny' (enforced inside the podman machine VM) on macOS,
+     or set ISOPOD_EGRESS=lan-deny."
+  fi
   if ! egress_can_enforce "$engine"; then
     die "egress $mode needs a rootful engine (host-bridge networking); '$engine' here is rootless.
      A rootless engine routes boxes through a userspace stack with no host bridge, so the
@@ -578,6 +654,18 @@ egress_status() {
 egress_apply() { # egress_apply <enforce|observe>
   local want="$1" mode
   mode="$(active_egress)"
+  # macOS: the allow-list filtering proxy is a Linux systemd service and is not
+  # ported yet, so there is no proxy to observe or enforce. Fall back to lan-deny
+  # (loaded inside the podman machine VM) rather than failing on missing systemctl.
+  if egress_enforce_in_vm && [ "$mode" = allow-list ]; then
+    [ "$want" = observe ] &&
+      die "egress observe needs the filtering proxy, which is Linux-only — not available on macOS yet."
+    warn "egress allow-list uses a host filtering proxy (a Linux systemd service) not yet ported to
+     macOS. Applying lan-deny instead (LAN/host/cloud-metadata/internal-DNS blocked; public internet
+     reachable), loaded inside the podman machine VM."
+    ISOPOD_EGRESS=lan-deny egress_load_nft
+    return 0
+  fi
   case "$mode" in
     lan-deny)
       [ "$want" = enforce ] || die "egress observe is only for allow-list mode (current mode: lan-deny)"

@@ -214,6 +214,16 @@ runtime_available() { # runtime_available <engine> <name>
   "$engine" info 2>/dev/null | grep -qE "(^|[^[:alnum:]_-])${name}([^[:alnum:]_-]|\$)"
 }
 
+# macOS has no /dev/kvm. The equivalent capability — "does this machine have
+# hardware virtualization?" — is Apple's Hypervisor.framework, and the closest
+# thing to a probe is `sysctl kern.hv_support` (1 = supported). That backs the
+# podman machine / Docker Desktop VM every box already runs inside. Echoes the
+# raw sysctl value (usually 0/1); empty when sysctl is unavailable, so callers
+# treat "" as "unknown" rather than "unsupported".
+macos_hv_support() {
+  have sysctl && sysctl -n kern.hv_support 2>/dev/null
+}
+
 # Fail-closed preflight for the configured OCI runtime, mirroring egress_preflight:
 # turn a late, cryptic engine error ("runtime not found") into an early, clear one,
 # and make sure a box the user asked to run under a sandboxed runtime does not
