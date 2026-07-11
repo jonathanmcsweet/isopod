@@ -714,6 +714,60 @@ EOF
   assert_failure
   assert_output --partial "lan-deny"
 }
+@test "egress persist on macOS installs the ruleset inside the podman machine VM" {
+  make_stub uname 0 "Darwin"
+  make_stub podman 0 "" # VM reachable; stands in for `podman machine ssh ...`
+  run egress_persist
+  assert_success
+  assert_stub_called "podman machine ssh -- sudo systemctl enable"
+  assert_stub_called "podman machine ssh -- sudo tee /etc/systemd/system/isopod-egress"
+}
+
+# ---- macOS Tier-3 capability detection (chip / version / nested virt) ---------
+# The macOS "tier 3" story: the engine VM is already a hardware boundary; a NESTED
+# per-box microVM needs Apple M3+ on macOS 15+. These probe that with stubs.
+@test "macos_chip_generation parses the Apple M-series number" {
+  make_stub sysctl 0 "Apple M3 Pro"
+  run macos_chip_generation
+  assert_output "3"
+}
+@test "macos_chip_generation is empty on Intel" {
+  make_stub sysctl 0 "Intel(R) Core(TM) i7"
+  run macos_chip_generation
+  assert_output ""
+}
+@test "macos_major_version reads the macOS major version" {
+  make_stub sw_vers 0 "15.5"
+  run macos_major_version
+  assert_output "15"
+}
+@test "macos_nested_virt_capable: true on M3/macOS15, false on M2" {
+  make_stub sw_vers 0 "15.5"
+  make_stub sysctl 0 "Apple M3 Pro"
+  run macos_nested_virt_capable
+  assert_success
+  make_stub sysctl 0 "Apple M2"
+  run macos_nested_virt_capable
+  assert_failure
+}
+@test "doctor_virt_macos reports Hypervisor.framework and per-box microVM options" {
+  make_stub uname 0 "Darwin"
+  cat >"$STUB_DIR/sysctl" <<'EOF'
+#!/usr/bin/env bash
+case "$2" in
+  kern.hv_support) echo 1 ;;
+  machdep.cpu.brand_string) echo "Apple M3 Pro" ;;
+  kern.osproductversion) echo "15.5" ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/sysctl"
+  make_stub sw_vers 0 "15.5"
+  run doctor_virt_macos
+  assert_success
+  assert_output --partial "Hypervisor.framework present"
+  assert_output --partial "krunvm"
+  assert_output --partial "nested virtualization"
+}
 
 # ---- per-box config.yaml (Compose-shaped, isopod-parsed) ---------------------
 @test "config.yaml round-trips through the parsers" {

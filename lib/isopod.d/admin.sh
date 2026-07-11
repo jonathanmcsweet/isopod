@@ -142,15 +142,36 @@ doctor_virt_linux() {
 # Report Hypervisor.framework (the /dev/kvm equivalent) and explain that a nested
 # per-box microVM runtime is a separate, still-maturing capability (M3+/macOS 15).
 doctor_virt_macos() {
-  local hv
+  local hv gen ver
   hv="$(macos_hv_support)"
+  gen="$(macos_chip_generation)"
+  ver="$(macos_major_version)"
   if [ "$hv" = 1 ]; then
     printf '  [ok]      Apple Hypervisor.framework present (kern.hv_support=1) — the macOS /dev/kvm equivalent\n'
     printf '  [ok]      boxes run inside the podman machine / Docker Desktop VM (a hardware VM boundary —\n'
     printf '            the Tier-3-class isolation on macOS; a plain container here is already VM-isolated)\n'
-    printf '  [note]    a NESTED per-box microVM runtime (kata/krun inside that VM) additionally needs an\n'
-    printf '            Apple M3+ chip on macOS 15+ and a VMM exposing nested virt (still maturing), so\n'
-    printf '            `runtime kata`/`krun` is generally N/A on macOS today — the engine VM is the boundary\n'
+    # Stronger, PER-BOX isolation options, strongest-available first. krunvm boots
+    # each box as its own microVM directly on Hypervisor.framework (no nesting, any
+    # Apple Silicon); nested krun needs M3+/macOS 15. See opt-in-security.md#macos.
+    if have krunvm; then
+      printf '  [ok]      krunvm present — can run each box as its own microVM on Hypervisor.framework\n'
+      printf '            (native Tier 3, no nested virt). isopod integration is experimental — see\n'
+      printf '            docs/opt-in-security.md#macos\n'
+    else
+      printf '  [--]      per-box microVM: `brew install krunvm` for a native Hypervisor.framework microVM\n'
+      printf '            per box (Tier-3-class, no nested virt; any Apple Silicon). Integration experimental.\n'
+    fi
+    if macos_nested_virt_capable; then
+      printf '  [note]    this Mac (Apple M%s, macOS %s) can expose nested virtualization — a nested microVM\n' "$gen" "$ver"
+      printf '            runtime (ISOPOD_RUNTIME=krun) MAY work inside the engine VM. Experimental: needs a\n'
+      printf '            krunkit/VMM build that surfaces nested virt to the guest. Try it, or use krunvm.\n'
+    elif [ -n "$gen" ]; then
+      printf '  [note]    nested per-box microVMs (ISOPOD_RUNTIME=krun) need Apple M3+ on macOS 15+ (this Mac:\n'
+      printf '            Apple M%s, macOS %s). The engine VM stays the boundary; use krunvm for per-box VMs.\n' "$gen" "$ver"
+    else
+      printf '  [note]    nested per-box microVMs need Apple M3+ on macOS 15+. The engine VM stays the\n'
+      printf '            boundary; use krunvm for a native per-box microVM.\n'
+    fi
   elif [ -n "$hv" ]; then
     printf '  [warn]    Apple Hypervisor.framework NOT available (kern.hv_support=%s) — the container engine\n' "$hv"
     printf '            cannot start its VM, so no boxes will run. Check virtualization support for this Mac.\n'

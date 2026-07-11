@@ -151,13 +151,33 @@ boundary *is* the Tier-3-class isolation on a Mac — a kernel exploit or contai
 escape inside a box lands in the engine VM, not on macOS. So a plain container on
 macOS is already VM-isolated from your machine in a way it is not on Linux.
 
-Running a **nested** per-box microVM runtime (`runtime kata`/`krun`) *inside* that
-VM is a separate, still-maturing capability: it needs an Apple **M3 or later** chip
-on **macOS 15+** plus a VMM that exposes nested virtualization to the guest. Until
-that path is broadly available, `isopod doctor` reports Tier-3-in-a-box as N/A on
-macOS and points at the engine VM as the boundary that is already in force. (This
-is why isopod's `/dev/kvm` preflight is Linux-only — a Mac has no such node, and
-the missing-device check would be a false negative.)
+If you want a per-box hardware boundary (each box its own VM, not just one shared
+engine VM), there are two routes on macOS, and `isopod doctor` reports which your
+Mac can use:
+
+1. **krunvm — a native microVM per box (recommended; any Apple Silicon).**
+   [krunvm](https://github.com/containers/krunvm) boots an OCI image as its own
+   microVM **directly on Hypervisor.framework** — no nested virtualization, so it
+   works on any Apple Silicon Mac (M1+). This is the closest thing to Linux Tier 3
+   on macOS: each box gets its own guest kernel behind a hardware boundary to your
+   Mac. `brew install krunvm` and `isopod doctor` will detect it. **isopod's krunvm
+   integration is experimental** — krunvm is a separate tool from the podman/docker
+   engine isopod drives today (different networking and image model), so wiring it
+   into `isopod create`/`code`/`export` is in progress rather than a drop-in
+   `--runtime`. Doctor flags it as an available capability and this is the tracked
+   next step.
+
+2. **Nested `krun`/`kata` inside the engine VM (needs Apple M3+/macOS 15).** Apple
+   exposes nested virtualization only on **M3 or later** chips running **macOS
+   15+**, and the engine's VMM (krunkit) must surface it to the guest — still
+   maturing. On a capable Mac, `ISOPOD_RUNTIME=krun isopod create …` *may* boot a
+   nested microVM; doctor tells you when your chip/OS qualifies and marks it
+   experimental. On other Macs the engine VM stays the boundary.
+
+isopod's `/dev/kvm` preflight is Linux-only by design — a Mac has no such node, so
+the missing-device check would be a false negative. Doctor instead probes
+`kern.hv_support` (Hypervisor.framework), the chip generation
+(`machdep.cpu.brand_string`), and the macOS version to report the right option.
 
 ## Network egress isolation (`egress lan-deny`)
 
@@ -221,10 +241,28 @@ The Mac-native packet filter, **pf** (`pfctl`), is *not* the right layer: by the
 time a box's traffic reaches the Mac it has already been NAT'd and is sourced from
 the VM, so pf can neither tell a box-initiated flow from the VM's own nor match the
 per-box subnet the rules key on. Enforcement stays inside the VM, where the box
-identity is still intact. The rules are not persistent across `podman machine stop`
-— re-run `isopod egress apply` after starting the machine. Docker Desktop's VM is
-not a general SSH target, so host-enforced egress on macOS currently requires
-podman machine.
+identity is still intact. Docker Desktop's VM is not a general SSH target, so
+host-enforced egress on macOS currently requires podman machine.
+
+```sh
+podman machine start          # the VM must be up
+isopod egress apply           # loads security/egress-host.nft INSIDE the VM
+isopod egress status          # reports the in-VM firewall state
+isopod egress persist         # survive a machine restart (see below)
+```
+
+**Persistence.** A plain `apply` is lost when the VM stops (`podman machine stop`
+/ reboot). `isopod egress persist` installs a small systemd unit **inside the
+podman machine VM** (`isopod-egress.service`, loading `/etc/isopod/egress.nft`)
+that re-applies the ruleset on VM boot — the macOS equivalent of the Linux host
+boot unit. `isopod egress unpersist` removes it. Re-run `persist` if you change
+any `ISOPOD_EGRESS_*` variable, since the unit loads a snapshot.
+
+**allow-list on macOS.** The allow-list's filtering proxy is a Linux systemd
+service and is not ported to the VM yet, so on macOS `apply`/`persist` enforce
+**lan-deny**; an explicit `egress allow-list` fails closed with a steer to
+lan-deny rather than silently starting an unfiltered box. Porting the proxy into
+the VM (which has systemd) is the natural follow-up.
 
 **Fails closed.** If a box is configured for `egress lan-deny` but the host firewall
 is not loaded, `isopod create` (and `reconfigure`) **refuse**, rather than starting a
