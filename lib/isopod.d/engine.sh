@@ -17,13 +17,29 @@ detect_engine() {
   else
     die "neither podman nor docker found. Install one (podman recommended for rootless isolation)."
   fi
-  # Sanity check the engine actually works (daemon up / machine started)
-  if ! "$ENGINE" info >/dev/null 2>&1; then
+  # Sanity check the engine actually works (daemon up / machine / service started).
+  # Apple `container` has no `info`; its liveness is `container system status`.
+  if ! engine_healthcheck "$ENGINE"; then
     case "$ENGINE" in
       podman) die "podman is installed but not working. On macOS/Windows run: podman machine init && podman machine start" ;;
       docker) die "docker is installed but the daemon is not reachable. Start Docker (or Docker Desktop) and retry." ;;
+      container) die "Apple 'container' is installed but its service is not running. Start it: container system start" ;;
+      *) die "engine '$ENGINE' is not responding." ;;
     esac
   fi
+}
+
+# Liveness probe per engine. podman/docker: `info`. Apple `container` (macOS,
+# per-box VM on a vmnet subnet — see docs/macos-host-egress.md): `system status`.
+# NOTE: the Apple `container` backend is EXPERIMENTAL — engine detection, doctor,
+# and host-pf egress are wired; the full box lifecycle (create/code/shell/export)
+# is not yet ported to its CLI, so `ISOPOD_ENGINE=container isopod create` is not
+# supported yet.
+engine_healthcheck() { # engine_healthcheck <engine>
+  case "$1" in
+    container) container system status >/dev/null 2>&1 ;;
+    *) "$1" info >/dev/null 2>&1 ;;
+  esac
 }
 
 ctr_name() { printf 'isopod-%s' "$1"; }

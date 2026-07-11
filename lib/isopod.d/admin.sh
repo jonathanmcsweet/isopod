@@ -150,9 +150,18 @@ doctor_virt_macos() {
     printf '  [ok]      Apple Hypervisor.framework present (kern.hv_support=1) — the macOS /dev/kvm equivalent\n'
     printf '  [ok]      boxes run inside the podman machine / Docker Desktop VM (a hardware VM boundary —\n'
     printf '            the Tier-3-class isolation on macOS; a plain container here is already VM-isolated)\n'
-    # Stronger, PER-BOX isolation options, strongest-available first. krunvm boots
-    # each box as its own microVM directly on Hypervisor.framework (no nesting, any
-    # Apple Silicon); nested krun needs M3+/macOS 15. See opt-in-security.md#macos.
+    # Stronger, PER-BOX isolation options, strongest-available first. Apple
+    # `container` gives each box its own VM AND a vmnet subnet (so egress enforces
+    # on the HOST via pf — both goals at once); krunvm boots each box as its own
+    # microVM on Hypervisor.framework; nested krun needs M3+/macOS 15.
+    if have container; then
+      printf '  [ok]      Apple `container` present — per-box VM on a vmnet subnet: enables Tier-3-class\n'
+      printf '            isolation AND host-level (pf) egress outside the VM. Strongest macOS option;\n'
+      printf '            isopod engine integration experimental. See docs/macos-host-egress.md\n'
+    else
+      printf '  [--]      strongest option: `brew install container` (Apple container) — per-box VM +\n'
+      printf '            vmnet subnet, so egress enforces on the macOS host via pf (outside the VM)\n'
+    fi
     if have krunvm; then
       printf '  [ok]      krunvm present — can run each box as its own microVM on Hypervisor.framework\n'
       printf '            (native Tier 3, no nested virt). isopod integration is experimental — see\n'
@@ -211,6 +220,14 @@ cmd_doctor() {
       printf '  [ok]      docker (daemon reachable)\n'
     else printf '  [warn]    docker installed but daemon not reachable\n'; fi
   else printf '  [--]      docker not installed\n'; fi
+  # Apple `container` (macOS): per-box VM on a vmnet subnet — enables host-pf egress
+  # + Tier-3-class isolation. EXPERIMENTAL engine (egress/doctor wired; box lifecycle
+  # not yet ported to its CLI). See docs/macos-host-egress.md.
+  if have container; then
+    if engine_healthcheck container; then
+      printf '  [ok]      Apple container (service running) — experimental engine: host-pf egress + doctor only\n'
+    else printf '  [warn]    Apple container installed but service not running — start it: container system start\n'; fi
+  fi
   for app in codium cursor windsurf code; do
     if find_ide_bin "$app"; then printf '  [ok]      IDE: %-9s (%s)\n' "$app" "${IDE_CMD[*]}"; fi
   done

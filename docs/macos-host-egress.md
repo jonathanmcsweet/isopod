@@ -1,5 +1,31 @@
 # macOS host-level egress: enforcing *outside* the guest VM
 
+## Status (implemented, experimental)
+
+The host-`pf` backend described below is now wired in isopod (branch
+`macos-egress-and-tier3`) and selected automatically on macOS when a routable box
+subnet is available:
+
+- `isopod egress apply` renders `security/egress-host.pf` (box subnet substituted)
+  into the `com.isopod.egress` pf anchor on the **Mac host**, references it from
+  `/etc/pf.conf` (so it survives reboot), and enables pf. `status`, `rules`,
+  `persist`/`unpersist` all follow the pf backend.
+- Backend selection: `egress_macos_backend()` returns **pf** when `pfctl` plus a
+  routable box subnet are available (Apple `container` present, `ENGINE=container`,
+  or `ISOPOD_PF_SUBNET` set); otherwise the weaker **in-VM nft** fallback. Override
+  with `ISOPOD_EGRESS_BACKEND=pf|vm`.
+- Apple `container` is recognised as an (experimental) engine: `isopod doctor`
+  reports it and the host-pf availability. The **box lifecycle** (create / code /
+  shell / export through the `container` CLI) is **not yet ported** — that is the
+  next increment.
+
+Validate on a real Mac with `test/macos-egress-check.sh` (read-only: renders the
+ruleset and parse-checks it with `pfctl -n`, no firewall changes). None of this
+has a macOS CI runner, so treat it as needing on-device validation.
+
+---
+
+
 ## The problem with the in-VM approach
 
 The first cut of macOS egress (branch `macos-egress-and-tier3`) loads the nft

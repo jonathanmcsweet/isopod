@@ -769,6 +769,68 @@ EOF
   assert_output --partial "nested virtualization"
 }
 
+# ---- macOS host-level egress backend: pf on the Mac (Apple container / vmnet) -
+# The escape-resistant backend: pf on the macOS HOST, scoped to the box vmnet
+# subnet, outside every guest VM. Stubs stand in for pfctl / container / sudo.
+@test "egress_host_pf_supported: true on macOS with pfctl" {
+  make_stub uname 0 "Darwin"
+  make_stub pfctl 0 ""
+  run egress_host_pf_supported
+  assert_success
+}
+@test "macos_box_subnet: ISOPOD_PF_SUBNET overrides detection" {
+  ISOPOD_PF_SUBNET="10.9.9.0/24" run macos_box_subnet
+  assert_output "10.9.9.0/24"
+}
+@test "macos_box_subnet: falls back to the Apple container default" {
+  run macos_box_subnet
+  assert_output "192.168.64.0/24"
+}
+@test "macos_box_subnet: parses the subnet from container network inspect" {
+  make_stub container 0 '{ "subnet": "192.168.64.0/24" }'
+  run macos_box_subnet
+  assert_output "192.168.64.0/24"
+}
+@test "egress_macos_backend: pf when pfctl + a routable subnet source" {
+  make_stub uname 0 "Darwin"
+  make_stub pfctl 0 ""
+  ISOPOD_PF_SUBNET="192.168.64.0/24" run egress_macos_backend
+  assert_output "pf"
+}
+@test "egress_macos_backend: falls back to vm without pfctl/container" {
+  make_stub uname 0 "Darwin"
+  run egress_macos_backend
+  assert_output "vm"
+}
+@test "egress_macos_backend: ISOPOD_EGRESS_BACKEND overrides the default" {
+  make_stub uname 0 "Darwin"
+  make_stub pfctl 0 ""
+  ISOPOD_EGRESS_BACKEND=vm ISOPOD_PF_SUBNET="192.168.64.0/24" run egress_macos_backend
+  assert_output "vm"
+}
+@test "egress-host.pf renders with the box subnet substituted" {
+  ISOPOD_PF_SUBNET="192.168.64.0/24"
+  run render_tmpl "$ISOPOD_EGRESS_PF_RULESET"
+  assert_success
+  assert_output --partial "block drop in quick inet from 192.168.64.0/24 to <isopod_lan>"
+  refute_output --partial '$ISOPOD_PF_SUBNET' # the variable is fully substituted
+}
+@test "egress apply on macOS host-pf loads the pf anchor via pfctl" {
+  make_stub uname 0 "Darwin"
+  make_stub pfctl 0 ""
+  make_stub sudo 0 ""
+  # matches both "pfctl -f" (as root in CI) and "sudo pfctl -f" (non-root on a Mac)
+  ISOPOD_PF_SUBNET="192.168.64.0/24" run egress_apply enforce
+  assert_success
+  assert_stub_called "pfctl -f /etc/pf.conf"
+}
+@test "engine_healthcheck uses 'container system status' for Apple container" {
+  make_stub container 0 ""
+  run engine_healthcheck container
+  assert_success
+  assert_stub_called "container system status"
+}
+
 # ---- per-box config.yaml (Compose-shaped, isopod-parsed) ---------------------
 @test "config.yaml round-trips through the parsers" {
   mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
