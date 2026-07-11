@@ -42,7 +42,7 @@ write_ssh_include() {
       # Engine-abstracted address: 127.0.0.1 + published port (podman/docker) or
       # the box's vmnet IP + in-box sshd port (Apple `container`). Skip boxes whose
       # address can't be resolved yet (no port / not running).
-      read -r host port < <(box_ssh_addr "$name") || continue
+      IFS=' ' read -r host port < <(box_ssh_addr "$name") || continue
       [ -n "$host" ] && [ -n "$port" ] || continue
       render_tmpl ssh-entry.txt
     done
@@ -124,7 +124,7 @@ refresh_port() { # refresh stored port + ssh config if the mapping changed
 # still adopts the new key so the tool keeps working; the warning is the alert.
 scan_host_key() { # scan_host_key <name>
   local name="$1" host port kh tmp tries=0 max="${ISOPOD_SSH_WAIT_TRIES:-30}"
-  read -r host port < <(box_ssh_addr "$name") || return 1
+  IFS=' ' read -r host port < <(box_ssh_addr "$name") || return 1
   [ -n "$host" ] && [ -n "$port" ] || return 1
   kh="$(box_dir "$name")/known_hosts"
   tmp="$kh.scan"
@@ -174,7 +174,10 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
   local name="$1"
   shift
   local host port
-  read -r host port < <(box_ssh_addr "$name") || die "could not resolve SSH address for box '$name'"
+  # Pin IFS to a space for the split: box_ssh_addr emits "host port", but a caller
+  # may have a non-default IFS in scope (e.g. inject_secrets sets IFS=, to parse
+  # its spec list), which would otherwise swallow the port and yield `ssh -p ''`.
+  IFS=' ' read -r host port < <(box_ssh_addr "$name") || die "could not resolve SSH address for box '$name'"
   # Split leading ssh options from the remote command: everything up to the
   # first non-option (or '--') is an ssh option; the rest is the command.
   local -a opts=() rcmd=()
