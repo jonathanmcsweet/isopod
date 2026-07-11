@@ -12,7 +12,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-ISOPOD_VERSION="2.5.0"
+ISOPOD_VERSION="2.6.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
