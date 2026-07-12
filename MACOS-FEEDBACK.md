@@ -100,13 +100,17 @@ into the VM is the tracked next step.
 **Tier-3 for macOS — detection + guidance, with the real options surfaced.**
 `doctor` now probes `kern.hv_support`, the chip generation, and the macOS version,
 and recommends the strongest per-box isolation your Mac supports:
-- **krunvm** — each box as its own microVM directly on Hypervisor.framework (any
-  Apple Silicon, no nested virt). This is the genuine "Tier 3 for macOS." isopod's
-  krunvm *integration* is experimental — krunvm is a separate engine from
-  podman/docker, so wiring it into create/code/export is the next build, not a
-  drop-in `--runtime`. Doctor detects and points at it.
+- **Apple `container`** — Apple's native Containerization framework runs each box in
+  its own lightweight VM on Hypervisor.framework, with a routable per-box vmnet subnet
+  that the host pf backend already scopes to. This is the intended "Tier 3 for macOS":
+  a macOS-native engine, not a Linux port. Wiring it fully into create/code/export is
+  the next build; `doctor` already detects the service and the pf egress backend targets
+  its subnet.
 - **nested `krun`** inside the engine VM when the Mac is Apple M3+/macOS 15+
   (experimental; needs a krunkit that surfaces nested virt).
+- **krunvm** — a per-box microVM engine that also runs on Hypervisor.framework, but it
+  is Linux-oriented and not well tested on macOS, so it is a fallback rather than the
+  recommended path. `doctor` notes it if present.
 - otherwise, the engine VM itself as the boundary.
 
 ## Scope / caveats
@@ -118,7 +122,10 @@ and recommends the strongest per-box isolation your Mac supports:
 - I don't have a macOS CI runner, so the `podman machine ssh` path is marked
   in-code as needing validation on a real Mac (same disclaimer style as the
   `egress_persist` scaffold). I'm on macOS and happy to test iterations.
-- Follow-ups worth considering: port the allow-list proxy into the FCOS VM
-  (it has systemd); a launchd-based `egress persist` for macOS; and reading the
-  actual chip/macOS version to turn the nested-virt "N/A" note into a real
-  capability check when M3+/macOS 15 is present.
+- Done since: a launchd-based `egress persist` for the macOS pf backend — a
+  `RunAtLoad` LaunchDaemon (`/Library/LaunchDaemons/com.isopod.egress.plist`) runs
+  `pfctl -E -f /etc/pf.conf` at boot, so host pf egress stays enforced across reboots
+  (macOS re-reads pf.conf on boot but does not re-enable pf). The chip/macOS-version
+  capability check is also in place.
+- Remaining follow-up: port the allow-list proxy into the FCOS VM (it has systemd) so
+  `egress allow-list` filters on macOS instead of degrading to lan-deny.

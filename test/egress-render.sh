@@ -82,6 +82,25 @@ case "$nft_unit" in *"ExecStart=/usr/sbin/nft -f "*) : ;; *) fail "nft unit: Exe
 case "$nft_unit" in *"After=nftables.service firewalld.service"*) : ;; *) fail "nft unit: boot ordering is wrong" ;; esac
 ok "egress nft persistence unit renders (ExecStart + boot ordering)"
 
+# macOS pf boot-persistence LaunchDaemon (isopod egress persist on the pf backend).
+# The Label is the anchor and the loaded conf is pf.conf; both come from ISOPOD_PF_* globals.
+pf_plist="$(ISOPOD_SOURCED=1 . ./isopod && render_tmpl isopod-egress-pf.plist.tmpl)"
+assert_no_unexpanded "pf LaunchDaemon" "$pf_plist"
+case "$pf_plist" in *"<string>com.isopod.egress</string>"*) : ;; *) fail "pf plist: Label is not the isopod anchor" ;; esac
+case "$pf_plist" in *"<string>/sbin/pfctl</string>"*"<string>-E</string>"*"<string>-f</string>"*"<string>/etc/pf.conf</string>"*) : ;; *) fail "pf plist: does not run 'pfctl -E -f /etc/pf.conf' at boot" ;; esac
+case "$pf_plist" in *"<key>RunAtLoad</key>"*"<true/>"*) : ;; *) fail "pf plist: not set to RunAtLoad" ;; esac
+ok "pf persistence LaunchDaemon renders (RunAtLoad + pfctl -E -f pf.conf)"
+# plutil validates the plist is well-formed where it exists (macOS); skip on Linux CI.
+if command -v plutil >/dev/null 2>&1; then
+  if printf '%s\n' "$pf_plist" | plutil -lint - >/dev/null 2>&1; then
+    ok "pf LaunchDaemon passes plutil -lint"
+  else
+    fail "pf LaunchDaemon: plutil -lint rejected the rendered plist"
+  fi
+else
+  skip "plutil not installed — pf plist lint skipped (render checks above still ran)"
+fi
+
 # --- allow-list -> filter regexes -------------------------------------------
 regexes="$(ISOPOD_SOURCED=1 . ./isopod && egress_filter_regexes | sort -u)"
 [ -n "$regexes" ] || fail "allow-list produced no filter regexes"
