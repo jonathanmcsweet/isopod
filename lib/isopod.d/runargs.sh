@@ -28,6 +28,16 @@ RUN_ARGS=()
 build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [host:ctr expose...]
   local name="$1" image="$2" publish="$3" memory="$4" cpus="$5"
   shift 5
+  # Apple `container` runs each box in its own VM on a routable vmnet subnet and
+  # takes a different, smaller flag set than podman/docker (no --hostname [set from
+  # --name], --pids-limit, --security-opt, --sysctl, or -p publish — the box is
+  # reached at its vmnet IP, and egress is enforced on the macOS HOST via pf, not
+  # by an in-box bridge). Assemble its args separately rather than guarding each
+  # podman flag, then return.
+  if [ "$ENGINE" = container ]; then
+    build_run_args_container "$name" "$image" "$memory" "$cpus"
+    return
+  fi
   RUN_ARGS=(run -d --name "$(ctr_name "$name")" --hostname "$name"
   --label "isopod=true" --label "isopod.name=$name"
   -p "$publish" --pids-limit 4096)
@@ -131,6 +141,48 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   local spec
   for spec in "$@"; do [ -n "$spec" ] && RUN_ARGS+=(-p "127.0.0.1:$spec"); done
   # ISOPOD_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
+  # shellcheck disable=SC2206
+  [ -n "${ISOPOD_RUN_ARGS:-}" ] && RUN_ARGS+=($ISOPOD_RUN_ARGS)
+  RUN_ARGS+=("$image")
+}
+
+# Assemble the `container run` argument list for a box (Apple `container` engine)
+# into RUN_ARGS. Smaller flag set than podman/docker: the box is a per-box VM
+# reached at its vmnet IP (no -p publish), egress is enforced on the macOS HOST by
+# pf (not an in-box bridge), and the host-fingerprint masks / OCI-runtime flags do
+# not apply to a VM with its own kernel — so none of those are emitted here.
+build_run_args_container() { # build_run_args_container <name> <image> <memory> <cpus>
+  local name="$1" image="$2" memory="$3" cpus="$4"
+  # Attach to the routable vmnet network so the box gets its own IP (the SSH
+  # target) on the subnet the host pf egress anchor scopes to. --name also sets the
+  # box hostname (container has no separate --hostname).
+  RUN_ARGS=(run -d --name "$(ctr_name "$name")"
+  --label "isopod=true" --label "isopod.name=$name"
+  --network "$ISOPOD_CONTAINER_NET")
+  # Bootstrap consumed by the box entrypoint (see share/Dockerfile): the box's
+  # PUBLIC key for authorized_keys (never a secret), and the sudo policy (1/0).
+  local pubfile
+  pubfile="$(box_dir "$name")/id_ed25519.pub"
+  [ -f "$pubfile" ] && RUN_ARGS+=(-e "ISOPOD_AUTHORIZED_KEY=$(cat "$pubfile")")
+  [ -n "${BOX_SUDO:-}" ] && RUN_ARGS+=(-e "ISOPOD_SUDO=$BOX_SUDO")
+  # Secrets tmpfs (memory-backed, gone when the box stops). container's --tmpfs
+  # takes only a path (no size/mode options); the entrypoint owns it at boot.
+  local box_secrets="${BOX_SECRETS:-}"
+  [ -n "$box_secrets" ] || box_secrets="$(meta_get "$name" secrets 2>/dev/null || true)"
+  [ -n "$box_secrets" ] && RUN_ARGS+=(--tmpfs /run/secrets)
+  [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
+  [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
+  # Egress defense-in-depth INSIDE the box — the escape-resistant block is the host
+  # pf anchor, outside the VM. Pin DNS to a public resolver so the box cannot query
+  # an internal/forwarding one, and drop raw-socket / net-admin so it cannot craft
+  # scan packets or re-route. (Apple `container` caps use the CAP_ prefix.)
+  case "$(active_egress)" in
+    lan-deny | allow-list)
+      RUN_ARGS+=(--dns "$ISOPOD_EGRESS_DNS"
+        --cap-drop CAP_NET_RAW --cap-drop CAP_NET_ADMIN)
+      ;;
+  esac
+  # ISOPOD_RUN_ARGS: extra args for the run, for unusual environments.
   # shellcheck disable=SC2206
   [ -n "${ISOPOD_RUN_ARGS:-}" ] && RUN_ARGS+=($ISOPOD_RUN_ARGS)
   RUN_ARGS+=("$image")

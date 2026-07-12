@@ -33,11 +33,15 @@ cmd_rm() {
   # so they don't accumulate. Exact-prefix match (awk index, not a regex) so box
   # 'a' never matches box 'ab'; the trailing ':' pins the boundary. The shared
   # base image (localhost/isopod-base:*) is left alone — use `isopod gc` for that.
-  local img
-  while IFS= read -r img; do
-    [ -n "$img" ] && "$ENGINE" rmi -f "$img" >/dev/null 2>&1 || true
-  done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
-    awk -v p="localhost/isopod-box-$name:" 'index($0, p) == 1')
+  # Apple `container` has no image commit, so its boxes leave no snapshot images
+  # (and no `images --format`); skip the sweep there.
+  if [ "$ENGINE" != container ]; then
+    local img
+    while IFS= read -r img; do
+      [ -n "$img" ] && "$ENGINE" rmi -f "$img" >/dev/null 2>&1 || true
+    done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
+      awk -v p="localhost/isopod-box-$name:" 'index($0, p) == 1')
+  fi
   rm -rf "$(box_dir "$name")"
   write_ssh_include
   info "removed '$name'"
@@ -150,36 +154,29 @@ doctor_virt_macos() {
     printf '  [ok]      Apple Hypervisor.framework present (kern.hv_support=1) — the macOS /dev/kvm equivalent\n'
     printf '  [ok]      boxes run inside the podman machine / Docker Desktop VM (a hardware VM boundary —\n'
     printf '            the Tier-3-class isolation on macOS; a plain container here is already VM-isolated)\n'
-    # Stronger, PER-BOX isolation options, strongest-available first. Apple
-    # `container` gives each box its own VM AND a vmnet subnet (so egress enforces
-    # on the HOST via pf — both goals at once); krunvm boots each box as its own
-    # microVM on Hypervisor.framework; nested krun needs M3+/macOS 15.
+    # Stronger, PER-BOX isolation on macOS = Apple `container`: each box gets its
+    # own VM AND a routable vmnet IP, so egress enforces on the HOST via pf (both
+    # goals at once). krunvm is not a fit — its libkrun TSI networking gives no
+    # routable per-box IP, so no SSH-by-IP and no host-pf egress. Nested krun inside
+    # the engine VM is a separate, still-maturing path (needs M3+/macOS 15).
     if have container; then
-      printf '  [ok]      Apple `container` present — per-box VM on a vmnet subnet: enables Tier-3-class\n'
-      printf '            isolation AND host-level (pf) egress outside the VM. Strongest macOS option;\n'
-      printf '            isopod engine integration experimental. See docs/macos-host-egress.md\n'
+      printf '  [ok]      Apple `container` present — per-box VM on a vmnet subnet: Tier-3-class isolation\n'
+      printf '            AND host-level (pf) egress outside the VM. Strongest macOS option; isopod\n'
+      printf '            engine wired (ISOPOD_ENGINE=container, experimental). See docs/macos-host-egress.md\n'
     else
       printf '  [--]      strongest option: `brew install container` (Apple container) — per-box VM +\n'
       printf '            vmnet subnet, so egress enforces on the macOS host via pf (outside the VM)\n'
     fi
-    if have krunvm; then
-      printf '  [ok]      krunvm present — can run each box as its own microVM on Hypervisor.framework\n'
-      printf '            (native Tier 3, no nested virt). isopod integration is experimental — see\n'
-      printf '            docs/opt-in-security.md#macos\n'
-    else
-      printf '  [--]      per-box microVM: `brew install krunvm` for a native Hypervisor.framework microVM\n'
-      printf '            per box (Tier-3-class, no nested virt; any Apple Silicon). Integration experimental.\n'
-    fi
     if macos_nested_virt_capable; then
       printf '  [note]    this Mac (Apple M%s, macOS %s) can expose nested virtualization — a nested microVM\n' "$gen" "$ver"
       printf '            runtime (ISOPOD_RUNTIME=krun) MAY work inside the engine VM. Experimental: needs a\n'
-      printf '            krunkit/VMM build that surfaces nested virt to the guest. Try it, or use krunvm.\n'
+      printf '            krunkit/VMM build that surfaces nested virt. For per-box VMs, prefer Apple `container`.\n'
     elif [ -n "$gen" ]; then
       printf '  [note]    nested per-box microVMs (ISOPOD_RUNTIME=krun) need Apple M3+ on macOS 15+ (this Mac:\n'
-      printf '            Apple M%s, macOS %s). The engine VM stays the boundary; use krunvm for per-box VMs.\n' "$gen" "$ver"
+      printf '            Apple M%s, macOS %s). For per-box VMs use Apple `container` (ISOPOD_ENGINE=container).\n' "$gen" "$ver"
     else
-      printf '  [note]    nested per-box microVMs need Apple M3+ on macOS 15+. The engine VM stays the\n'
-      printf '            boundary; use krunvm for a native per-box microVM.\n'
+      printf '  [note]    nested per-box microVMs need Apple M3+ on macOS 15+. For per-box VMs use Apple\n'
+      printf '            `container` (ISOPOD_ENGINE=container) — the engine VM stays the boundary otherwise.\n'
     fi
   elif [ -n "$hv" ]; then
     printf '  [warn]    Apple Hypervisor.framework NOT available (kern.hv_support=%s) — the container engine\n' "$hv"
@@ -221,11 +218,11 @@ cmd_doctor() {
     else printf '  [warn]    docker installed but daemon not reachable\n'; fi
   else printf '  [--]      docker not installed\n'; fi
   # Apple `container` (macOS): per-box VM on a vmnet subnet — enables host-pf egress
-  # + Tier-3-class isolation. EXPERIMENTAL engine (egress/doctor wired; box lifecycle
-  # not yet ported to its CLI). See docs/macos-host-egress.md.
+  # + Tier-3-class isolation. EXPERIMENTAL engine: box lifecycle wired to its CLI
+  # (ISOPOD_ENGINE=container); reconfigure unsupported. See docs/macos-host-egress.md.
   if have container; then
     if engine_healthcheck container; then
-      printf '  [ok]      Apple container (service running) — experimental engine: host-pf egress + doctor only\n'
+      printf '  [ok]      Apple container (service running) — experimental engine: ISOPOD_ENGINE=container\n'
     else printf '  [warn]    Apple container installed but service not running — start it: container system start\n'; fi
   fi
   for app in codium cursor windsurf code; do

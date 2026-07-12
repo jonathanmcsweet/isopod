@@ -86,6 +86,10 @@ egress_ruleset() {
 # the box's traffic and `egress lan-deny` cannot be enforced.
 egress_can_enforce() { # egress_can_enforce <engine>
   case "$1" in
+    # Apple `container` puts each box on a routable vmnet subnet, so egress is
+    # enforced by pf on the macOS HOST (outside the box VM) — not by a host bridge.
+    # "Can enforce" here means that host pf is available.
+    container) egress_host_pf_supported ;;
     podman) [ "$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" = false ] ;;
     docker)
       # Docker has no boolean rootless field; SecurityOptions is a list whose
@@ -211,9 +215,11 @@ egress_rules_loaded() {
 # Mac. See docs/macos-host-egress.md and test/macos-egress-check.sh.
 
 # Which macOS backend is in force: 'pf' (host-level) or 'vm' (in-VM fallback).
-# Override with ISOPOD_EGRESS_BACKEND=pf|vm. Default: pf when a routable box subnet
-# is available (Apple `container` present, ENGINE=container, or ISOPOD_PF_SUBNET
-# set) and pfctl exists; otherwise the in-VM fallback.
+# Override with ISOPOD_EGRESS_BACKEND=pf|vm. Default: pf when the box actually runs
+# on a routable vmnet subnet — i.e. the engine is Apple `container` (ENGINE or the
+# requested ISOPOD_ENGINE) or ISOPOD_PF_SUBNET pins one — and pfctl exists;
+# otherwise the in-VM fallback. Merely having `container` installed does NOT force
+# pf: a podman-machine box is behind gvproxy, where pf cannot see it.
 egress_macos_backend() {
   case "${ISOPOD_EGRESS_BACKEND:-}" in pf | vm)
     printf '%s' "$ISOPOD_EGRESS_BACKEND"
@@ -221,7 +227,7 @@ egress_macos_backend() {
     ;;
   esac
   if egress_host_pf_supported &&
-    { [ -n "${ISOPOD_PF_SUBNET:-}" ] || [ "${ENGINE:-}" = container ] || have container; }; then
+    { [ -n "${ISOPOD_PF_SUBNET:-}" ] || [ "${ENGINE:-${ISOPOD_ENGINE:-}}" = container ]; }; then
     printf 'pf'
   else
     printf 'vm'
@@ -781,6 +787,36 @@ egress_preflight() { # egress_preflight <engine>
   mode="$(active_egress)"
   case "$mode" in lan-deny | allow-list) ;; *) return 0 ;; esac
   local engine="$1"
+
+  # macOS host-pf backend (Apple `container` / vmnet): the box already sits on a
+  # routable vmnet subnet and egress is enforced by pf on the Mac, OUTSIDE the box
+  # VM. There is no rootful host bridge to validate or create — just require the pf
+  # anchor to be loaded, with the same fail-closed / degrade behavior as below.
+  if egress_enforce_host_pf; then
+    if [ "$mode" = allow-list ]; then
+      die "egress allow-list is configured, but its host filtering proxy is a Linux systemd service not
+     yet supported on macOS. Use 'egress lan-deny' (host pf) on macOS, or set ISOPOD_EGRESS=lan-deny."
+    fi
+    local prc=0
+    egress_rules_loaded || prc=$?
+    case "$prc" in
+      1)
+        if [ "${ISOPOD_EGRESS_ALLOW_UNLOADED:-0}" = 1 ]; then
+          warn "egress pf firewall NOT loaded — starting the box WITHOUT the LAN block
+       (ISOPOD_EGRESS_ALLOW_UNLOADED=1). Load it with:  sudo isopod egress apply"
+        else
+          die "egress lan-deny is configured but the host pf firewall is NOT loaded, so the box would
+     start with no LAN/host/metadata block actually in effect. Load it once (needs root):
+       sudo isopod egress apply
+     Then retry. To start anyway (no LAN block): ISOPOD_EGRESS_ALLOW_UNLOADED=1"
+        fi
+        ;;
+      2) warn "cannot confirm the egress pf firewall is loaded (need root to read pf state). If you have
+       not loaded it, run:  sudo isopod egress apply   — verify:  sudo isopod egress status" ;;
+    esac
+    return 0
+  fi
+
   egress_validate_vars
   # macOS: an EXPLICIT allow-list can't be honored (its host proxy is Linux-only).
   # Fail closed with a clear steer rather than silently starting an unfiltered box.
