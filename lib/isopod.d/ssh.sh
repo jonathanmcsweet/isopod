@@ -35,7 +35,7 @@ write_ssh_include() {
   tmp=$(mktemp)
   {
     printf '# Managed by isopod — do not edit (regenerated on every change)\n\n'
-    local d name host port
+    local d name host port hostkeyalias
     for d in "$BOXES_DIR"/*/; do
       [ -d "$d" ] || continue
       name=$(basename "$d")
@@ -44,6 +44,12 @@ write_ssh_include() {
       # address can't be resolved yet (no port / not running).
       IFS=' ' read -r host port < <(box_ssh_addr "$name") || continue
       [ -n "$host" ] && [ -n "$port" ] || continue
+      # Apple `container` reassigns the IP each start; pin the key by the box's
+      # stable name so it verifies regardless of the current HostName (see
+      # ssh-entry.txt). Consumed by the template via render_tmpl (unseen by the linter).
+      hostkeyalias=""
+      # shellcheck disable=SC2034
+      [ "$(box_engine "$name")" = container ] && hostkeyalias="  HostKeyAlias $(ctr_name "$name")"
       render_tmpl ssh-entry.txt
     done
   } >"$tmp"
@@ -81,7 +87,12 @@ box_engine() { # box_engine <name>
 # `container inspect` on macOS. Echoes the IP, empty on failure.
 container_box_ip() { # container_box_ip <name>
   local ip
+  # Pull the IP only from the box's own "ipv4Address" field. A plain first-IP grep
+  # is wrong here: with an egress `--dns 1.1.1.1`, inspect lists that nameserver
+  # (and the gateway) alongside the box address. Anchor the match on the field name
+  # itself (robust to pretty-printed or compact JSON), then take the trailing IP.
   ip="$(container inspect "$(ctr_name "$1")" 2>/dev/null |
+    grep -oE '"ipv4Address"[^0-9]*[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' |
     grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -n1)"
   [ -n "$ip" ] && printf '%s' "$ip"
 }
@@ -102,11 +113,34 @@ box_ssh_addr() { # box_ssh_addr <name> -> "host port"
   fi
 }
 
+# Runtime state of a box's container as a single lowercase word ("running",
+# "stopped", ...), or a non-zero return when the engine has no such container.
+# podman/docker expose it through an inspect Go-template; Apple `container` has no
+# -f/--format, so its state is parsed from the inspect JSON's status.state field.
+# Uses the box's own engine (from meta), so a mixed-engine `isopod list` is correct.
+box_status() { # box_status <name>
+  local name="$1" eng ctr
+  eng="$(box_engine "$name")"
+  ctr="$(ctr_name "$name")"
+  if [ "$eng" = container ]; then
+    container inspect "$ctr" 2>/dev/null |
+      sed -nE 's/.*"state"[[:space:]]*:[[:space:]]*"([a-zA-Z]+)".*/\1/p' | head -n1 |
+      grep . # non-zero when no state line was found (missing box)
+  else
+    "${eng:-$ENGINE}" inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null
+  fi
+}
+
 refresh_port() { # refresh stored port + ssh config if the mapping changed
   local name="$1" port
-  # Apple `container` boxes have no published loopback port to refresh (they're
-  # reached at their vmnet IP directly) — nothing to do.
-  [ "$(box_engine "$name")" = container ] && return 0
+  # Apple `container` gives the box a NEW vmnet IP on every start, so the ssh_config
+  # HostName goes stale — rewrite it from the live address. There is no published
+  # port to track, and the box's host key is pinned by HostKeyAlias (its stable
+  # name), so the key still verifies across the IP change.
+  if [ "$(box_engine "$name")" = container ]; then
+    write_ssh_include
+    return 0
+  fi
   port=$(resolve_port "$name") || return 0
   [ -n "$port" ] || return 0
   if [ "$port" != "$(meta_get "$name" port || true)" ]; then
@@ -124,12 +158,15 @@ refresh_port() { # refresh stored port + ssh config if the mapping changed
 # still adopts the new key so the tool keeps working; the warning is the alert.
 scan_host_key() { # scan_host_key <name>
   local name="$1" host port kh tmp tries=0 max="${ISOPOD_SSH_WAIT_TRIES:-30}"
-  IFS=' ' read -r host port < <(box_ssh_addr "$name") || return 1
-  [ -n "$host" ] && [ -n "$port" ] || return 1
   kh="$(box_dir "$name")/known_hosts"
   tmp="$kh.scan"
   while [ $tries -lt "$max" ]; do
-    if ssh-keyscan -p "$port" -T 3 "$host" 2>/dev/null >"$tmp" && [ -s "$tmp" ]; then
+    # Re-resolve the address each pass: Apple `container` may not have assigned the
+    # box its vmnet IP yet right after `run`, so box_ssh_addr fails transiently while
+    # the VM boots. Retry (like wait_for_ssh) rather than give up on the first miss.
+    if IFS=' ' read -r host port < <(box_ssh_addr "$name") &&
+      [ -n "$host" ] && [ -n "$port" ] &&
+      ssh-keyscan -p "$port" -T 3 "$host" 2>/dev/null >"$tmp" && [ -s "$tmp" ]; then
       # Compare only the key material (type + blob), not the leading [host]:port
       # field, which legitimately changes when the box gets a new published port.
       if [ -s "$kh" ] &&
@@ -149,6 +186,14 @@ scan_host_key() { # scan_host_key <name>
      ISOPOD_ACCEPT_NEW_HOSTKEY=1 to adopt the new key this run."
         fi
         warn "SSH host key for box '$name' CHANGED — adopting it (ISOPOD_ACCEPT_NEW_HOSTKEY=1)."
+      fi
+      # Apple `container` reassigns the box IP on each start, so pin the key under
+      # the box's stable name and connect with HostKeyAlias — SSH then verifies it
+      # regardless of address. Rewrite the scanned entries' host field to that name
+      # (podman/docker keep the fixed 127.0.0.1, so they stay pinned by host:port).
+      if [ "$(box_engine "$name")" = container ]; then
+        awk -v a="$(ctr_name "$name")" '!/^#/ && NF >= 3 { $1 = a; print }' "$tmp" >"$tmp.alias" &&
+          mv "$tmp.alias" "$tmp"
       fi
       mv "$tmp" "$kh"
       chmod 600 "$kh"
@@ -178,6 +223,10 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
   # may have a non-default IFS in scope (e.g. inject_secrets sets IFS=, to parse
   # its spec list), which would otherwise swallow the port and yield `ssh -p ''`.
   IFS=' ' read -r host port < <(box_ssh_addr "$name") || die "could not resolve SSH address for box '$name'"
+  # Apple `container` boxes are pinned in known_hosts under their stable name (the
+  # IP changes each start), so verify the key via HostKeyAlias, not the address.
+  local -a hkalias=()
+  [ "$(box_engine "$name")" = container ] && hkalias=(-o "HostKeyAlias=$(ctr_name "$name")")
   # Split leading ssh options from the remote command: everything up to the
   # first non-option (or '--') is an ssh option; the rest is the command.
   local -a opts=() rcmd=()
@@ -208,7 +257,7 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
     -o UserKnownHostsFile="$(box_dir "$name")/known_hosts" \
     -o StrictHostKeyChecking=yes \
     -o ForwardAgent=no -o ForwardX11=no \
-    "${opts[@]}" "$CONTAINER_USER@$host" "${rcmd[@]}"
+    "${hkalias[@]}" "${opts[@]}" "$CONTAINER_USER@$host" "${rcmd[@]}"
 }
 
 # Stream a tar archive between host and box over SSH. File transfer uses tar

@@ -12,7 +12,7 @@ cmd_list() {
     [ -d "$d" ] || continue
     name=$(basename "$d")
     ssh=$(ctr_name "$name")
-    status=$("$ENGINE" inspect -f '{{.State.Status}}' "$ssh" 2>/dev/null || printf 'missing')
+    status=$(box_status "$name" 2>/dev/null || printf 'missing')
     port=$(meta_get "$name" port || printf '?')
     color=$(meta_get "$name" color || printf '-')
     names+=("$name") statuses+=("$status") sshs+=("$ssh") ports+=("$port") colors+=("$color")
@@ -56,7 +56,12 @@ cmd_start() {
   # firewall, which a reboot / firewalld reload can silently drop. Say so loudly
   # rather than start it OPEN in silence.
   egress_start_check "$name"
-  scan_host_key "$name" >/dev/null || true # keeps stderr: a key-change warning must show
+  # Re-pin the host key to catch a loopback-port takeover on restart. Apple
+  # `container` boxes are exempt: their key is pinned by HostKeyAlias (stable across
+  # the per-start IP change) and SSH verifies it on connect, so a re-scan here would
+  # only race the box's sshd coming up at its new IP for no added protection.
+  [ "$(box_engine "$name")" = container ] ||
+    scan_host_key "$name" >/dev/null || true # keeps stderr: a key-change warning must show
   # The secrets tmpfs is memory-backed, so a stopped box holds no secrets —
   # re-inject them on every start. Boxes without secrets skip the SSH wait.
   if [ -n "$(meta_get "$name" secrets 2>/dev/null || true)" ]; then
@@ -126,6 +131,14 @@ cmd_reconfigure() {
   [ -n "$name" ] || die "usage: isopod reconfigure <name> [--memory|--cpus|--color|--expose ...]"
   open_box "$name"
   acquire_lock
+
+  # reconfigure snapshots the box to an image (engine `commit`) then recreates from
+  # it. Apple `container` has no image-commit, so the snapshot step can't run there.
+  # Recreate the box instead (copy your work out first with `isopod copy-out`).
+  [ "$ENGINE" = container ] &&
+    die "reconfigure is not supported on the Apple 'container' engine (it has no image commit).
+     Recreate the box with the new settings: copy your work out (isopod copy-out $name ...),
+     then 'isopod rm $name' and 'isopod create $name ...'."
 
   # Reproduce the box's isolation tier: recreate it under the SAME runtime it was
   # created with, rather than re-defaulting (which could silently flip a plain
@@ -248,7 +261,7 @@ cmd_shell() {
   # Start a stopped box first (like `isopod code`), so `shell` on a stopped box
   # gives a working session instead of a raw SSH connection error.
   local status
-  status=$("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || true)
+  status=$(box_status "$name" 2>/dev/null || true)
   [ "$status" = "running" ] || cmd_start "$name"
   refresh_port "$name"
   # Release the lock before the (possibly long) session so other isopod commands
@@ -356,7 +369,7 @@ cmd_code() {
   acquire_lock # may start the box and refresh the shared ssh_config
 
   local status
-  status=$("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || true)
+  status=$(box_status "$name" 2>/dev/null || true)
   [ "$status" = "running" ] || cmd_start "$name"
   refresh_port "$name"
 

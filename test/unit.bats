@@ -771,7 +771,9 @@ EOF
   run doctor_virt_macos
   assert_success
   assert_output --partial "Hypervisor.framework present"
-  assert_output --partial "krunvm"
+  # Per-box isolation on macOS is retargeted to Apple `container` (krunvm's TSI
+  # networking gives no routable per-box IP), so the guidance names container.
+  assert_output --partial "container"
   assert_output --partial "nested virtualization"
 }
 
@@ -850,12 +852,15 @@ EOF
 @test "box_ssh_addr: Apple container box resolves to the vmnet IP + in-box sshd port" {
   mkdir -p "$ISOPOD_CONFIG_DIR/boxes/vm"
   printf 'engine=container\n' >"$ISOPOD_CONFIG_DIR/boxes/vm/meta"
-  make_stub container 0 '{ "networks": [ { "address": "192.168.64.5/24" } ] }'
+  make_stub container 0 '{ "networks": [ { "ipv4Address": "192.168.64.5/24" } ] }'
   run box_ssh_addr vm
   assert_output "192.168.64.5 $BOX_SSHD_PORT"
 }
-@test "container_box_ip parses the first IPv4 from container inspect" {
-  make_stub container 0 '{ "address": "192.168.64.7" }'
+@test "container_box_ip reads the box ipv4Address, not a DNS or gateway IP" {
+  # An egress box carries --dns 1.1.1.1, so inspect lists that nameserver (and the
+  # gateway) alongside the box address. The box IP must come from ipv4Address, not
+  # a naive first-IP match — else SSH targets 1.1.1.1 and create fails at host-key pinning.
+  make_stub container 0 '{ "dns": { "nameservers": [ "1.1.1.1" ] }, "networks": [ { "ipv4Address": "192.168.64.7/24", "gateway": "192.168.64.1" } ] }'
   run container_box_ip anybox
   assert_output "192.168.64.7"
 }
@@ -864,7 +869,7 @@ EOF
   printf 'engine=container\n' >"$ISOPOD_CONFIG_DIR/boxes/vm/meta"
   : >"$ISOPOD_CONFIG_DIR/boxes/vm/id_ed25519"
   : >"$ISOPOD_CONFIG_DIR/boxes/vm/known_hosts"
-  make_stub container 0 '{ "address": "192.168.64.9" }'
+  make_stub container 0 '{ "networks": [ { "ipv4Address": "192.168.64.9/24" } ] }'
   make_stub ssh 0 ""
   run box_ssh vm -- true
   assert_success

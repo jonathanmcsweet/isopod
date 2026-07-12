@@ -12,7 +12,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-ISOPOD_VERSION="2.6.0"
+ISOPOD_VERSION="2.7.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -107,6 +107,9 @@ ISOPOD_PF_CONF="${ISOPOD_PF_CONF:-/etc/pf.conf}"
 ISOPOD_PF_LAUNCHD_PLIST="${ISOPOD_PF_LAUNCHD_PLIST:-/Library/LaunchDaemons/com.isopod.egress.plist}"
 # Apple `container`'s default vmnet subnet; override detection with ISOPOD_PF_SUBNET.
 ISOPOD_PF_SUBNET_DEFAULT="${ISOPOD_PF_SUBNET_DEFAULT:-192.168.64.0/24}"
+# The vmnet network Apple `container` boxes attach to (gives each box a routable IP
+# on ISOPOD_PF_SUBNET). "default" is the network `container` ships with.
+ISOPOD_CONTAINER_NET="${ISOPOD_CONTAINER_NET:-default}"
 
 # Egress allow-list mode (`egress allow-list`): a host-side filtering proxy
 # (tinyproxy) on the bridge gateway is the box's ONLY route out, and only

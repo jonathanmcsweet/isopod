@@ -30,8 +30,11 @@ assert_no_unexpanded() { # assert_no_unexpanded <label> <text>
 }
 
 # --- nftables rulesets ------------------------------------------------------
-lan_deny="$(ISOPOD_EGRESS=lan-deny ./isopod egress rules)"
-allow_list="$(ISOPOD_EGRESS=allow-list ./isopod egress rules)"
+# Pin the in-VM (nft) backend: on a macOS host where Apple `container` is installed
+# `egress rules` renders the pf ruleset instead, so force `vm` to exercise the nft
+# templates here. On Linux this override is a no-op (the host-pf backend is macOS-only).
+lan_deny="$(ISOPOD_EGRESS_BACKEND=vm ISOPOD_EGRESS=lan-deny ./isopod egress rules)"
+allow_list="$(ISOPOD_EGRESS_BACKEND=vm ISOPOD_EGRESS=allow-list ./isopod egress rules)"
 
 assert_no_unexpanded "egress-host.nft" "$lan_deny"
 case "$lan_deny" in *"table inet isopod"*) ok "lan-deny ruleset renders" ;; *) fail "lan-deny ruleset missing table" ;; esac
@@ -52,6 +55,17 @@ for pair in "lan-deny:$lan_deny" "allow-list:$allow_list"; do
   case "$rs" in *'meta nfproto ipv6 iifname != "isopod-egr" accept'*) : ;; *) fail "$label ruleset does not spare non-box host IPv6" ;; esac
 done
 ok "both rulesets drop box IPv6 egress (scoped to the isopod bridge), spare host IPv6"
+
+# --- macOS host-pf ruleset (Apple `container` / vmnet backend) ---------------
+# Rendered directly (the `egress rules` path is OS-gated to macOS). Assert the box
+# vmnet subnet substitutes and the LAN block uses the vmnet-correct INBOUND
+# direction ('block ... in ... from <subnet>'); 'block out' does not filter
+# vmnet-bridged traffic. Runs identically on Linux and macOS.
+pf_rules="$(ISOPOD_SOURCED=1 . ./isopod && ISOPOD_PF_SUBNET=192.168.64.0/24 render_tmpl "$ISOPOD_EGRESS_PF_RULESET")"
+assert_no_unexpanded "egress-host.pf" "$pf_rules"
+case "$pf_rules" in *"192.168.64.0/24"*) : ;; *) fail "pf ruleset: box subnet not substituted" ;; esac
+case "$pf_rules" in *"block drop in quick"*) : ;; *) fail "pf ruleset: LAN block is not inbound-direction (vmnet needs 'block in', not 'block out')" ;; esac
+ok "macOS host-pf ruleset renders (box subnet substituted, inbound-direction LAN block)"
 
 # --- tinyproxy config + systemd unit ----------------------------------------
 # Render exactly as egress_apply_proxy does: source isopod for render_tmpl and
