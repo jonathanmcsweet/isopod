@@ -8,8 +8,12 @@ subnet is available:
 
 - `isopod egress apply` renders `security/egress-host.pf` (box subnet substituted)
   into the `com.isopod.egress` pf anchor on the **Mac host**, references it from
-  `/etc/pf.conf` (so it survives reboot), and enables pf. `status`, `rules`,
-  `persist`/`unpersist` all follow the pf backend.
+  `/etc/pf.conf` (so its rules re-parse on boot), and enables pf. `isopod egress
+  persist` additionally installs a `RunAtLoad` LaunchDaemon
+  (`/Library/LaunchDaemons/com.isopod.egress.plist`) that runs `pfctl -E -f
+  /etc/pf.conf` at boot, because macOS re-reads pf.conf on boot but does not
+  re-enable pf on its own. `status`, `rules`, `persist`/`unpersist` all follow the
+  pf backend.
 - Backend selection: `egress_macos_backend()` returns **pf** when `pfctl` plus a
   routable box subnet are available (Apple `container` present, `ENGINE=container`,
   or `ISOPOD_PF_SUBNET` set); otherwise the weaker **in-VM nft** fallback. Override

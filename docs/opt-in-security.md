@@ -152,20 +152,19 @@ escape inside a box lands in the engine VM, not on macOS. So a plain container o
 macOS is already VM-isolated from your machine in a way it is not on Linux.
 
 If you want a per-box hardware boundary (each box its own VM, not just one shared
-engine VM), there are two routes on macOS, and `isopod doctor` reports which your
+engine VM), there are a few routes on macOS, and `isopod doctor` reports which your
 Mac can use:
 
-1. **krunvm — a native microVM per box (recommended; any Apple Silicon).**
-   [krunvm](https://github.com/containers/krunvm) boots an OCI image as its own
-   microVM **directly on Hypervisor.framework** — no nested virtualization, so it
-   works on any Apple Silicon Mac (M1+). This is the closest thing to Linux Tier 3
-   on macOS: each box gets its own guest kernel behind a hardware boundary to your
-   Mac. `brew install krunvm` and `isopod doctor` will detect it. **isopod's krunvm
-   integration is experimental** — krunvm is a separate tool from the podman/docker
-   engine isopod drives today (different networking and image model), so wiring it
-   into `isopod create`/`code`/`export` is in progress rather than a drop-in
-   `--runtime`. Doctor flags it as an available capability and this is the tracked
-   next step.
+1. **Apple `container` — a native per-box VM (recommended; any Apple Silicon).**
+   Apple's [`container`](https://github.com/apple/container) uses the Containerization
+   framework to run each box in its own lightweight VM **directly on
+   Hypervisor.framework** — no nested virtualization, so it works on any Apple Silicon
+   Mac (M1+). It is a macOS-native engine (not a Linux port), and each box gets a
+   routable per-box vmnet subnet the host **pf** egress backend already scopes to, so a
+   box that escapes its VM still can't flush the firewall without root on your Mac. This
+   is the intended "Tier 3 for macOS." `isopod doctor` detects the service and the pf
+   backend targets its subnet; wiring it fully into `isopod create`/`code`/`export` is
+   the tracked next build.
 
 2. **Nested `krun`/`kata` inside the engine VM (needs Apple M3+/macOS 15).** Apple
    exposes nested virtualization only on **M3 or later** chips running **macOS
@@ -173,6 +172,11 @@ Mac can use:
    maturing. On a capable Mac, `ISOPOD_RUNTIME=krun isopod create …` *may* boot a
    nested microVM; doctor tells you when your chip/OS qualifies and marks it
    experimental. On other Macs the engine VM stays the boundary.
+
+3. **krunvm (fallback).** [krunvm](https://github.com/containers/krunvm) also boots an
+   OCI image as its own microVM on Hypervisor.framework, but it is Linux-oriented and
+   not well tested on macOS, so it is a fallback rather than the recommended path.
+   `isopod doctor` notes it if `brew install krunvm` has made it available.
 
 isopod's `/dev/kvm` preflight is Linux-only by design — a Mac has no such node, so
 the missing-device check would be a false negative. Doctor instead probes
@@ -272,8 +276,11 @@ the VM (which has systemd) is the natural follow-up.
 >   routable vmnet subnet (Apple `container`, or a vmnet vfkit/krunkit/krunvm
 >   setup), `isopod egress apply` loads `security/egress-host.pf` into the
 >   `com.isopod.egress` pf anchor **on the Mac host, outside every guest VM**, and
->   references it from `/etc/pf.conf` (survives reboot). A box that escapes its
->   container *and* its VM still can't flush it without root on macOS.
+>   references it from `/etc/pf.conf`. `isopod egress persist` then installs a
+>   `RunAtLoad` LaunchDaemon (`/Library/LaunchDaemons/com.isopod.egress.plist`) that
+>   runs `pfctl -E -f /etc/pf.conf` at boot, since macOS re-reads pf.conf on boot but
+>   does **not** re-enable pf on its own. A box that escapes its container *and* its VM
+>   still can't flush it without root on macOS.
 > - **`vm` (in-VM nft, weaker fallback).** Under podman machine's default gvproxy
 >   networking a box has no routable subnet for pf to scope, so the rules load
 >   inside the podman machine VM — out of reach of an in-box agent with root/sudo,

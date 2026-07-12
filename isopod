@@ -12,7 +12,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-ISOPOD_VERSION="2.5.1"
+ISOPOD_VERSION="2.6.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -102,6 +102,9 @@ ISOPOD_EGRESS_PF_RULESET="${ISOPOD_EGRESS_PF_RULESET:-$ISOPOD_DIR/security/egres
 ISOPOD_PF_ANCHOR="${ISOPOD_PF_ANCHOR:-com.isopod.egress}"
 ISOPOD_PF_ANCHOR_FILE="${ISOPOD_PF_ANCHOR_FILE:-/etc/pf.anchors/com.isopod.egress}"
 ISOPOD_PF_CONF="${ISOPOD_PF_CONF:-/etc/pf.conf}"
+# LaunchDaemon that re-enables pf and re-loads pf.conf at boot ("isopod egress persist"):
+# macOS re-reads pf.conf on boot but does NOT re-enable pf, so egress would otherwise lapse.
+ISOPOD_PF_LAUNCHD_PLIST="${ISOPOD_PF_LAUNCHD_PLIST:-/Library/LaunchDaemons/com.isopod.egress.plist}"
 # Apple `container`'s default vmnet subnet; override detection with ISOPOD_PF_SUBNET.
 ISOPOD_PF_SUBNET_DEFAULT="${ISOPOD_PF_SUBNET_DEFAULT:-192.168.64.0/24}"
 

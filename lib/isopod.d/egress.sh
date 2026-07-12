@@ -368,7 +368,35 @@ egress_load_pf() {
   egr_run_root pfctl -f "$ISOPOD_PF_CONF" >/dev/null 2>&1 ||
     die "pfctl failed to load $ISOPOD_PF_CONF — check syntax with: sudo pfctl -n -f $ISOPOD_PF_CONF"
   egr_run_root pfctl -E >/dev/null 2>&1 || true # enable pf (idempotent; -E refcounts)
-  info "egress firewall loaded on the host (pf anchor '$ISOPOD_PF_ANCHOR'); referenced from $ISOPOD_PF_CONF so it re-loads on boot."
+  info "egress firewall loaded on the host (pf anchor '$ISOPOD_PF_ANCHOR'); referenced from $ISOPOD_PF_CONF so its rules re-parse on boot."
+  info "pf is not re-enabled at boot on its own — run 'sudo isopod egress persist' to keep it in effect across reboots."
+}
+
+# macOS pf boot persistence: install a LaunchDaemon that re-enables pf and re-loads
+# pf.conf at boot. macOS re-reads pf.conf on boot but does NOT re-enable pf (the
+# 'pfctl -E' refcount does not survive a reboot), so without this the host egress
+# block silently lapses after a reboot. Parity with the Linux boot unit and the
+# in-VM systemd unit used by the other backends.
+egress_persist_pf() {
+  have launchctl || die "egress persist on the macOS pf backend needs launchctl (macOS launchd)"
+  local plist rendered
+  plist="$ISOPOD_PF_LAUNCHD_PLIST"
+  rendered="$(render_tmpl isopod-egress-pf.plist.tmpl)"
+  info "Installing the pf egress boot LaunchDaemon ($plist)..."
+  printf '%s\n' "$rendered" | egr_write_root "$plist"
+  egr_run_root launchctl unload "$plist" >/dev/null 2>&1 || true
+  egr_run_root launchctl load -w "$plist" ||
+    die "failed to load the LaunchDaemon — check: sudo launchctl load -w $plist"
+  info "pf egress will re-enable on boot (LaunchDaemon '$ISOPOD_PF_ANCHOR')."
+}
+
+egress_unpersist_pf() {
+  local plist="$ISOPOD_PF_LAUNCHD_PLIST"
+  if have launchctl; then
+    egr_run_root launchctl unload -w "$plist" >/dev/null 2>&1 || true
+  fi
+  egr_run_root rm -f "$plist"
+  info "removed the pf egress boot LaunchDaemon ('$ISOPOD_PF_ANCHOR')."
 }
 
 egress_unload_pf() {
@@ -488,11 +516,12 @@ egress_persist() {
     lan-deny | allow-list) ;;
     *) die "egress is off — configure 'egress lan-deny'/'allow-list' (or ISOPOD_EGRESS=...) before persisting" ;;
   esac
-  # macOS host-pf backend: `egress apply` already writes the anchor into pf.conf,
-  # which macOS re-reads on boot — so persistence is just (re)loading it now.
+  # macOS host-pf backend: `egress apply` writes the anchor into pf.conf (its rules
+  # re-parse on boot), but macOS does not re-enable pf at boot, so persistence also
+  # installs a LaunchDaemon that runs `pfctl -E -f pf.conf` at boot.
   if egress_enforce_host_pf; then
     egress_load_pf
-    info "host pf egress is referenced from $ISOPOD_PF_CONF, so it re-loads on reboot (no extra unit)."
+    egress_persist_pf
     return 0
   fi
   # macOS in-VM fallback: boot persistence is an in-VM systemd unit, not a host one
@@ -526,6 +555,7 @@ egress_persist() {
 
 egress_unpersist() {
   if egress_enforce_host_pf; then
+    egress_unpersist_pf
     egress_unload_pf
     return 0
   fi
