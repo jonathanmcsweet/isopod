@@ -61,15 +61,21 @@ jobs:
       - uses: actions/checkout@v5
       - name: lint + stubbed bats + interactive (macOS / BSD userland)
         run: |
-          # bats is vendored under test/libs; only the linters and pexpect are
-          # extra. Homebrew is preinstalled on macOS runners.
-          brew install shellcheck shfmt
+          # bats is vendored under test/libs; the linters, pexpect, and bash
+          # are extra. Homebrew is preinstalled on macOS runners. bash: isopod
+          # needs >= 4.4 and macOS /bin/bash is 3.2 — the isopod Homebrew
+          # formula depends on `bash`, so CI tests with the same bash that real
+          # brew installs get.
+          brew install bash shellcheck shfmt
           # pexpect drives the interactive prompt tests; if it can't install,
           # test/run.sh skips them rather than failing.
           python3 -m pip install pexpect \
             || python3 -m pip install --break-system-packages pexpect \
             || true
-          bash test/run.sh
+          # Explicit path: the step shell is /bin/bash (3.2), so a bare `bash`
+          # would depend on PATH order. Scripts launched FROM the suite resolve
+          # `#!/usr/bin/env bash` via PATH, where Homebrew bin comes first.
+          "$(brew --prefix)/bin/bash" test/run.sh
 
   # -------------------------------------------------------------------------
   # Homebrew formula: install isopod through the real tap formula, built from
