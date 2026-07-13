@@ -19,6 +19,16 @@
 # Honors $DESTDIR for packaging. Safe to re-run (idempotent).
 set -euo pipefail
 
+# isopod itself needs bash >= 4.4, and it will resolve `bash` the same way this
+# installer just did (via /usr/bin/env). Refuse to install where it can't run —
+# on macOS that means `brew install bash` first (stock /bin/bash is 3.2).
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
+  { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  printf 'error: isopod requires bash >= 4.4, but `bash` here is %s\n' "$BASH_VERSION" >&2
+  printf 'macOS: brew install bash — or install isopod itself via Homebrew, which pulls it in\n' >&2
+  exit 1
+fi
+
 APP=isopod
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
