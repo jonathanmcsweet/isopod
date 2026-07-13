@@ -7,7 +7,7 @@
 cmd_create() {
   local name="" repo="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
-  local container_opt=0 dev_tools=0
+  local container_opt=0 dev_tools=0 harden_opt=""
   local -a copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
@@ -76,6 +76,10 @@ cmd_create() {
       --dev)
         dev_tools=1
         shift
+        ;;
+      --harden)
+        harden_opt="$2"
+        shift 2
         ;;
       -h | --help)
         usage
@@ -186,6 +190,16 @@ cmd_create() {
   # entrypoint applies this from the run env; see build_run_args.
   local BOX_SUDO
   [ "$no_sudo" -eq 0 ] && BOX_SUDO=1 || BOX_SUDO=0
+  # Kernel-hardening profile: 'default' (on for every box) or 'off'. 'strict' is
+  # reserved for a future release. build_run_args turns this into the microVM
+  # guest-sysctl env; container boxes keep the engine defaults regardless.
+  local harden="${harden_opt:-default}"
+  case "$harden" in
+    default | off) ;;
+    strict) die "--harden strict is not yet available (reserved for a future release); use 'default' or 'off'" ;;
+    *) die "invalid --harden '$harden' (use: default | off)" ;;
+  esac
+  local BOX_HARDEN="$harden"
   # Secret specs for build_run_args (the tmpfs mount) and the meta below; the
   # VALUES stay in the host store — only name:path pairs travel through here.
   local BOX_SECRETS
@@ -219,6 +233,7 @@ cmd_create() {
     printf 'color=%s\n' "$hex"
     printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'sudo=%s\n' "$BOX_SUDO"
+    printf 'harden=%s\n' "$BOX_HARDEN"
     # Record the effective runtime so reconfigure reproduces the box's isolation
     # tier rather than re-defaulting. "container" == plain Tier 1 (no runtime).
     printf 'runtime=%s\n' "$(active_runtime 2>/dev/null | grep . || printf container)"
@@ -278,6 +293,9 @@ cmd_create() {
   # State the effective network posture plainly — a default-on egress that could
   # not be enforced degraded to an OPEN network above, and that must not be missed.
   egress_posture_note "$name"
+  # State the kernel-hardening posture too (its guest-sysctl arm only applies to
+  # microVM boxes), so what the box actually got is legible at create time.
+  harden_posture_note "$BOX_HARDEN"
 }
 
 do_copy_in() { # do_copy_in <name> <path>...

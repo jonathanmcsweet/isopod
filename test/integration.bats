@@ -694,6 +694,34 @@ EOF
   assert_output --partial "sudo=1"
 }
 
+# ---- kernel hardening profile (--harden) -------------------------------------
+@test "create records the default hardening profile in meta" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "harden=default"
+}
+
+@test "create --harden off records it in meta and passes no hardening env" {
+  run "$ISOPOD_ROOT/isopod" create demo --harden off --color teal
+  assert_success
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "harden=off"
+  assert_stub_not_called "ISOPOD_HARDEN"
+}
+
+@test "create rejects an invalid --harden level" {
+  run "$ISOPOD_ROOT/isopod" create demo --harden bogus --color teal
+  assert_failure
+  assert_output --partial "invalid --harden"
+}
+
+@test "create rejects --harden strict as reserved" {
+  run "$ISOPOD_ROOT/isopod" create demo --harden strict --color teal
+  assert_failure
+  assert_output --partial "not yet available"
+}
+
 # ---- --memory / --cpus validation (§5) ---------------------------------------
 @test "create rejects a malformed --memory" {
   run "$ISOPOD_ROOT/isopod" create demo --memory 2gigs --color teal

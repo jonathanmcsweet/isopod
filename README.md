@@ -136,6 +136,14 @@ A **Tier 2 runtime** (gVisor `runsc`) already presents a synthetic `/proc`/`/sys
 
 Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a Tier 3 microVM runtime (or a full VM); isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
 
+### Kernel attack-surface hardening (`--harden`)
+
+Beyond the fingerprint masks, isopod applies a small **kernel-hardening profile to every box by default** — a set of low-impact guest sysctls that shrink kernel attack surface without changing how development feels. Because these are guest-*kernel* settings, they take effect on **microVM boxes** (which have their own kernel). A plain container shares the host kernel, so isopod never sets sysctls there — that would change the host — and it keeps the engine's default seccomp/isolation instead.
+
+The default profile sets `kernel.kptr_restrict=2` (hide kernel pointers), `kernel.dmesg_restrict=1` (root-only `dmesg`), `net.core.bpf_jit_harden=2` (harden the eBPF JIT), and `kernel.kexec_load_disabled=1` (block loading a new kernel). These are deliberately conservative: they don't break nested containers, profiling, or normal builds. The heavier toggles that *would* affect those workflows — disabling unprivileged eBPF, io_uring, and user namespaces, or `lockdown` — are reserved for a future opt-in **`--harden strict`** profile.
+
+Turn the profile off with **`--harden off`**. The applied set lives in [`share/hardening-sysctl.conf`](share/hardening-sysctl.conf); the box entrypoint applies it best-effort at boot, skipping any key the guest kernel doesn't expose.
+
 ## Secrets
 
 Store a value once on the host, then hand it to specific boxes at create time:

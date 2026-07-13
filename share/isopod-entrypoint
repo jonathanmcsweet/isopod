@@ -49,6 +49,23 @@ if [ -d /run/secrets ]; then
   chown "$iso_u:$iso_u" /run/secrets
 fi
 
-unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO
+# Kernel hardening (default profile). isopod sets ISOPOD_HARDEN only for microVM
+# boxes, which have their own guest kernel — so applying these sysctls affects
+# only this box, never the host. Container boxes never receive it. Write straight
+# to /proc/sys (portable; no sysctl binary needed) and skip any key that isn't
+# writable, so a key the guest kernel doesn't expose — or a read-only entry — is a
+# no-op, not a boot failure.
+if [ -n "${ISOPOD_HARDEN:-}" ] && [ "$ISOPOD_HARDEN" != off ] &&
+  [ -f /etc/isopod/hardening-sysctl.conf ]; then
+  while IFS= read -r kv || [ -n "$kv" ]; do
+    case "$kv" in '' | '#'*) continue ;; esac
+    k="${kv%%=*}"
+    v="${kv#*=}"
+    p="/proc/sys/$(printf '%s' "$k" | tr . /)"
+    [ -w "$p" ] && printf '%s' "$v" >"$p" 2>/dev/null || true
+  done </etc/isopod/hardening-sysctl.conf
+fi
+
+unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN
 mkdir -p /run/sshd
 exec /usr/sbin/sshd -D -e
