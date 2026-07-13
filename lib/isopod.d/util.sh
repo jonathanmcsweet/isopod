@@ -19,6 +19,22 @@ die() {
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Host OS family isopod is running ON — NOT where boxes run. On macOS (and
+# Windows/WSL) the container engine runs boxes inside its own Linux VM (podman
+# machine / Docker Desktop), so the host that runs the `isopod` script and the
+# host whose kernel/firewall backs the boxes are two different machines. Egress
+# enforcement (nftables) and Tier-3 virtualization (/dev/kvm) live in that VM,
+# not on the Mac — several callers branch on this. Echoes: linux | macos | other.
+os_kind() {
+  case "$(uname -s 2>/dev/null)" in
+    Linux) printf 'linux' ;;
+    Darwin) printf 'macos' ;;
+    *) printf 'other' ;;
+  esac
+}
+is_macos() { [ "$(uname -s 2>/dev/null)" = Darwin ]; }
+is_linux() { [ "$(uname -s 2>/dev/null)" = Linux ]; }
+
 # Read stdin and echo a short, stable hex digest. Used for image cache tags,
 # where a collision would reuse a stale image. sha256 (truncated) instead of
 # cksum/CRC-32 so unrelated inputs can't share a tag. Portable: sha256sum on

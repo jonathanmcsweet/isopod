@@ -610,6 +610,12 @@ EOF
 }
 @test "egress_preflight creates the network on a rootful engine" {
   make_stub podman 0 "false" # rootful; also stands in for network exists/create
+  # Stub nft so egress_rules_loaded is deterministic regardless of the host's
+  # nftables/privilege state. Without this the real nft is consulted: a root host
+  # with working nftables (or an nf_tables-less container) reports the firewall as
+  # "not loaded" and egress_preflight fails closed, so the test would pass only on
+  # a host with no nft or an unprivileged one.
+  make_stub nft 0 # firewall reads as loaded
   ISOPOD_EGRESS=lan-deny run egress_preflight podman
   assert_success
   assert_stub_called "podman network (exists|create)"
@@ -648,6 +654,226 @@ EOF
   run cmd_egress bogus
   assert_failure
   assert_output --partial "unknown egress action"
+}
+
+# ---- platform detection (os_kind / is_macos / is_linux) ----------------------
+# The `isopod` script runs on the Mac, but boxes run inside the podman machine /
+# Docker Desktop Linux VM, so egress (nftables) and Tier-3 virt (/dev/kvm) live
+# in that VM — several callers branch on the host OS. uname is stubbed to drive it.
+@test "os_kind reports macos on Darwin" {
+  make_stub uname 0 "Darwin"
+  run os_kind
+  assert_output "macos"
+}
+@test "os_kind reports linux on Linux" {
+  make_stub uname 0 "Linux"
+  run os_kind
+  assert_output "linux"
+}
+@test "os_kind reports other on an unrecognized kernel" {
+  make_stub uname 0 "OpenBSD"
+  run os_kind
+  assert_output "other"
+}
+@test "is_macos/is_linux agree with uname" {
+  make_stub uname 0 "Darwin"
+  run is_macos
+  assert_success
+  run is_linux
+  assert_failure
+}
+
+# ---- macos_hv_support (the macOS /dev/kvm equivalent probe) -------------------
+@test "macos_hv_support echoes the kern.hv_support sysctl value" {
+  make_stub sysctl 0 "1"
+  run macos_hv_support
+  assert_output "1"
+}
+
+# ---- egress: macOS enforces inside the podman machine VM ----------------------
+@test "egress_enforce_in_vm is true on macOS, false on Linux" {
+  make_stub uname 0 "Darwin"
+  run egress_enforce_in_vm
+  assert_success
+  make_stub uname 0 "Linux"
+  run egress_enforce_in_vm
+  assert_failure
+}
+@test "egress_rules_loaded is 'unknown' (2) on macOS when the VM is unreachable" {
+  make_stub uname 0 "Darwin"
+  make_stub podman 1 "" # `podman machine ssh -- true` fails -> VM not ready
+  run egress_rules_loaded
+  assert_equal "$status" 2
+}
+@test "egress apply on macOS steers the default allow-list to lan-deny in the VM" {
+  make_stub uname 0 "Darwin"
+  make_stub podman 0 "" # VM reachable; stands in for `podman machine ssh ...`
+  run egress_apply enforce
+  assert_success
+  assert_output --partial "lan-deny"
+  assert_stub_called "podman machine ssh"
+}
+@test "egress_preflight fails closed for an EXPLICIT allow-list on macOS" {
+  make_stub uname 0 "Darwin"
+  make_stub podman 0 "false"
+  ISOPOD_EGRESS=allow-list run egress_preflight podman
+  assert_failure
+  assert_output --partial "lan-deny"
+}
+@test "egress persist on macOS installs the ruleset inside the podman machine VM" {
+  make_stub uname 0 "Darwin"
+  make_stub podman 0 "" # VM reachable; stands in for `podman machine ssh ...`
+  run egress_persist
+  assert_success
+  assert_stub_called "podman machine ssh -- sudo systemctl enable"
+  assert_stub_called "podman machine ssh -- sudo tee /etc/systemd/system/isopod-egress"
+}
+
+# ---- macOS Tier-3 capability detection (chip / version / nested virt) ---------
+# The macOS "tier 3" story: the engine VM is already a hardware boundary; a NESTED
+# per-box microVM needs Apple M3+ on macOS 15+. These probe that with stubs.
+@test "macos_chip_generation parses the Apple M-series number" {
+  make_stub sysctl 0 "Apple M3 Pro"
+  run macos_chip_generation
+  assert_output "3"
+}
+@test "macos_chip_generation is empty on Intel" {
+  make_stub sysctl 0 "Intel(R) Core(TM) i7"
+  run macos_chip_generation
+  assert_output ""
+}
+@test "macos_major_version reads the macOS major version" {
+  make_stub sw_vers 0 "15.5"
+  run macos_major_version
+  assert_output "15"
+}
+@test "macos_nested_virt_capable: true on M3/macOS15, false on M2" {
+  make_stub sw_vers 0 "15.5"
+  make_stub sysctl 0 "Apple M3 Pro"
+  run macos_nested_virt_capable
+  assert_success
+  make_stub sysctl 0 "Apple M2"
+  run macos_nested_virt_capable
+  assert_failure
+}
+@test "doctor_virt_macos reports Hypervisor.framework and per-box microVM options" {
+  make_stub uname 0 "Darwin"
+  cat >"$STUB_DIR/sysctl" <<'EOF'
+#!/usr/bin/env bash
+case "$2" in
+  kern.hv_support) echo 1 ;;
+  machdep.cpu.brand_string) echo "Apple M3 Pro" ;;
+  kern.osproductversion) echo "15.5" ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/sysctl"
+  make_stub sw_vers 0 "15.5"
+  run doctor_virt_macos
+  assert_success
+  assert_output --partial "Hypervisor.framework present"
+  # Per-box isolation on macOS is retargeted to Apple `container` (krunvm's TSI
+  # networking gives no routable per-box IP), so the guidance names container.
+  assert_output --partial "container"
+  assert_output --partial "nested virtualization"
+}
+
+# ---- macOS host-level egress backend: pf on the Mac (Apple container / vmnet) -
+# The escape-resistant backend: pf on the macOS HOST, scoped to the box vmnet
+# subnet, outside every guest VM. Stubs stand in for pfctl / container / sudo.
+@test "egress_host_pf_supported: true on macOS with pfctl" {
+  make_stub uname 0 "Darwin"
+  make_stub pfctl 0 ""
+  run egress_host_pf_supported
+  assert_success
+}
+@test "macos_box_subnet: ISOPOD_PF_SUBNET overrides detection" {
+  ISOPOD_PF_SUBNET="10.9.9.0/24" run macos_box_subnet
+  assert_output "10.9.9.0/24"
+}
+@test "macos_box_subnet: falls back to the Apple container default" {
+  run macos_box_subnet
+  assert_output "192.168.64.0/24"
+}
+@test "macos_box_subnet: parses the subnet from container network inspect" {
+  make_stub container 0 '{ "subnet": "192.168.64.0/24" }'
+  run macos_box_subnet
+  assert_output "192.168.64.0/24"
+}
+@test "egress_macos_backend: pf when pfctl + a routable subnet source" {
+  make_stub uname 0 "Darwin"
+  make_stub pfctl 0 ""
+  ISOPOD_PF_SUBNET="192.168.64.0/24" run egress_macos_backend
+  assert_output "pf"
+}
+@test "egress_macos_backend: falls back to vm without pfctl/container" {
+  make_stub uname 0 "Darwin"
+  run egress_macos_backend
+  assert_output "vm"
+}
+@test "egress_macos_backend: ISOPOD_EGRESS_BACKEND overrides the default" {
+  make_stub uname 0 "Darwin"
+  make_stub pfctl 0 ""
+  ISOPOD_EGRESS_BACKEND=vm ISOPOD_PF_SUBNET="192.168.64.0/24" run egress_macos_backend
+  assert_output "vm"
+}
+@test "egress-host.pf renders with the box subnet substituted" {
+  ISOPOD_PF_SUBNET="192.168.64.0/24"
+  run render_tmpl "$ISOPOD_EGRESS_PF_RULESET"
+  assert_success
+  assert_output --partial "block drop in quick inet from 192.168.64.0/24 to <isopod_lan>"
+  refute_output --partial '$ISOPOD_PF_SUBNET' # the variable is fully substituted
+}
+@test "egress apply on macOS host-pf loads the pf anchor via pfctl" {
+  make_stub uname 0 "Darwin"
+  make_stub pfctl 0 ""
+  make_stub sudo 0 ""
+  # matches both "pfctl -f" (as root in CI) and "sudo pfctl -f" (non-root on a Mac)
+  ISOPOD_PF_SUBNET="192.168.64.0/24" run egress_apply enforce
+  assert_success
+  assert_stub_called "pfctl -f /etc/pf.conf"
+}
+@test "engine_healthcheck uses 'container system status' for Apple container" {
+  make_stub container 0 ""
+  run engine_healthcheck container
+  assert_success
+  assert_stub_called "container system status"
+}
+
+# ---- SSH addressing abstraction (podman loopback vs Apple container vmnet IP) --
+# podman/docker publish the box sshd to 127.0.0.1:<port>; Apple `container` gives
+# the box its own vmnet IP reached on the in-box sshd port. box_ssh_addr is the one
+# place the two models diverge; the rest of the SSH transport is engine-agnostic.
+@test "box_ssh_addr: podman box resolves to 127.0.0.1 + published port" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/web"
+  printf 'engine=podman\nport=8022\n' >"$ISOPOD_CONFIG_DIR/boxes/web/meta"
+  run box_ssh_addr web
+  assert_output "127.0.0.1 8022"
+}
+@test "box_ssh_addr: Apple container box resolves to the vmnet IP + in-box sshd port" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/vm"
+  printf 'engine=container\n' >"$ISOPOD_CONFIG_DIR/boxes/vm/meta"
+  make_stub container 0 '{ "networks": [ { "ipv4Address": "192.168.64.5/24" } ] }'
+  run box_ssh_addr vm
+  assert_output "192.168.64.5 $BOX_SSHD_PORT"
+}
+@test "container_box_ip reads the box ipv4Address, not a DNS or gateway IP" {
+  # An egress box carries --dns 1.1.1.1, so inspect lists that nameserver (and the
+  # gateway) alongside the box address. The box IP must come from ipv4Address, not
+  # a naive first-IP match — else SSH targets 1.1.1.1 and create fails at host-key pinning.
+  make_stub container 0 '{ "dns": { "nameservers": [ "1.1.1.1" ] }, "networks": [ { "ipv4Address": "192.168.64.7/24", "gateway": "192.168.64.1" } ] }'
+  run container_box_ip anybox
+  assert_output "192.168.64.7"
+}
+@test "box_ssh targets the container vmnet IP, not 127.0.0.1" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/vm"
+  printf 'engine=container\n' >"$ISOPOD_CONFIG_DIR/boxes/vm/meta"
+  : >"$ISOPOD_CONFIG_DIR/boxes/vm/id_ed25519"
+  : >"$ISOPOD_CONFIG_DIR/boxes/vm/known_hosts"
+  make_stub container 0 '{ "networks": [ { "ipv4Address": "192.168.64.9/24" } ] }'
+  make_stub ssh 0 ""
+  run box_ssh vm -- true
+  assert_success
+  assert_stub_called "ssh .*@192.168.64.9"
 }
 
 # ---- per-box config.yaml (Compose-shaped, isopod-parsed) ---------------------
@@ -731,6 +957,10 @@ YAML
 
 # ---- egress_preflight fails closed (§3.4) ------------------------------------
 _egress_stub_rootful_unloaded() {
+  # These tests exercise the Linux host-firewall path (nft on the host). Pin the
+  # OS so they behave the same on a macOS host, where egress_preflight would
+  # otherwise branch to the in-VM path (covered by the macOS egress tests).
+  make_stub uname 0 "Linux"
   # podman: rootful (Rootless=false); the egress network already exists.
   cat >"$STUB_DIR/podman" <<'EOF'
 #!/usr/bin/env bash
@@ -1115,7 +1345,7 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
 @test "file backend: set stores 0600, get round-trips, rm removes" {
   export ISOPOD_SECRET_BACKEND=file
   printf 'hunter2' | secret_store_set TOK
-  [ "$(stat -c '%a' "$ISOPOD_CONFIG_DIR/secrets/TOK")" = "600" ]
+  [ "$(file_mode "$ISOPOD_CONFIG_DIR/secrets/TOK")" = "600" ]
   run secret_store_get TOK
   assert_output "hunter2"
   run secret_store_ls

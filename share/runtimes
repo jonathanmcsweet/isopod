@@ -5,6 +5,13 @@
 #   tier 2  syscall sandbox, shared host kernel, no /dev/kvm needed (e.g. gVisor)
 #   tier 3  microVM, separate guest kernel, needs /dev/kvm (e.g. Kata, krun)
 #
+# "needs /dev/kvm" is a Linux statement. On macOS there is no /dev/kvm — the
+# hardware-virt backend is Apple's Hypervisor.framework (sysctl kern.hv_support),
+# and boxes already run inside the podman machine / Docker Desktop VM (itself a
+# hardware VM). A NESTED Tier 3 runtime there needs an Apple M3+ chip on macOS 15+
+# plus nested-virt support, so `isopod doctor` treats Tier-3-in-a-box as N/A on
+# macOS and points at the engine VM as the boundary already in force.
+#
 # Columns: <runtime-name> <tier> <net>. <net> is the guest network stack, which
 # decides whether SSH TCP-forwarding and bulk transfers work — VSCodium
 # Remote-SSH (`isopod code`) and `isopod copy`/`export` all depend on both:

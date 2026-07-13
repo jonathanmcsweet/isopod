@@ -33,11 +33,15 @@ cmd_rm() {
   # so they don't accumulate. Exact-prefix match (awk index, not a regex) so box
   # 'a' never matches box 'ab'; the trailing ':' pins the boundary. The shared
   # base image (localhost/isopod-base:*) is left alone — use `isopod gc` for that.
-  local img
-  while IFS= read -r img; do
-    [ -n "$img" ] && "$ENGINE" rmi -f "$img" >/dev/null 2>&1 || true
-  done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
-    awk -v p="localhost/isopod-box-$name:" 'index($0, p) == 1')
+  # Apple `container` has no image commit, so its boxes leave no snapshot images
+  # (and no `images --format`); skip the sweep there.
+  if [ "$ENGINE" != container ]; then
+    local img
+    while IFS= read -r img; do
+      [ -n "$img" ] && "$ENGINE" rmi -f "$img" >/dev/null 2>&1 || true
+    done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
+      awk -v p="localhost/isopod-box-$name:" 'index($0, p) == 1')
+  fi
   rm -rf "$(box_dir "$name")"
   write_ssh_include
   info "removed '$name'"
@@ -117,6 +121,71 @@ cmd_gc() {
   done
 }
 
+# `isopod doctor` line(s) for the Tier-3 hardware-virt backend on Linux: /dev/kvm
+# and which microVM runtimes are installed to use it.
+doctor_virt_linux() {
+  if [ -e /dev/kvm ]; then
+    local mvm
+    mvm="$(detect_microvm_runtimes)"
+    if [ -n "$mvm" ]; then
+      printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes detected: %s\n' "$mvm"
+      case " $mvm " in
+        *" krun "*) printf '  [note]    krun is fine for `isopod shell`/copy/export, but its TSI networking stalls\n            SSH port-forwards, so `isopod code` (Remote-SSH) fails — use kata for the IDE\n' ;;
+      esac
+    else
+      printf '  [ok]      /dev/kvm present — Tier 3 microVM ready; install kata (crun-vm cannot boot isopod images)\n'
+    fi
+  else
+    printf '  [--]      /dev/kvm absent — Tier 3 microVM runtimes unavailable (Tier 1/2 still work)\n'
+  fi
+}
+
+# `isopod doctor` line(s) for macOS, where /dev/kvm does not exist. Boxes already
+# run inside the podman machine / Docker Desktop VM — a hardware VM built on
+# Apple's Hypervisor.framework — so that boundary IS the Tier-3-class isolation.
+# Report Hypervisor.framework (the /dev/kvm equivalent) and explain that a nested
+# per-box microVM runtime is a separate, still-maturing capability (M3+/macOS 15).
+doctor_virt_macos() {
+  local hv gen ver
+  hv="$(macos_hv_support)"
+  gen="$(macos_chip_generation)"
+  ver="$(macos_major_version)"
+  if [ "$hv" = 1 ]; then
+    printf '  [ok]      Apple Hypervisor.framework present (kern.hv_support=1) — the macOS /dev/kvm equivalent\n'
+    printf '  [ok]      boxes run inside the podman machine / Docker Desktop VM (a hardware VM boundary —\n'
+    printf '            the Tier-3-class isolation on macOS; a plain container here is already VM-isolated)\n'
+    # Stronger, PER-BOX isolation on macOS = Apple `container`: each box gets its
+    # own VM AND a routable vmnet IP, so egress enforces on the HOST via pf (both
+    # goals at once). krunvm is not a fit — its libkrun TSI networking gives no
+    # routable per-box IP, so no SSH-by-IP and no host-pf egress. Nested krun inside
+    # the engine VM is a separate, still-maturing path (needs M3+/macOS 15).
+    if have container; then
+      printf '  [ok]      Apple `container` present — per-box VM on a vmnet subnet: Tier-3-class isolation\n'
+      printf '            AND host-level (pf) egress outside the VM. Strongest macOS option; isopod\n'
+      printf '            engine wired (ISOPOD_ENGINE=container, experimental). See docs/macos-host-egress.md\n'
+    else
+      printf '  [--]      strongest option: `brew install container` (Apple container) — per-box VM +\n'
+      printf '            vmnet subnet, so egress enforces on the macOS host via pf (outside the VM)\n'
+    fi
+    if macos_nested_virt_capable; then
+      printf '  [note]    this Mac (Apple M%s, macOS %s) can expose nested virtualization — a nested microVM\n' "$gen" "$ver"
+      printf '            runtime (ISOPOD_RUNTIME=krun) MAY work inside the engine VM. Experimental: needs a\n'
+      printf '            krunkit/VMM build that surfaces nested virt. For per-box VMs, prefer Apple `container`.\n'
+    elif [ -n "$gen" ]; then
+      printf '  [note]    nested per-box microVMs (ISOPOD_RUNTIME=krun) need Apple M3+ on macOS 15+ (this Mac:\n'
+      printf '            Apple M%s, macOS %s). For per-box VMs use Apple `container` (ISOPOD_ENGINE=container).\n' "$gen" "$ver"
+    else
+      printf '  [note]    nested per-box microVMs need Apple M3+ on macOS 15+. For per-box VMs use Apple\n'
+      printf '            `container` (ISOPOD_ENGINE=container) — the engine VM stays the boundary otherwise.\n'
+    fi
+  elif [ -n "$hv" ]; then
+    printf '  [warn]    Apple Hypervisor.framework NOT available (kern.hv_support=%s) — the container engine\n' "$hv"
+    printf '            cannot start its VM, so no boxes will run. Check virtualization support for this Mac.\n'
+  else
+    printf '  [--]      could not read kern.hv_support (sysctl unavailable) — cannot report the macOS virt backend\n'
+  fi
+}
+
 cmd_doctor() {
   printf 'isopod %s\n\n' "$ISOPOD_VERSION"
   local ok=1
@@ -148,6 +217,14 @@ cmd_doctor() {
       printf '  [ok]      docker (daemon reachable)\n'
     else printf '  [warn]    docker installed but daemon not reachable\n'; fi
   else printf '  [--]      docker not installed\n'; fi
+  # Apple `container` (macOS): per-box VM on a vmnet subnet — enables host-pf egress
+  # + Tier-3-class isolation. EXPERIMENTAL engine: box lifecycle wired to its CLI
+  # (ISOPOD_ENGINE=container); reconfigure unsupported. See docs/macos-host-egress.md.
+  if have container; then
+    if engine_healthcheck container; then
+      printf '  [ok]      Apple container (service running) — experimental engine: ISOPOD_ENGINE=container\n'
+    else printf '  [warn]    Apple container installed but service not running — start it: container system start\n'; fi
+  fi
   for app in codium cursor windsurf code; do
     if find_ide_bin "$app"; then printf '  [ok]      IDE: %-9s (%s)\n' "$app" "${IDE_CMD[*]}"; fi
   done
@@ -170,8 +247,19 @@ cmd_doctor() {
       else
         printf '  [warn]    runtime "%s" not found on host — install/register it or boxes will fail to start\n' "$rt"
       fi
-      if [ "$tier" = 3 ] && [ ! -e /dev/kvm ]; then
-        printf '  [warn]    /dev/kvm absent — the microVM runtime "%s" needs it (KVM / nested virt unavailable here)\n' "$rt"
+      # Tier-3 hardware-virt check is host-OS specific. On Linux the backing is
+      # /dev/kvm (guarded with is_linux to match runtime_preflight, so macOS never
+      # gets this false "absent"). On macOS a Tier-3 runtime would run NESTED
+      # inside the engine's own VM — a different, stricter requirement.
+      if [ "$tier" = 3 ]; then
+        if is_linux && [ ! -e /dev/kvm ]; then
+          printf '  [warn]    /dev/kvm absent — the microVM runtime "%s" needs it (KVM / nested virt unavailable here)\n' "$rt"
+        elif is_macos; then
+          printf '  [warn]    runtime "%s" is a Tier 3 microVM; on macOS it would run NESTED inside the podman\n' "$rt"
+          printf '            machine / Docker Desktop VM — needs an Apple M3+ chip on macOS 15+ and a VMM that\n'
+          printf '            exposes nested virt. That engine VM is already a hardware boundary, so a plain\n'
+          printf '            container there is VM-isolated without it.\n'
+        fi
       fi
       if [ "$(runtime_net "$rt" 2>/dev/null)" = tsi ]; then
         printf '  [warn]    "%s" uses libkrun TSI networking — SSH port-forwards into the box stall on\n' "$rt"
@@ -197,16 +285,24 @@ cmd_doctor() {
   # Network egress isolation (host firewall; `egress lan-deny` / `allow-list`).
   case "$(active_egress)" in
     allow-list)
-      printf '  [ok]      egress isolation: allow-list (boxes forced through host proxy %s:%s; default-deny egress)\n' \
-        "$ISOPOD_EGRESS_GATEWAY" "$ISOPOD_EGRESS_PROXY_PORT"
-      local prc=0
-      egress_proxy_active || prc=$?
-      case "$prc" in
-        0) printf '  [ok]      egress proxy running (%s)\n' "$ISOPOD_EGRESS_PROXY_UNIT" ;;
-        1) printf '  [warn]    egress proxy NOT running — run: sudo isopod egress apply\n' ;;
-        2) printf '  [--]      egress proxy status unknown (systemctl not found)\n' ;;
-      esac
-      egress_doctor_engines_and_fw
+      if is_macos; then
+        # The allow-list proxy is a Linux systemd service; on macOS isopod enforces
+        # lan-deny inside the podman machine VM instead. Report that, not a phantom proxy.
+        printf '  [--]      egress isolation: allow-list configured, but its host proxy is Linux-only —\n'
+        printf '            on macOS isopod enforces lan-deny inside the podman machine VM instead\n'
+        egress_doctor_engines_and_fw
+      else
+        printf '  [ok]      egress isolation: allow-list (boxes forced through host proxy %s:%s; default-deny egress)\n' \
+          "$ISOPOD_EGRESS_GATEWAY" "$ISOPOD_EGRESS_PROXY_PORT"
+        local prc=0
+        egress_proxy_active || prc=$?
+        case "$prc" in
+          0) printf '  [ok]      egress proxy running (%s)\n' "$ISOPOD_EGRESS_PROXY_UNIT" ;;
+          1) printf '  [warn]    egress proxy NOT running — run: sudo isopod egress apply\n' ;;
+          2) printf '  [--]      egress proxy status unknown (systemctl not found)\n' ;;
+        esac
+        egress_doctor_engines_and_fw
+      fi
       ;;
     lan-deny)
       printf '  [ok]      egress isolation: lan-deny (boxes on %s; LAN/host/metadata/internal-DNS blocked)\n' "$ISOPOD_EGRESS_NET"
@@ -217,20 +313,12 @@ cmd_doctor() {
       ;;
   esac
 
-  if [ -e /dev/kvm ]; then
-    local mvm
-    mvm="$(detect_microvm_runtimes)"
-    if [ -n "$mvm" ]; then
-      printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes detected: %s\n' "$mvm"
-      case " $mvm " in
-        *" krun "*) printf '  [note]    krun is fine for `isopod shell`/copy/export, but its TSI networking stalls\n            SSH port-forwards, so `isopod code` (Remote-SSH) fails — use kata for the IDE\n' ;;
-      esac
-    else
-      printf '  [ok]      /dev/kvm present — Tier 3 microVM ready; install kata (crun-vm cannot boot isopod images)\n'
-    fi
-  else
-    printf '  [--]      /dev/kvm absent — Tier 3 microVM runtimes unavailable (Tier 1/2 still work)\n'
-  fi
+  # Hardware-virtualization backend behind Tier 3, reported per host OS: /dev/kvm
+  # on Linux, Apple's Hypervisor.framework on macOS (there is no device node).
+  case "$(os_kind)" in
+    macos) doctor_virt_macos ;;
+    *) doctor_virt_linux ;;
+  esac
   have podman || have docker || {
     printf '\nInstall podman (recommended) or docker.\n'
     ok=0

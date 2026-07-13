@@ -87,6 +87,10 @@ isopod doctor
 ### macOS
 
 ```sh
+# isopod needs bash >= 4.4; macOS's stock /bin/bash is 3.2. The Homebrew
+# formula pulls this in automatically — a manual install must do it itself:
+brew install bash
+
 # Homebrew's bin dirs are already on PATH. Use a Homebrew-friendly prefix:
 #   Apple Silicon: /opt/homebrew    Intel: /usr/local
 PREFIX="$(brew --prefix)"                    # resolves to the right one
@@ -132,6 +136,11 @@ flatpak override --user --filesystem=$HOME/.ssh:ro \
 ```
 
 **macOS.** Containers run inside the `podman machine` (or Docker Desktop) Linux VM — which is a *real* VM boundary between the agent and your Mac. Published ports are forwarded to `127.0.0.1` on the Mac. One-time setup: `podman machine init && podman machine start`.
+
+Because that VM — not the Mac — is where boxes actually run, two host-side security features live inside it on macOS:
+
+- **Egress firewall.** There is no nftables on macOS, and the box bridge is inside the VM, so `isopod egress apply` loads the same `security/egress-host.nft` ruleset *inside the podman machine VM* (`podman machine ssh sudo nft -f -`) rather than on the Mac. `pfctl` on the Mac is the wrong layer (it only sees post-NAT traffic sourced from the VM). The allow-list proxy mode is Linux-only for now, so on macOS `egress apply` enforces `lan-deny`; run a rootful machine and keep it started. See [opt-in-security.md](opt-in-security.md#macos).
+- **Tier-3 virtualization.** macOS has no `/dev/kvm`; the equivalent is Apple's Hypervisor.framework (`sysctl kern.hv_support`), which already backs the engine VM — so a plain container on macOS is VM-isolated from your Mac. For a per-box hardware boundary, [`krunvm`](https://github.com/containers/krunvm) runs each box as its own microVM directly on Hypervisor.framework (any Apple Silicon, no nested virt; isopod integration experimental), or a *nested* `runtime krun` inside the engine VM on Apple M3+/macOS 15+. `isopod doctor` probes your chip and macOS version and reports which applies. See [opt-in-security.md](opt-in-security.md#macos-the-engine-vm-is-already-the-boundary).
 
 **Windows.** Run isopod inside WSL2 (where podman/docker live). Two options for the GUI: (a) run VSCodium inside WSL via WSLg or (b) run VSCodium on Windows natively — WSL2 forwards `127.0.0.1` ports to Windows, so copy the generated `Host isopod-<name>` block from `~/.config/isopod/ssh_config` (in WSL) into `C:\Users\you\.ssh\config`, adjusting the `IdentityFile`/`UserKnownHostsFile` paths to a Windows copy of those files.
 

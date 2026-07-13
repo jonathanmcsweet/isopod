@@ -219,8 +219,13 @@ cmd_create() {
   info "Starting container ($ENGINE)..."
   "$ENGINE" "${RUN_ARGS[@]}" >/dev/null
 
-  local hostport
-  hostport=$(resolve_port "$name") || die "could not determine published SSH port"
+  # Apple `container` boxes have no published loopback port — they are reached at
+  # their own vmnet IP (box_ssh_addr resolves it live), so there is no host port to
+  # resolve or record. podman/docker publish sshd on a loopback port; capture it.
+  local hostport=""
+  if [ "$ENGINE" != container ]; then
+    hostport=$(resolve_port "$name") || die "could not determine published SSH port"
+  fi
   {
     printf 'engine=%s\n' "$ENGINE"
     printf 'image=%s\n' "$tag"

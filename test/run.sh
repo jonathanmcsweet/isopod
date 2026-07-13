@@ -8,6 +8,16 @@
 # under gitlab-ci-local, and on GitLab's hosted runners.
 set -euo pipefail
 
+# The suite sources isopod's modules, which need bash >= 4.4 (macOS /bin/bash
+# is 3.2). Fail here with one clear line instead of dozens of cryptic
+# `mapfile: command not found` test failures.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
+  { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  printf 'error: the test suite needs bash >= 4.4 (this is bash %s)\n' "$BASH_VERSION" >&2
+  printf 'macOS: brew install bash, then run: bash test/run.sh (with /opt/homebrew/bin on PATH)\n' >&2
+  exit 1
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 BATS="$ROOT/test/libs/bats-core/bin/bats"
