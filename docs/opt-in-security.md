@@ -143,11 +143,11 @@ ISOPOD_MICROVM_ANNOTATIONS="krun.nested_virt=1" ISOPOD_RUNTIME=krun isopod creat
 ### macOS: the engine VM is already the boundary
 
 macOS has no `/dev/kvm`. The equivalent capability — hardware virtualization — is
-Apple's **Hypervisor.framework**, and there is no device node for it; `isopod
+Apple's Hypervisor.framework, and there is no device node for it; `isopod
 doctor` probes it with `sysctl kern.hv_support` (1 = available). More importantly,
-on macOS **every box already runs inside the `podman machine` / Docker Desktop
-Linux VM**, which is itself a hardware VM built on Hypervisor.framework. That VM
-boundary *is* the Tier-3-class isolation on a Mac — a kernel exploit or container
+on macOS every box already runs inside the `podman machine` / Docker Desktop
+Linux VM, which is itself a hardware VM built on Hypervisor.framework. That VM
+boundary is the Tier-3-class isolation on a Mac — a kernel exploit or container
 escape inside a box lands in the engine VM, not on macOS. So a plain container on
 macOS is already VM-isolated from your machine in a way it is not on Linux.
 
@@ -156,57 +156,29 @@ engine VM), there are a few routes on macOS, and `isopod doctor` reports which y
 Mac can use:
 
 1. **Apple `container` — a native per-box VM (recommended; any Apple Silicon).**
-   Apple's [`container`](https://github.com/apple/container) uses the Containerization
-   framework to run each box in its own lightweight VM **directly on
-   Hypervisor.framework** — no nested virtualization, so it works on any Apple Silicon
-   Mac (M1+). It is a macOS-native engine (not a Linux port), and each box gets a
-   routable per-box vmnet subnet the host **pf** egress backend already scopes to, so a
-   box that escapes its VM still can't flush the firewall without root on your Mac. This
-   is the intended "Tier 3 for macOS." `isopod doctor` detects the service and the pf
-   backend targets its subnet; wiring it fully into `isopod create`/`code`/`export` is
-   the tracked next build.
+   Apple's [`container`](https://github.com/apple/container) It is a macOS-native engine
+   (not a Linux port), and each box gets a routable per-box vmnet subnet the host pf
+   egress backend already scopes to, so a box that escapes its VM still can't flush the
+   firewall without root on your Mac. This is the intended "Tier 3 for macOS."
 
-2. **Nested `krun`/`kata` inside the engine VM (needs Apple M3+/macOS 15).** Apple
-   exposes nested virtualization only on **M3 or later** chips running **macOS
-   15+**, and the engine's VMM (krunkit) must surface it to the guest — still
-   maturing. On a capable Mac, `ISOPOD_RUNTIME=krun isopod create …` *may* boot a
-   nested microVM; doctor tells you when your chip/OS qualifies and marks it
-   experimental. On other Macs the engine VM stays the boundary.
+3. **Nested `krun`/`kata` inside the engine VM (needs Apple M3+/macOS 15).** Apple
+   exposes nested virtualization only on M3 or later chips running macOS
+   15+. Doctor tells you when your chip/OS qualifies and marks it experimental. On other
+   Macs the engine VM stays the boundary.
 
-3. **krunvm (fallback).** [krunvm](https://github.com/containers/krunvm) also boots an
+5. **krunvm (fallback).** [krunvm](https://github.com/containers/krunvm) also boots an
    OCI image as its own microVM on Hypervisor.framework, but it is Linux-oriented and
    not well tested on macOS, so it is a fallback rather than the recommended path.
    `isopod doctor` notes it if `brew install krunvm` has made it available.
 
-isopod's `/dev/kvm` preflight is Linux-only by design — a Mac has no such node, so
-the missing-device check would be a false negative. Doctor instead probes
-`kern.hv_support` (Hypervisor.framework), the chip generation
-(`machdep.cpu.brand_string`), and the macOS version to report the right option.
-
 ## Network egress isolation (`egress lan-deny`)
-
-Stops a rogue in-box agent from **mapping or fingerprinting your local network**:
-scanning your LAN, reaching the host, reading cloud metadata
-(`169.254.169.254`), or enumerating internal hostnames over DNS. Host-initiated
-**published ports keep working** (`--expose` and SSH), and the box keeps
-**public internet + DNS** for `apt`/`pip`/`git`.
-
-Everything is enforced by the engine and the host — an agent with in-box root and
-passwordless `sudo` cannot turn it off (there is no in-box firewall to flush).
-
-**How it works.** Published ports are host-*initiated*, so a box only ever sends
-*reply* traffic on them; a scan is a box-*initiated* new connection. A host
-firewall accepts the replies (conntrack `established,related`) and drops
-box-initiated traffic to RFC1918, the host, metadata, and multicast — while
-letting public destinations through. Three host-set pieces do it:
-
 - a dedicated bridge network (`isopod0`, fixed subnet) the firewall can target;
 - `--dns` pinned to a public resolver, so the box can't query the host's
   internal/forwarding resolver (which knows your PTRs and split-horizon names);
 - `--cap-drop NET_RAW,NET_ADMIN`, so the box can't craft raw scan packets or
   re-route around the rules.
 
-**Enable it** in your override file (`~/.config/isopod/hardening.conf`):
+Enable it in your override file (`~/.config/isopod/hardening.conf`):
 
 ```
 egress lan-deny
@@ -232,21 +204,6 @@ restart — re-run `sudo isopod egress apply` afterward, or include the ruleset 
 `/etc/nftables.conf`. `isopod doctor` flags when it isn't loaded.
 
 #### macOS
-
-On macOS the Mac host has no nftables and the box bridge is not on it — the boxes
-run inside the `podman machine` Linux VM, so that VM is where the firewall belongs.
-`isopod egress apply` therefore loads the **same** `security/egress-host.nft`
-ruleset **inside the podman machine VM** over podman's management SSH (`podman
-machine ssh sudo nft -f -`); the ruleset's subnet, gateway, and bridge interface
-all refer to the VM, so nothing else changes. No `sudo` on the Mac and no local
-nftables are needed — just a running machine (`podman machine start`).
-
-The Mac-native packet filter, **pf** (`pfctl`), is *not* the right layer: by the
-time a box's traffic reaches the Mac it has already been NAT'd and is sourced from
-the VM, so pf can neither tell a box-initiated flow from the VM's own nor match the
-per-box subnet the rules key on. Enforcement stays inside the VM, where the box
-identity is still intact. Docker Desktop's VM is not a general SSH target, so
-host-enforced egress on macOS currently requires podman machine.
 
 ```sh
 podman machine start          # the VM must be up
