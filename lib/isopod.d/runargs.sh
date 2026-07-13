@@ -57,6 +57,17 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   local box_sudo="${BOX_SUDO:-}"
   [ -n "$box_sudo" ] || box_sudo="$(meta_get "$name" sudo 2>/dev/null || true)"
   [ "$box_sudo" = 0 ] && RUN_ARGS+=(--security-opt no-new-privileges)
+  # Kernel hardening (default profile): on a microVM box — which has its own guest
+  # kernel — tell the entrypoint to apply the guest sysctls (share/hardening-sysctl.conf).
+  # A container box shares the HOST kernel, so it is never asked to change sysctls
+  # (that would affect the host); it keeps the engine's default seccomp/isolation.
+  # 'off' disables it. On create the level is in BOX_HARDEN; on reconfigure
+  # (unset) read the persisted meta; absent meta => default (breaks nothing).
+  local box_harden="${BOX_HARDEN:-}"
+  [ -n "$box_harden" ] || box_harden="$(meta_get "$name" harden 2>/dev/null || true)"
+  [ -n "$box_harden" ] || box_harden=default
+  [ "$box_harden" != off ] && is_microvm_runtime &&
+    RUN_ARGS+=(-e "ISOPOD_HARDEN=$box_harden")
   # Secrets tmpfs: memory-backed, owned by the in-box user, gone when the box
   # stops. inject_secrets streams values in over SSH after boot; nothing about
   # a secret (name or value) is visible to the engine or `inspect`. On create

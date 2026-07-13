@@ -1217,6 +1217,26 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   [[ "$joined" != *"--annotation"* ]]
 }
 
+# ---- kernel hardening profile (--harden) --------------------------------------
+@test "build_run_args passes the hardening env on a microVM box (default profile)" {
+  ENGINE=podman
+  ISOPOD_RUNTIME=krun build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"ISOPOD_HARDEN=default"* ]]
+}
+@test "build_run_args omits the hardening env on a plain container (shared host kernel)" {
+  ENGINE=podman
+  build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"ISOPOD_HARDEN"* ]]
+}
+@test "build_run_args omits the hardening env on a microVM box when --harden off" {
+  ENGINE=podman
+  BOX_HARDEN=off ISOPOD_RUNTIME=krun build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"ISOPOD_HARDEN"* ]]
+}
+
 # ---- secrets: names, paths, specs ---------------------------------------------
 
 @test "valid_secret_name accepts typical env-style names" {

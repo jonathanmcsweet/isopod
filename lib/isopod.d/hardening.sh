@@ -197,6 +197,24 @@ is_microvm_runtime() {
   [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
 }
 
+# Print the box's effective kernel-hardening posture at create (like
+# egress_posture_note), so what the box actually got is legible. The default
+# profile's guest-sysctl arm applies only to microVM boxes (their own kernel);
+# a container box keeps the engine's default seccomp/isolation.
+harden_posture_note() { # harden_posture_note <level>
+  case "$1" in
+    off) info "Kernel hardening: OFF (--harden off) — engine defaults only." ;;
+    *)
+      if is_microvm_runtime; then
+        info "Kernel hardening: default profile — reduced-surface guest sysctls applied in the microVM."
+      else
+        info "Kernel hardening: default profile — container box, so it keeps the engine's default
+     seccomp/isolation; the guest-sysctl arm applies to microVM boxes (disable with --harden off)."
+      fi
+      ;;
+  esac
+}
+
 # Is an OCI runtime usable by the engine? True when the binary is on PATH (for
 # podman, hardening_run_args passes such a bare name as an absolute path, which
 # podman accepts) OR the engine reports it among its registered runtimes. Best-
