@@ -219,8 +219,9 @@ valid_ifname() { # valid_ifname <name> -> a Linux netdev name (<=15 chars, safe 
 # ---------------------------------------------------------------------------
 # The image is defined by a standard Dockerfile (share/Dockerfile), built the
 # same way by docker and podman. The base image and in-box user are passed as
-# build args. The cache key hashes the Dockerfile and entrypoint content + those
-# args, so an edit to either forces a one-time rebuild on its own
+# build args. The cache key hashes the Dockerfile, entrypoint, and sysctl
+# baseline content + those args, so an edit to any forces a one-time rebuild
+# on its own
 # (IMAGE_LAYER_VERSION remains only as a manual force-rebuild override).
 image_exists() { # image_exists <tag>
   "$ENGINE" image exists "$1" 2>/dev/null || "$ENGINE" image inspect "$1" >/dev/null 2>&1
@@ -229,11 +230,12 @@ image_exists() { # image_exists <tag>
 image_tag_for() { # image_tag_for <base-image> [dev-tools 0|1]
   [ -f "$ISOPOD_DOCKERFILE" ] || die "missing Dockerfile: $ISOPOD_DOCKERFILE"
   [ -f "$ISOPOD_ENTRYPOINT" ] || die "missing entrypoint: $ISOPOD_ENTRYPOINT"
+  [ -f "$ISOPOD_SYSCTL_CONF" ] || die "missing sysctl baseline: $ISOPOD_SYSCTL_CONF"
   local dev="${2:-0}" hash
   # The dev-tools flag is part of the cache key: the lean and --dev images are
   # built from the same Dockerfile but differ, so they must not share a tag.
   hash=$({
-    cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT"
+    cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT" "$ISOPOD_SYSCTL_CONF"
     printf '%s\0%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION" "$dev"
   } | sha_hex)
   printf 'localhost/isopod-base:%s' "$hash"
@@ -258,7 +260,7 @@ build_image() { # build_image <base-image> [dev-tools 0|1] -> echoes tag
   info "Building sandbox base image from $base (one-time$([ "$dev" = 1 ] && printf ', with --dev toolchain'))..." >&2
   local -a extra_build=()
   mapfile -t extra_build < <(engine_build_extra)
-  # Minimal build context: just the entrypoint the Dockerfile COPYs in. Apple
+  # Minimal build context: only the files the Dockerfile COPYs in. Apple
   # `container build` requires the Dockerfile to live INSIDE the context directory
   # (it rejects a -f path outside it, and trips on a '//' in the path), so for that
   # engine copy the Dockerfile in and point -f at it; podman/docker read it from
@@ -266,6 +268,7 @@ build_image() { # build_image <base-image> [dev-tools 0|1] -> echoes tag
   local ctx tmpbase="${TMPDIR:-/tmp}" dockerfile="$ISOPOD_DOCKERFILE"
   ctx=$(mktemp -d "${tmpbase%/}/isopod-ctx-XXXXXX")
   cp "$ISOPOD_ENTRYPOINT" "$ctx/isopod-entrypoint"
+  cp "$ISOPOD_SYSCTL_CONF" "$ctx/hardening-sysctl.conf"
   if [ "$ENGINE" = container ]; then
     cp "$ISOPOD_DOCKERFILE" "$ctx/Dockerfile"
     dockerfile="$ctx/Dockerfile"

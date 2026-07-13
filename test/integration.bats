@@ -34,7 +34,10 @@ INFO
   image)   # 'image exists' / 'image inspect' -> pretend image is missing once
            [ "$1" = exists ] && exit 1
            exit 1 ;;
-  build)   exit 0 ;;
+  build)   # Log the staged build-context contents (last arg = context dir) so
+           # tests can assert every COPY source the Dockerfile needs is present.
+           for f in "${@: -1}"/*; do echo "build-ctx ${f##*/}" >> "$STUB_LOG"; done
+           exit 0 ;;
   run)     echo "deadbeefcontainerid"; exit 0 ;;
   port)    echo "127.0.0.1:45678" ;;        # maps 2222/tcp -> host 45678
   exec)    exit 0 ;;
@@ -212,6 +215,16 @@ EOF
   assert_stub_called "podman build .*--build-arg ISOPOD_BASE="
   assert_stub_called "podman build .*--build-arg ISOPOD_USER=dev"
   assert_stub_called "podman build .*-f $ISOPOD_ROOT/share/Dockerfile"
+}
+
+@test "create stages every share/Dockerfile COPY source into the build context" {
+  # Regression: adding a COPY to share/Dockerfile without staging its source in
+  # build_image fails only at build time ("copier: stat ... no such file").
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  while read -r src; do
+    assert_stub_called "build-ctx $src"
+  done < <(awk '$1 == "COPY" { print $2 }' "$ISOPOD_ROOT/share/Dockerfile")
 }
 
 @test "create builds a lean base by default (no dev/test toolchain)" {
