@@ -30,8 +30,11 @@ assert_no_unexpanded() { # assert_no_unexpanded <label> <text>
 }
 
 # --- nftables rulesets ------------------------------------------------------
-lan_deny="$(ISOPOD_EGRESS=lan-deny ./isopod egress rules)"
-allow_list="$(ISOPOD_EGRESS=allow-list ./isopod egress rules)"
+# Pin the in-VM (nft) backend: on a macOS host where Apple `container` is installed
+# `egress rules` renders the pf ruleset instead, so force `vm` to exercise the nft
+# templates here. On Linux this override is a no-op (the host-pf backend is macOS-only).
+lan_deny="$(ISOPOD_EGRESS_BACKEND=vm ISOPOD_EGRESS=lan-deny ./isopod egress rules)"
+allow_list="$(ISOPOD_EGRESS_BACKEND=vm ISOPOD_EGRESS=allow-list ./isopod egress rules)"
 
 assert_no_unexpanded "egress-host.nft" "$lan_deny"
 case "$lan_deny" in *"table inet isopod"*) ok "lan-deny ruleset renders" ;; *) fail "lan-deny ruleset missing table" ;; esac
@@ -52,6 +55,17 @@ for pair in "lan-deny:$lan_deny" "allow-list:$allow_list"; do
   case "$rs" in *'meta nfproto ipv6 iifname != "isopod-egr" accept'*) : ;; *) fail "$label ruleset does not spare non-box host IPv6" ;; esac
 done
 ok "both rulesets drop box IPv6 egress (scoped to the isopod bridge), spare host IPv6"
+
+# --- macOS host-pf ruleset (Apple `container` / vmnet backend) ---------------
+# Rendered directly (the `egress rules` path is OS-gated to macOS). Assert the box
+# vmnet subnet substitutes and the LAN block uses the vmnet-correct INBOUND
+# direction ('block ... in ... from <subnet>'); 'block out' does not filter
+# vmnet-bridged traffic. Runs identically on Linux and macOS.
+pf_rules="$(ISOPOD_SOURCED=1 . ./isopod && ISOPOD_PF_SUBNET=192.168.64.0/24 render_tmpl "$ISOPOD_EGRESS_PF_RULESET")"
+assert_no_unexpanded "egress-host.pf" "$pf_rules"
+case "$pf_rules" in *"192.168.64.0/24"*) : ;; *) fail "pf ruleset: box subnet not substituted" ;; esac
+case "$pf_rules" in *"block drop in quick"*) : ;; *) fail "pf ruleset: LAN block is not inbound-direction (vmnet needs 'block in', not 'block out')" ;; esac
+ok "macOS host-pf ruleset renders (box subnet substituted, inbound-direction LAN block)"
 
 # --- tinyproxy config + systemd unit ----------------------------------------
 # Render exactly as egress_apply_proxy does: source isopod for render_tmpl and
@@ -82,6 +96,25 @@ case "$nft_unit" in *"ExecStart=/usr/sbin/nft -f "*) : ;; *) fail "nft unit: Exe
 case "$nft_unit" in *"After=nftables.service firewalld.service"*) : ;; *) fail "nft unit: boot ordering is wrong" ;; esac
 ok "egress nft persistence unit renders (ExecStart + boot ordering)"
 
+# macOS pf boot-persistence LaunchDaemon (isopod egress persist on the pf backend).
+# The Label is the anchor and the loaded conf is pf.conf; both come from ISOPOD_PF_* globals.
+pf_plist="$(ISOPOD_SOURCED=1 . ./isopod && render_tmpl isopod-egress-pf.plist.tmpl)"
+assert_no_unexpanded "pf LaunchDaemon" "$pf_plist"
+case "$pf_plist" in *"<string>com.isopod.egress</string>"*) : ;; *) fail "pf plist: Label is not the isopod anchor" ;; esac
+case "$pf_plist" in *"<string>/sbin/pfctl</string>"*"<string>-E</string>"*"<string>-f</string>"*"<string>/etc/pf.conf</string>"*) : ;; *) fail "pf plist: does not run 'pfctl -E -f /etc/pf.conf' at boot" ;; esac
+case "$pf_plist" in *"<key>RunAtLoad</key>"*"<true/>"*) : ;; *) fail "pf plist: not set to RunAtLoad" ;; esac
+ok "pf persistence LaunchDaemon renders (RunAtLoad + pfctl -E -f pf.conf)"
+# plutil validates the plist is well-formed where it exists (macOS); skip on Linux CI.
+if command -v plutil >/dev/null 2>&1; then
+  if printf '%s\n' "$pf_plist" | plutil -lint - >/dev/null 2>&1; then
+    ok "pf LaunchDaemon passes plutil -lint"
+  else
+    fail "pf LaunchDaemon: plutil -lint rejected the rendered plist"
+  fi
+else
+  skip "plutil not installed — pf plist lint skipped (render checks above still ran)"
+fi
+
 # --- allow-list -> filter regexes -------------------------------------------
 regexes="$(ISOPOD_SOURCED=1 . ./isopod && egress_filter_regexes | sort -u)"
 [ -n "$regexes" ] || fail "allow-list produced no filter regexes"
@@ -93,8 +126,10 @@ fi
 ok "allow-list generates anchored filter regexes (rejects look-alike hosts)"
 
 # --- optional: real nft parse where the binary is usable --------------------
-# nft check-mode still talks to the kernel, so it needs privilege; classify a
-# permission failure as skip (unprivileged CI / act) and only fail on a genuine
+# nft check-mode still talks to the kernel: it needs privilege AND a working
+# nf_tables/netlink subsystem. Classify both "no privilege" (unprivileged CI)
+# and "no nf_tables kernel" (containers / emulated runners, where nft is
+# installed but netlink won't initialize) as skip, and only fail on a genuine
 # parse error. Strip the add/delete idempotency preamble so we validate the rule
 # syntax itself, independent of current kernel state.
 nft_check() { # nft_check <label> <rendered ruleset>
@@ -105,8 +140,8 @@ nft_check() { # nft_check <label> <rendered ruleset>
     return 0
   fi
   case "$err" in
-    *"permission denied"* | *"Operation not permitted"* | *"not permitted"* | *"Could not"*)
-      skip "$label: nft -c needs privilege here — parse check skipped"
+    *"permission denied"* | *"Operation not permitted"* | *"not permitted"* | *"Could not"* | *"Unable to initialize Netlink"* | *"Protocol not supported"*)
+      skip "$label: nft -c can't reach nf_tables here (no privilege or no kernel support) — parse check skipped"
       ;;
     *) fail "$label: nft rejected the ruleset:
 $err" ;;

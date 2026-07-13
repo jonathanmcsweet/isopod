@@ -2,8 +2,10 @@
 #
 # isopod — disposable, isolated AI-coding sandboxes for VSCodium (and friends)
 #
-# Requirements: bash 4+, podman or docker, ssh, ssh-keygen, ssh-keyscan.
-# Primary OS: Linux. macOS: works via podman machine / Docker Desktop.
+# Requirements: bash >= 4.4, podman or docker, ssh, ssh-keygen, ssh-keyscan.
+# Primary OS: Linux. macOS: works via podman machine / Docker Desktop; the
+# Homebrew formula depends on `bash`, so brew installs get a modern bash
+# automatically (stock /bin/bash 3.2 is not supported).
 # Windows: run inside WSL2 (see README).
 #
 # This entry script is the shared constant surface: many globals below are read
@@ -12,8 +14,18 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-ISOPOD_VERSION="2.6.0"
+# Fail fast on an old bash instead of dying mid-create on a missing builtin.
+# 4.4 is the real floor: mapfile needs 4.0, and expanding an empty array under
+# `set -u` (which several run/build argument lists do) only became safe in 4.4.
+# macOS /bin/bash is frozen at 3.2; the Homebrew formula pulls in a modern bash.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
+  { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  printf 'error: isopod requires bash >= 4.4 (this is bash %s)\n' "$BASH_VERSION" >&2
+  printf 'macOS: `brew install bash` (installed automatically with the isopod Homebrew formula)\n' >&2
+  exit 1
+fi
 
+ISOPOD_VERSION="2.7.0"
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
 _resolve_script_dir() {
@@ -91,6 +103,25 @@ ISOPOD_EGRESS_DNS="${ISOPOD_EGRESS_DNS:-1.1.1.1}"
 # dual-stack bridge — no reliance on an in-box sysctl. Max 15 chars (IFNAMSIZ).
 ISOPOD_EGRESS_IFACE="${ISOPOD_EGRESS_IFACE:-isopod-egr}"
 ISOPOD_EGRESS_RULESET="${ISOPOD_EGRESS_RULESET:-$ISOPOD_DIR/security/egress-host.nft}"
+
+# macOS host-level egress (pf). When boxes run on a routable vmnet subnet (Apple
+# `container` / vmnet), egress is enforced with pf on the Mac HOST — outside every
+# guest VM — in a dedicated pf anchor, instead of nft inside a guest VM. This is
+# the escape-resistant boundary; see docs/macos-host-egress.md. The anchor rules
+# are rendered from egress-host.pf; the anchor is referenced from pf.conf so it
+# survives reboot. ISOPOD_PF_SUBNET overrides the detected box vmnet subnet.
+ISOPOD_EGRESS_PF_RULESET="${ISOPOD_EGRESS_PF_RULESET:-$ISOPOD_DIR/security/egress-host.pf}"
+ISOPOD_PF_ANCHOR="${ISOPOD_PF_ANCHOR:-com.isopod.egress}"
+ISOPOD_PF_ANCHOR_FILE="${ISOPOD_PF_ANCHOR_FILE:-/etc/pf.anchors/com.isopod.egress}"
+ISOPOD_PF_CONF="${ISOPOD_PF_CONF:-/etc/pf.conf}"
+# LaunchDaemon that re-enables pf and re-loads pf.conf at boot ("isopod egress persist"):
+# macOS re-reads pf.conf on boot but does NOT re-enable pf, so egress would otherwise lapse.
+ISOPOD_PF_LAUNCHD_PLIST="${ISOPOD_PF_LAUNCHD_PLIST:-/Library/LaunchDaemons/com.isopod.egress.plist}"
+# Apple `container`'s default vmnet subnet; override detection with ISOPOD_PF_SUBNET.
+ISOPOD_PF_SUBNET_DEFAULT="${ISOPOD_PF_SUBNET_DEFAULT:-192.168.64.0/24}"
+# The vmnet network Apple `container` boxes attach to (gives each box a routable IP
+# on ISOPOD_PF_SUBNET). "default" is the network `container` ships with.
+ISOPOD_CONTAINER_NET="${ISOPOD_CONTAINER_NET:-default}"
 
 # Egress allow-list mode (`egress allow-list`): a host-side filtering proxy
 # (tinyproxy) on the bridge gateway is the box's ONLY route out, and only

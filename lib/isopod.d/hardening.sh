@@ -232,6 +232,51 @@ runtime_available() { # runtime_available <engine> <name>
   "$engine" info 2>/dev/null | grep -qE "(^|[^[:alnum:]_-])${name}([^[:alnum:]_-]|\$)"
 }
 
+# macOS has no /dev/kvm. The equivalent capability — "does this machine have
+# hardware virtualization?" — is Apple's Hypervisor.framework, and the closest
+# thing to a probe is `sysctl kern.hv_support` (1 = supported). That backs the
+# podman machine / Docker Desktop VM every box already runs inside. Echoes the
+# raw sysctl value (usually 0/1); empty when sysctl is unavailable, so callers
+# treat "" as "unknown" rather than "unsupported".
+macos_hv_support() {
+  have sysctl && sysctl -n kern.hv_support 2>/dev/null
+}
+
+# Apple Silicon generation (the M-series number) parsed from the CPU brand string:
+# "Apple M3 Pro" -> 3, "Apple M1" -> 1. Echoes the integer; empty on Intel or when
+# it can't be read. Used to gauge nested-virt support (Apple exposes it on M3+).
+macos_chip_generation() {
+  local brand
+  brand="$(sysctl -n machdep.cpu.brand_string 2>/dev/null)" || return 1
+  case "$brand" in
+    *"Apple M"[0-9]*)
+      brand="${brand#*Apple M}"       # drop everything up to the M number
+      printf '%s' "${brand%%[!0-9]*}" # keep the leading digits
+      ;;
+  esac
+}
+
+# macOS major product version: 15 from "15.5". Echoes the integer, empty if unread.
+macos_major_version() {
+  local v
+  v="$(sw_vers -productVersion 2>/dev/null)" ||
+    v="$(sysctl -n kern.osproductversion 2>/dev/null)" || return 1
+  printf '%s' "${v%%.*}"
+}
+
+# True when this Mac can, in principle, run a NESTED VM/microVM inside the podman
+# machine VM: Apple exposes nested virtualization on M3+ chips running macOS 15+.
+# Whether the engine's VMM (krunkit) actually surfaces it to the guest is a
+# separate, still-maturing matter, so callers should treat a true result as
+# "worth trying" (experimental), not "guaranteed to work".
+macos_nested_virt_capable() {
+  local gen ver
+  gen="$(macos_chip_generation)"
+  ver="$(macos_major_version)"
+  [ -n "$gen" ] && [ -n "$ver" ] || return 1
+  [ "$gen" -ge 3 ] 2>/dev/null && [ "$ver" -ge 15 ] 2>/dev/null
+}
+
 # Fail-closed preflight for the configured OCI runtime, mirroring egress_preflight:
 # turn a late, cryptic engine error ("runtime not found") into an early, clear one,
 # and make sure a box the user asked to run under a sandboxed runtime does not
@@ -311,6 +356,15 @@ _runtime_runnable() { # _runtime_runnable <engine> <name>
 # Sets ISOPOD_RUNTIME (or ISOPOD_FORCE_CONTAINER) in-process for the rest of the run.
 resolve_runtime() { # resolve_runtime <engine> <container_opt 0|1>
   local engine="$1" container_opt="${2:-0}" explicit rt
+  # Apple `container` runs each box in its OWN VM (its own kernel) — that IS the
+  # isolation boundary. The OCI runtimes isopod selects here (kata/krun/runsc) are
+  # podman/docker concepts with no meaning for `container`, so always run plain:
+  # no runtime to pick, and the host-fingerprint masks it would gate are moot on a
+  # VM. build_run_args_container emits no --runtime/mask flags to match.
+  if [ "$engine" = container ]; then
+    export ISOPOD_FORCE_CONTAINER=1
+    return 0
+  fi
   explicit="$(active_runtime)"
   if [ "$container_opt" = 1 ]; then
     [ -n "$explicit" ] &&

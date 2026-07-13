@@ -406,14 +406,16 @@ EOF
 # identity so we can prove only those get rewritten.
 _seed_remapped_host() { # _seed_remapped_host <host-dir>
   local host="$1" box="$TEST_TMP/box"
-  git init -q "$box"
+  # Pin the initial branch: the assertions below reference refs/.../master, but
+  # a host with init.defaultBranch=main would otherwise create 'main'.
+  git init -q -b master "$box"
   git -C "$box" config user.email dev@mybox.local; git -C "$box" config user.name dev
   echo a > "$box/a"; git -C "$box" add a
   # the body contains a line that LOOKS like an author header — the rewriter
   # must leave it byte-for-byte intact (only the real identity may change).
   printf 'box: work 1\n\nauthor Faker <dev@mybox.local> 0 +0000\n' | git -C "$box" commit -qF -
   git -C "$box" -c user.email=mate@corp -c user.name=Mate commit -q --allow-empty -m "mate: review"
-  git init -q "$host"
+  git init -q -b master "$host"
   git -C "$host" config user.email me@home; git -C "$host" config user.name Me
   echo h > "$host/h"; git -C "$host" add h; git -C "$host" commit -qm "host: mine"
   git -C "$host" fetch --no-tags "$box" "refs/heads/*:refs/remotes/mybox/*" >/dev/null 2>&1
@@ -853,7 +855,7 @@ seed_secret() { # seed_secret <name> <value>
   # Mark the box as created under egress (create degrades to '' on the rootless
   # stub). The rootless engine cannot enforce it, so start must flag it as OPEN
   # rather than start it silently unprotected.
-  sed -i 's/^egress=.*/egress=lan-deny/' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  sed_i 's/^egress=.*/egress=lan-deny/' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
   run "$ISOPOD_ROOT/isopod" start demo
   assert_success
   assert_output --partial "OPEN network"

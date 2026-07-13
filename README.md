@@ -159,6 +159,7 @@ Values live in the OS keychain (`security` on macOS, `secret-tool` on Linux; 060
 ## Requirements
 
 - Linux (primary), macOS (via `podman machine` or Docker Desktop), or Windows (via WSL2 — see [docs/installation-and-platform.md](docs/installation-and-platform.md#windows))
+- `bash` >= 4.4.
 - `podman` (recommended) or `docker`
 - `ssh`, `ssh-keygen`, `ssh-keyscan` (the standard OpenSSH client tools)
 - VSCodium with the **Open Remote – SSH** extension (`jeanp413.open-remote-ssh`, on Open VSX). `isopod code` installs it for you if missing. Cursor/Windsurf/VS Code ship their own Remote-SSH.

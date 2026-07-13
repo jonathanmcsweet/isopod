@@ -13,6 +13,16 @@ setup_file() {
   if [ "${RUN_LIVE:-0}" != "1" ]; then
     skip "live tests disabled (set RUN_LIVE=1 to enable)"
   fi
+  # macOS: the per-test sandboxed HOME hides the podman machine connection (it
+  # lives in the real ~/.config/containers), so the CLI would report "podman not
+  # working". Resolve the running machine's API socket here — while HOME is still
+  # the real one — and pin it via CONTAINER_HOST so podman works under the
+  # sandbox. No-op on Linux, where rootless podman needs no machine.
+  if [ "$(uname -s)" = Darwin ] && command -v podman >/dev/null 2>&1; then
+    local sock
+    sock="$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null || true)"
+    [ -n "$sock" ] && export CONTAINER_HOST="unix://$sock"
+  fi
 }
 
 setup() {
