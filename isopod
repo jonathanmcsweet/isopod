@@ -2,8 +2,10 @@
 #
 # isopod — disposable, isolated AI-coding sandboxes for VSCodium (and friends)
 #
-# Requirements: bash 4+, podman or docker, ssh, ssh-keygen, ssh-keyscan.
-# Primary OS: Linux. macOS: works via podman machine / Docker Desktop.
+# Requirements: bash >= 4.4, podman or docker, ssh, ssh-keygen, ssh-keyscan.
+# Primary OS: Linux. macOS: works via podman machine / Docker Desktop; the
+# Homebrew formula depends on `bash`, so brew installs get a modern bash
+# automatically (stock /bin/bash 3.2 is not supported).
 # Windows: run inside WSL2 (see README).
 #
 # This entry script is the shared constant surface: many globals below are read
@@ -11,6 +13,17 @@
 # alone, so it would flag those as SC2034 (unused) — disable that check file-wide.
 # shellcheck disable=SC2034
 set -euo pipefail
+
+# Fail fast on an old bash instead of dying mid-create on a missing builtin.
+# 4.4 is the real floor: mapfile needs 4.0, and expanding an empty array under
+# `set -u` (which several run/build argument lists do) only became safe in 4.4.
+# macOS /bin/bash is frozen at 3.2; the Homebrew formula pulls in a modern bash.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
+  { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  printf 'error: isopod requires bash >= 4.4 (this is bash %s)\n' "$BASH_VERSION" >&2
+  printf 'macOS: `brew install bash` (installed automatically with the isopod Homebrew formula)\n' >&2
+  exit 1
+fi
 
 ISOPOD_VERSION="2.7.0"
 # Resolve the directory this script lives in (following symlinks), so we can
