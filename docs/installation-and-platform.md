@@ -87,6 +87,10 @@ isopod doctor
 ### macOS
 
 ```sh
+# isopod needs bash >= 4.4; macOS's stock /bin/bash is 3.2. The Homebrew
+# formula pulls this in automatically — a manual install must do it itself:
+brew install bash
+
 # Homebrew's bin dirs are already on PATH. Use a Homebrew-friendly prefix:
 #   Apple Silicon: /opt/homebrew    Intel: /usr/local
 PREFIX="$(brew --prefix)"                    # resolves to the right one
