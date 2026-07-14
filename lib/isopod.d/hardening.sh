@@ -389,6 +389,15 @@ resolve_runtime() { # resolve_runtime <engine> <container_opt 0|1>
     export ISOPOD_FORCE_CONTAINER=1
     return 0
   fi
+  # Apple `container` runs each box in its OWN VM (its own kernel) — that IS the
+  # isolation boundary. The OCI runtimes isopod selects here (kata/krun/runsc) are
+  # podman/docker concepts with no meaning for `container`, so always run plain:
+  # no runtime to pick, and the host-fingerprint masks it would gate are moot on a
+  # VM. build_run_args_container emits no --runtime/mask flags to match.
+  if [ "$engine" = container ]; then
+    export ISOPOD_FORCE_CONTAINER=1
+    return 0
+  fi
   explicit="$(active_runtime)"
   if [ "$container_opt" = 1 ]; then
     [ -n "$explicit" ] &&
