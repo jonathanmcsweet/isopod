@@ -1035,6 +1035,43 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   assert_success
 }
 
+# Stub a kata binary whose `env` self-check fails: the runtime is installed but
+# its guest kernel/image artifacts are missing (a split-package half-install).
+_stub_broken_kata() { # _stub_broken_kata <name>
+  cat >"$STUB_DIR/$1" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = env ] && { echo "file /var/cache/kata-containers/vmlinuz.container does not exist" >&2; exit 1; }
+exit 0
+EOF
+  chmod +x "$STUB_DIR/$1"
+}
+
+@test "_runtime_healthy passes a kata whose env self-check succeeds" {
+  make_stub kata-runtime 0
+  run _runtime_healthy kata-runtime
+  assert_success
+}
+@test "_runtime_healthy fails a kata whose env self-check fails" {
+  _stub_broken_kata kata-runtime
+  run _runtime_healthy kata-runtime
+  assert_failure
+}
+@test "_runtime_healthy matches kata variants by basename (absolute path)" {
+  _stub_broken_kata kata-runtime
+  run _runtime_healthy "$STUB_DIR/kata-runtime"
+  assert_failure
+}
+@test "_runtime_healthy passes a kata that is not on PATH (nothing to probe)" {
+  run _runtime_healthy kata-runtime
+  assert_success
+}
+@test "_runtime_healthy passes non-kata runtimes without probing" {
+  # krun/runsc have no `env` self-check; probing them would be a false negative.
+  make_stub krun 1
+  run _runtime_healthy krun
+  assert_success
+}
+
 @test "runtime_preflight is a no-op when no runtime is configured" {
   run runtime_preflight podman
   assert_success
@@ -1115,6 +1152,24 @@ _stub_podman_runtimes() { # _stub_podman_runtimes <name...>
   resolve_runtime podman 0
   run active_runtime
   assert_output "kata-runtime"
+}
+@test "resolve_runtime skips a kata that cannot boot a VM and selects krun" {
+  [ -e /dev/kvm ] || skip "no /dev/kvm on this host — microVM is not runnable"
+  # kata-runtime is on PATH but half-installed (env self-check fails); without
+  # the health probe it would win on table order and every create would fail.
+  _stub_podman_runtimes crun runc krun kata-runtime
+  _stub_broken_kata kata-runtime
+  resolve_runtime podman 0 2>"$TEST_TMP/warn"
+  run active_runtime
+  assert_output "krun"
+  grep -q "cannot boot a VM" "$TEST_TMP/warn"
+}
+@test "runtime_preflight warns when the configured runtime cannot boot a VM" {
+  _stub_podman_runtimes crun runc kata-runtime
+  _stub_broken_kata kata-runtime
+  ISOPOD_RUNTIME=kata-runtime run runtime_preflight podman
+  assert_success
+  assert_output --partial "cannot boot a VM"
 }
 @test "resolve_runtime auto-selects krun (virtio via passt) when it is the only microVM" {
   [ -e /dev/kvm ] || skip "no /dev/kvm on this host — krun would not be runnable"
