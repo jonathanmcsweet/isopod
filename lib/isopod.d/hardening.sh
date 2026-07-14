@@ -232,6 +232,22 @@ runtime_available() { # runtime_available <engine> <name>
   "$engine" info 2>/dev/null | grep -qE "(^|[^[:alnum:]_-])${name}([^[:alnum:]_-]|\$)"
 }
 
+# A microVM runtime binary can be installed without the VM artifacts it boots —
+# e.g. a distro package split that ships kata-runtime but not the kata guest
+# kernel/image package. Such a runtime passes runtime_available, yet every
+# create fails at VM boot with a late engine error. Probe: `<runtime> env`
+# makes kata load and validate its configuration — resolving the guest
+# kernel/image paths — without starting a VM, so a missing artifact fails the
+# probe with the same error a create would hit. Only kata variants support the
+# subcommand; other runtimes, and kata names not on PATH (engine-registered
+# only, nothing to probe), pass.
+_runtime_healthy() { # _runtime_healthy <name>
+  local name="$1"
+  case "${name##*/}" in kata | kata-*) ;; *) return 0 ;; esac
+  have "$name" || return 0
+  "$name" env >/dev/null 2>&1
+}
+
 # macOS has no /dev/kvm. The equivalent capability — "does this machine have
 # hardware virtualization?" — is Apple's Hypervisor.framework, and the closest
 # thing to a probe is `sysctl kern.hv_support` (1 = supported). That backs the
@@ -294,6 +310,14 @@ runtime_preflight() { # runtime_preflight <engine>
     die "runtime '$rt' (Tier $tier) is not on PATH or registered with '$engine', so the box
      cannot start under it. Install and register the runtime with your engine, or remove the
      'runtime' directive from hardening.conf (and unset ISOPOD_RUNTIME) to run without it."
+  fi
+  # A present-but-incomplete install (binary without the VM artifacts) fails at
+  # boot with a cryptic engine error — surface it here instead. Warn rather than
+  # die: the probe is best-effort and the user chose this runtime explicitly.
+  if ! _runtime_healthy "$rt"; then
+    warn "runtime '$rt' is installed but cannot boot a VM ('$rt env' failed — its guest
+     kernel/image artifacts are likely missing). The box will likely fail to start; complete
+     the install (e.g. the kata images package) or pick another runtime."
   fi
   # A Tier 3 microVM needs hardware virtualization. On a native Linux host that is
   # /dev/kvm; a missing node means the run will almost certainly fail. Warn rather
@@ -365,6 +389,15 @@ resolve_runtime() { # resolve_runtime <engine> <container_opt 0|1>
     export ISOPOD_FORCE_CONTAINER=1
     return 0
   fi
+  # Apple `container` runs each box in its OWN VM (its own kernel) — that IS the
+  # isolation boundary. The OCI runtimes isopod selects here (kata/krun/runsc) are
+  # podman/docker concepts with no meaning for `container`, so always run plain:
+  # no runtime to pick, and the host-fingerprint masks it would gate are moot on a
+  # VM. build_run_args_container emits no --runtime/mask flags to match.
+  if [ "$engine" = container ]; then
+    export ISOPOD_FORCE_CONTAINER=1
+    return 0
+  fi
   explicit="$(active_runtime)"
   if [ "$container_opt" = 1 ]; then
     [ -n "$explicit" ] &&
@@ -385,6 +418,12 @@ resolve_runtime() { # resolve_runtime <engine> <container_opt 0|1>
     case "$rt" in '' | '#'*) continue ;; esac
     [ "$tier" = 3 ] || continue
     _runtime_runnable "$engine" "$rt" || continue
+    if ! _runtime_healthy "$rt"; then
+      warn "microVM runtime '$rt' is installed but cannot boot a VM ('$rt env' failed — its
+   guest kernel/image artifacts are likely missing). Skipping it for auto-selection; complete
+   the install or remove the binary to silence this."
+      continue
+    fi
     if [ "$net" = tsi ]; then
       tsi_only="${tsi_only:-$rt}" # remember it to explain the fallback below
       continue
