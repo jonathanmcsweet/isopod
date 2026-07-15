@@ -2,14 +2,16 @@
 
 [![CI](https://github.com/jonathanmcsweet/isopod/actions/workflows/ci.yml/badge.svg)](https://github.com/jonathanmcsweet/isopod/actions/workflows/ci.yml)
 
-`isopod` creates a sandbox with your code in it to safely develop with LLMs using [VSCodium](https://vscodium.com/) and friends.
+`isopod` creates a sandbox with your code in it to safely develop with LLMs with an IDE of your choice ([VSCodium](https://vscodium.com/) is recommended).
 
 <img width="1920" height="1080" alt="Screenshot From 2026-07-09 16-44-49" src="https://github.com/user-attachments/assets/5925e432-1f9c-4347-b289-54049c6be2f1" />
 
-## Includes 
-- IDE's server component and extensions limited to the container
-- hardening options using microVMs that limit hardware fingerprinting and security exploits
-- copying and exporting to your local host instead of binding to your personal folders
+## Key Features 
+- [VSCodium](https://vscodium.com/)'s server component and extensions are limited to the container
+- Hardening options to prevent hardware fingerprinting and security exploits
+- Copying and exporting to your local host instead of binding to your personal folders
+- MicroVMs and allow-lists when extra hardening is needed
+- Completely offline containers if desired
 
 ## Install
 
@@ -20,7 +22,7 @@ brew tap jonathanmcsweet/isopod
 brew install isopod          # or: brew install --HEAD isopod  (latest master)
 ```
 
-### install.sh (any Linux/macOS, no Homebrew)
+### install.sh (any Linux/macOS)
 
 ```sh
 ./install.sh            # per-user install, no sudo
@@ -32,6 +34,13 @@ brew install isopod          # or: brew install --HEAD isopod  (latest master)
 `install.sh` also drops in shell completions (best-effort) and points your editor
 at the `Open Remote – SSH` extension. Tab-completion covers subcommands, options,
 and your existing box names.
+
+### Manual installation
+
+Don't use Homebrew? Per-platform manual install steps (Fedora,
+immutable Fedora, Debian/Ubuntu, system-wide, macOS) and how to
+verify and update an install live in
+**[docs/installation-and-platform.md](docs/installation-and-platform.md)**.
 
 ## Quick start
 
@@ -55,6 +64,65 @@ isopod stop myproj
 isopod rm myproj                    # destroy container + its keys + ssh config entry
 ```
 
+## Requirements
+
+- Linux (primary) or macOS (via `podman machine` or Docker Desktop)
+- `bash` >= 4.4.
+- `podman` or `docker`
+- `ssh`, `ssh-keygen`, `ssh-keyscan` (the standard OpenSSH client tools)
+- An IDE
+  - VSCodium is recommended with the [Open Remote – SSH extension](https://open-vsx.org/extension/jeanp413/open-remote-ssh), on Open VSX).
+  - Cursor/Windsurf/VS Code ship their own Remote-SSH but have or may have telemetry that reveals information
+    about your host system
+
+
+## Getting work back out: `export` vs `fetch`
+
+Two ways out, for two situations: Both run over the box's SSH connection, so the box *must be running* as files are moved as a tar stream over SSH.
+
+- `isopod export <name> [dest]` copies the container's whole working tree (including its `.git`) to a fresh host directory. It will not write into an existing path so the export shape stays predictable.
+- `isopod fetch <name> [target-repo]` brings *only the committed git history* across (no file merges, no overwriting your working tree).
+
+  ```sh
+  cd ~/code/myproj          # an existing clone on your host
+  isopod fetch myproj        # target defaults to the current directory
+  ```
+
+  Under the hood it `git fetch`es straight from the container over its SSH remote. The container's branches appear as remote-tracking refs named `<name>/*` without touching your local branches. Check one out with:
+
+  ```sh
+  git switch -c fingerprint-hardening myproj/my-branch-name
+  ```
+
+  - `isopod fetch` finds the repo at the container's workspace automatically (or the single git subfolder inside it)
+  - pass `--path <in-container-repo>` if your layout is unusual.
+  - If the target isn't a git repo, it instead drops a `<name>.bundle` file and prints how to use it. Like `export`, it needs no network and no git remote.
+
+### Rewriting git logs
+  - `isopod remap <name> [target-repo]` helps for sandboxes that don't set a git identity, so commits made inside one carry whatever was configured there (often a throwaway `dev@<container>`)
+  - this maps them to your real name / email while preserving commit messages and author / committer dates:
+
+  ```sh
+  isopod remap myproj --name "Ada Lovelace" --email ada@example.com
+  ```
+
+  - Only commits matching the old identity are touched — pass `--old-email <e>` (and optionally `--old-name <n>`)
+  - Set it explicitly, or let it auto-detect from the still-running container
+  - The new identity defaults to your host `git config` (override with `--name`/`--email` or `ISOPOD_GIT_NAME`/`ISOPOD_GIT_EMAIL`)
+  - To remap several identities at once, list `old -> new` rules in `--remap-file <file>` (or `~/.config/isopod/remap`)
+  - The rewrite is scoped to the container's `<name>/*` refs, so *your own branches are never touched*
+  - The originals are snapshotted under `refs/remap-backup/` so you can undo.
+  - It uses [`git-filter-repo`](https://github.com/newren/git-filter-repo) when installed, otherwise a built-in `git fast-export`→`fast-import` rewrite that needs only core git plus `python3`.
+  - See **[docs/remap.md](docs/remap.md)** for the full details.
+
+## FAQ
+
+- Why so much emphasis on VSCodium? Because we can easily evaluate the code and extension security boundaries and verify that VSCodium does not scan your host device to pass of for telemetry or fingerprinting. Proprietary IDEs may be taking telemetry from your host device even though your code and AI agent are in the sandbox.
+- Will you be explicitly supporting other Open Source IDEs? Yes permitted I can reasonably verify they don't take telemetry and have boundaries around extensions that prevent them from taking telemetry off of your host device.
+- Why SSH instead of the Dev Containers extension? The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source `Open Remote – SSH` extension is mature, and the same container works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
+- Is my code safe from the AI vendor? Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs — that's how they work. Isopod limits the blast radius to the container's contents; it does not change what an agent does with those contents.
+Can two IDEs attach to the same container? Yes — it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
+
 ## The isolation model
 
 The container cannot see the host filesystem. Files cross the boundary in five ways:
@@ -65,14 +133,11 @@ The container cannot see the host filesystem. Files cross the boundary in five w
 4. `isopod fetch` git history copied back to your local machine
 5. `git push` to your remote server
 
-We have some mitigations for a snooping AI agent fingerprinting your host machine from the container. It sees the container's hostname, a generic Linux environment, and the container's network identity — and isopod masks the host-revealing `/proc`/`/sys` paths that common tools read (boot UUIDs, board model, and the `lsblk`/`lspci`/`ip` views — see [Fingerprint hardening](#fingerprint-hardening)). That closes the *common* read paths, not the whole `/sys` device tree; a sandboxed runtime closes the rest. Additional details:
+We have some mitigations for a snooping AI agent fingerprinting your host machine from the container. It sees the container's hostname, a generic Linux environment, and the container's network identity — and isopod masks the host-revealing `/proc`/`/sys` paths that common tools read (boot UUIDs, board model, and the `lsblk`/`lspci`/`ip` views — see [Fingerprint hardening](#fingerprint-hardening)). Additional details:
 
 - SSH is bound to `127.0.0.1` only and uses a dedicated per-container ed25519 keypair. The container's host key is pinned on first use (trust-on-first-use); if an already-pinned box ever presents a different key, isopod flags it. Password auth and root login are disabled in the container's sshd.
-- **SSH agent forwarding and X11 forwarding are explicitly disabled** in the generated config, so an agent inside the container cannot borrow your SSH agent to authenticate as you elsewhere.
+- SSH agent forwarding and X11 forwarding are explicitly disabled in the generated config, so an agent inside the container cannot borrow your SSH agent to authenticate as you elsewhere.
 - With rootless Podman (the recommended engine), even "root" inside the container is just your unprivileged user on the host, remapped.
-
-**To create an offline container** `ISOPOD_RUN_ARGS="--network=none" isopod create ...`
-
 
 ### What it does NOT protect against
 
@@ -156,55 +221,6 @@ isopod create other --secret NPM_TOKEN:/run/secrets/npmrc-token   # custom path
 
 Values live in the OS keychain (`security` on macOS, `secret-tool` on Linux; 0600-file fallback) and are streamed over the box's SSH channel into a memory-backed tmpfs. They never appear in image layers, container env, `inspect` output, `isopod export` tarballs, or `reconfigure` snapshots, and a stopped box holds no secrets (they're re-injected on `start`). Manage them with `isopod secret set|ls|rm`.
 
-## Requirements
-
-- Linux (primary), macOS (via `podman machine` or Docker Desktop), or Windows (via WSL2 — see [docs/installation-and-platform.md](docs/installation-and-platform.md#windows))
-- `bash` >= 4.4.
-- `podman` (recommended) or `docker`
-- `ssh`, `ssh-keygen`, `ssh-keyscan` (the standard OpenSSH client tools)
-- VSCodium with the **Open Remote – SSH** extension (`jeanp413.open-remote-ssh`, on Open VSX). `isopod code` installs it for you if missing. Cursor/Windsurf/VS Code ship their own Remote-SSH.
-
-Run `isopod doctor` to check your setup.
-
-### Manual installation
-
-Don't use Homebrew or `install.sh`? Per-platform manual install steps (Fedora,
-immutable Fedora, Debian/Ubuntu, system-wide, macOS, Windows/WSL2) and how to
-verify and update an install live in
-**[docs/installation-and-platform.md](docs/installation-and-platform.md)**.
-
-Every container also becomes a plain SSH host: `ssh isopod-myproj` works from any terminal, and any SSH-aware tool can use it.
-
-## Getting work back out: `export` vs `fetch`
-
-Two ways out, for two situations:
-
-Both run over the box's SSH connection, so the box must be **running** (`isopod start <name>` if not). They move files as a tar stream over SSH. `copy-in` (host → box) preserves timestamps, modes, and symlinks. `export` (box → host) preserves timestamps and symlinks but **sanitizes modes** — it treats the box's archive as untrusted, so it drops setuid/setgid bits and forces ownership to you (`--no-same-owner`, no `-p`), since a compromised box controls that stream.
-
-- **`isopod export <name> [dest]`** copies the container's whole working tree (including its `.git`) to a fresh host directory. It will not write into an existing path so the export shape stays predictable.
-- **`isopod fetch <name> [target-repo]`** brings only **committed git history** across, the clean way — no file merges, no overwriting your working tree:
-
-  ```sh
-  cd ~/code/myproj          # an existing clone on your host
-  isopod fetch myproj        # target defaults to the current directory
-  ```
-
-  Under the hood it `git fetch`es straight from the container over its SSH remote (the same dedicated key and pinned host key isopod already set up) — so the container's branches appear as **remote-tracking refs named `<name>/*`** without touching your local branches. Check one out with:
-
-  ```sh
-  git switch -c fingerprint-hardening myproj/fingerprint-hardening
-  ```
-
-  `isopod fetch` finds the repo at the container's workspace automatically (or the single git subfolder inside it); pass `--path <in-container-repo>` if your layout is unusual. If the target isn't a git repo, it instead drops a `<name>.bundle` file and prints how to use it (this fallback needs git ≥ 2.36 in the box — the default base has it). Like `export`, it needs no network and no git remote.
-
-
-  `isopod remap <name> [target-repo]` Pods don't set a git identity, so commits made inside one carry whatever was configured there (often a throwaway `dev@<container>`); this maps them to your real name/email while preserving commit messages and author/committer **dates**:
-
-  ```sh
-  isopod remap myproj --name "Ada Lovelace" --email ada@example.com
-  ```
-
-  Only commits matching the old identity are touched — pass `--old-email <e>` (and optionally `--old-name <n>`) to set it explicitly, or let it auto-detect from the still-running container. The new identity defaults to your host `git config` (override with `--name`/`--email` or `ISOPOD_GIT_NAME`/`ISOPOD_GIT_EMAIL`), so the common case is just `isopod remap myproj`. To remap several identities at once, list `old -> new` rules in `--remap-file <file>` (or `~/.config/isopod/remap`). The rewrite is scoped to the container's `<name>/*` refs, so **your own branches are never touched**, and the originals are snapshotted under `refs/remap-backup/` so you can undo. It uses [`git-filter-repo`](https://github.com/newren/git-filter-repo) when installed, otherwise a built-in `git fast-export`→`fast-import` rewrite that needs only **core git plus `python3`**. See **[docs/remap.md](docs/remap.md)** for the full details.
 
 ## Connecting each IDE
 
@@ -295,13 +311,7 @@ The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — and it's wri
 
 On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box.
 
-## FAQ
 
-**Why SSH instead of the Dev Containers extension?** The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source `Open Remote – SSH` extension is mature, and the same container works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
-
-**Is my code safe from the AI vendor?** Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs — that's how they work. Isopod limits the blast radius to the container's contents; it does not change what an agent does with those contents.
-
-**Can two IDEs attach to the same container?** Yes — it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
 
 ## Testing
 
