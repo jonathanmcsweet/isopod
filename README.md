@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/jonathanmcsweet/isopod/actions/workflows/ci.yml/badge.svg)](https://github.com/jonathanmcsweet/isopod/actions/workflows/ci.yml)
 
-`isopod` creates a sandbox with your code in it to safely develop with LLMs with an IDE of your choice ([VSCodium](https://vscodium.com/) is recommended).
+`isopod` creates a sandbox with your code in it to safely develop with LLMs using an IDE of your choice ([VSCodium](https://vscodium.com/) is recommended).
 
 <img width="1920" height="1080" alt="Screenshot From 2026-07-09 16-44-49" src="https://github.com/user-attachments/assets/5925e432-1f9c-4347-b289-54049c6be2f1" />
 
