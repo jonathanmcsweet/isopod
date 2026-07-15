@@ -117,11 +117,20 @@ Two ways out, for two situations: Both run over the box's SSH connection, so the
 
 ## FAQ
 
-- Why so much emphasis on VSCodium? Because we can easily evaluate the code and extension security boundaries and verify that VSCodium does not scan your host device to pass of for telemetry or fingerprinting. Proprietary IDEs may be taking telemetry from your host device even though your code and AI agent are in the sandbox.
-- Will you be explicitly supporting other Open Source IDEs? Yes permitted I can reasonably verify they don't take telemetry and have boundaries around extensions that prevent them from taking telemetry off of your host device.
-- Why SSH instead of the Dev Containers extension? The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source `Open Remote – SSH` extension is mature, and the same container works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
-- Is my code safe from the AI vendor? Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs — that's how they work. Isopod limits the blast radius to the container's contents; it does not change what an agent does with those contents.
-Can two IDEs attach to the same container? Yes — it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
+### Why so much emphasis on VSCodium?
+Because we can easily evaluate the code and extension security boundaries and verify that VSCodium does not scan your host device for information pass of for telemetry or fingerprinting, nor does it provide that information to installed extensions when used with a container or sandbox. Proprietary IDEs may be taking telemetry from your host device even though your code and AI agent are in an isopod container or sandbox.
+
+### Will you be explicitly supporting other Open Source IDEs?
+Yes permitted I can reasonably verify they don't take telemetry from the host device and have boundaries around extensions that prevent them from taking telemetry off of your host device.
+
+### Why SSH instead of the Dev Containers extension?
+The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source [Open Remote – SSH extension](https://open-vsx.org/extension/jeanp413/open-remote-ssh) is mature, and the same isopod container works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
+
+### Is my code safe from the AI vendor?
+Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs — that's how they work. Isopod limits the blast radius to the container's contents; it does not change what an agent does with those contents.
+
+### Can two IDEs attach to the same container?
+Yes — it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
 
 ## The isolation model
 
