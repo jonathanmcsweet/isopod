@@ -118,7 +118,7 @@ Two ways out, for two situations: Both run over the box's SSH connection, so the
 ## FAQ
 
 ### Why so much emphasis on VSCodium?
-Because we can easily evaluate the code and extension security boundaries and verify that VSCodium does not scan your host device for information pass of for telemetry or fingerprinting, nor does it provide that information to installed extensions when used with a container or sandbox. Proprietary IDEs may be taking telemetry from your host device even though your code and AI agent are in an isopod container or sandbox.
+Because I can reasonably evaluate the code and extension security boundaries and verify that VSCodium does not scan your host device for information to pass off for telemetry or fingerprinting. It also does not provide telemetry or host information to installed extensions when used with a container or sandbox. Proprietary IDEs may be taking telemetry from your host device even though your code and AI agent are in an isopod container or sandbox.
 
 ### Will you be explicitly supporting other Open Source IDEs?
 Yes permitted I can reasonably verify they don't take telemetry from the host device and have boundaries around extensions that prevent them from taking telemetry off of your host device.
