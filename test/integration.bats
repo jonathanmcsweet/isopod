@@ -577,6 +577,33 @@ EOF
   assert_stub_called "codium .*--folder-uri vscode-remote://ssh-remote\+isopod-demo/home/dev/workspace"
 }
 
+@test "code opens a new window so a running IDE cannot reuse another box's window" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  cat > "$STUB_DIR/codium" <<'EOF'
+#!/usr/bin/env bash
+echo "codium $*" >> "$STUB_LOG"
+exit 0
+EOF
+  chmod +x "$STUB_DIR/codium"
+  run "$ISOPOD_ROOT/isopod" code demo
+  assert_success
+  assert_stub_called "codium --new-window --folder-uri vscode-remote://ssh-remote\+isopod-demo"
+}
+
+@test "code --reuse-window drops --new-window" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  cat > "$STUB_DIR/codium" <<'EOF'
+#!/usr/bin/env bash
+echo "codium $*" >> "$STUB_LOG"
+exit 0
+EOF
+  chmod +x "$STUB_DIR/codium"
+  run "$ISOPOD_ROOT/isopod" code demo --reuse-window
+  assert_success
+  assert_stub_not_called "codium --new-window"
+  assert_stub_called "codium --folder-uri vscode-remote://ssh-remote\+isopod-demo"
+}
+
 @test "code auto-installs the open-remote-ssh extension if absent" {
   "$ISOPOD_ROOT/isopod" create demo --color teal
   cat > "$STUB_DIR/codium" <<'EOF'
