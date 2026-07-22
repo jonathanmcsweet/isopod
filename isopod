@@ -25,6 +25,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
 fi
 
 ISOPOD_VERSION="2.7.3"
+
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
 _resolve_script_dir() {
