@@ -116,7 +116,7 @@ The new identity defaults to your host `git config`. Identity resolution, multi-
 Because I can reasonably evaluate VSCodium's code and extension security boundaries: it doesn't scan your host device for telemetry or fingerprinting data, and it doesn't expose host information to extensions when connected to a container. Proprietary IDEs may still collect host telemetry even while your code and AI agent are sandboxed in an isopod container.
 
 ### Will you be explicitly supporting other open-source IDEs?
-Yes, provided I can reasonably verify they don't take telemetry from the host device and enforce boundaries that keep extensions from doing so either.
+Yes, provided I can reasonably verify they don't take telemetry from the host device and enforce boundaries that keep extensions from doing so also.
 
 ### Why SSH instead of the Dev Containers extension?
 The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source [Open Remote – SSH extension](https://open-vsx.org/extension/jeanp413/open-remote-ssh) is mature, and the same isopod container works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
@@ -137,7 +137,7 @@ The container cannot see the host filesystem. Files cross the boundary in five w
 4. `isopod fetch` git history copied back to your local machine
 5. `git push` to your remote server
 
-Copy-not-mount is an **integrity** control, not a confidentiality one. Nothing the agent writes reaches your host except through a transfer you invoke and can review — there is no live mount where it could plant git hooks, `Makefile` edits, or editor task files that your host tools would execute the next time you touch the directory. What you copy *in*, however, is fully readable by the agent; limiting where that can be sent is the job of [egress isolation](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list), not the copy model.
+Copy-not-mount is an integrity control, not a confidentiality one. Nothing the agent writes reaches your host except through a transfer you invoke and can review. There is no live mount where it could plant git hooks, `Makefile` edits, or editor task files that your host tools would execute the next time you touch the directory. What you copy *in*, however, is fully readable by the agent; limiting where that can be sent is the job of [egress isolation](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list), not the copy model.
 
 We have some mitigations for a snooping AI agent fingerprinting your host machine from the container. It sees the container's hostname, a generic Linux environment, and the container's network identity — and isopod masks the host-revealing `/proc`/`/sys` paths that common tools read (boot UUIDs, board model, and the `lsblk`/`lspci`/`ip` views — see [Fingerprint hardening](#fingerprint-hardening)). Additional details:
 
