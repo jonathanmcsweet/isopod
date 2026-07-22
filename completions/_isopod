@@ -48,8 +48,8 @@ _isopod() {
       case $words[1] in
         create)
           _arguments \
-            '--repo[git repo to clone inside the box]:url:' \
-            '--branch[branch to clone]:branch:' \
+            '*--repo[git repo to clone into the box (repeatable)]:url:' \
+            '--branch[branch to clone, applies to every --repo]:branch:' \
             '*--copy[host folder/file to copy in]:path:_files' \
             '--color[window tint preset or #rrggbb]:color:(red orange amber green teal blue purple magenta gray)' \
             '--image[base image]:image:' \

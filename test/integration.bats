@@ -517,7 +517,23 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
 @test "create with --repo clones inside the box over ssh" {
   run "$ISOPOD_ROOT/isopod" create demo --repo https://example.com/r.git --color blue
   assert_success
-  assert_stub_called "ssh .*git clone"
+  # Always-subfolder: a single repo lands in $WORKSPACE/<name>, not at the root.
+  assert_stub_called "ssh .*git clone https://example.com/r.git .*/workspace/r"
+}
+
+@test "create with multiple --repo clones each into its own subfolder" {
+  run "$ISOPOD_ROOT/isopod" create demo \
+    --repo https://example.com/api.git --repo https://example.com/web.git --color blue
+  assert_success
+  assert_stub_called "ssh .*git clone https://example.com/api.git .*/workspace/api"
+  assert_stub_called "ssh .*git clone https://example.com/web.git .*/workspace/web"
+}
+
+@test "create refuses two --repo values that map to the same folder" {
+  run "$ISOPOD_ROOT/isopod" create demo \
+    --repo https://example.com/api.git --repo git@other:api.git --color blue
+  assert_failure
+  assert_output --partial "same folder 'api'"
 }
 
 @test "create refuses to overwrite an existing box" {

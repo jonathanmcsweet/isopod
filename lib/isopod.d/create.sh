@@ -5,10 +5,10 @@
 # commands
 # ---------------------------------------------------------------------------
 cmd_create() {
-  local name="" repo="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
+  local name="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
   local container_opt=0 dev_tools=0 harden_opt=""
-  local -a copies=() exposes=() secrets=()
+  local -a repos=() copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
     # accept --opt=value as an alias for --opt value (e.g. --copy=path)
@@ -17,7 +17,7 @@ cmd_create() {
     esac
     case "$1" in
       --repo)
-        repo="$2"
+        repos+=("$2")
         shift 2
         ;;
       --branch)
@@ -114,8 +114,23 @@ cmd_create() {
   fi
   [ -n "$memory" ] && { valid_memory "$memory" || die "invalid --memory '$memory' (e.g. 512m, 2g)"; }
   [ -n "$cpus" ] && { valid_cpus "$cpus" || die "invalid --cpus '$cpus' (a positive number, e.g. 1 or 1.5)"; }
-  if [ -n "$repo" ] && [ "${#copies[@]}" -gt 0 ]; then
+  if [ "${#repos[@]}" -gt 0 ] && [ "${#copies[@]}" -gt 0 ]; then
     die "use either --repo or --copy, not both (you can 'isopod copy-in' later)"
+  fi
+  # Resolve each --repo to its workspace subfolder now and reject collisions,
+  # so a bad set fails before the container is created (not half-populated).
+  local -a repo_subs=()
+  if [ "${#repos[@]}" -gt 0 ]; then
+    local _u _sub _s
+    for _u in "${repos[@]}"; do
+      _sub=$(repo_subdir "$_u") ||
+        die "could not derive a folder name from repo URL: $_u"
+      for _s in "${repo_subs[@]:-}"; do
+        [ "$_s" = "$_sub" ] &&
+          die "two --repo values map to the same folder '$_sub' — clone one in by hand under a different name"
+      done
+      repo_subs+=("$_sub")
+    done
   fi
   if [ -n "$dockerfile_opt" ] && [ "$image_opt" -eq 1 ]; then
     die "use either --image or --dockerfile, not both"
@@ -268,15 +283,24 @@ cmd_create() {
   # Stream secrets into the tmpfs before any clone, so e.g. a token at a
   # /run/secrets path is usable by follow-up setup inside the box.
   inject_secrets "$name"
-  if [ -n "$repo" ]; then
-    info "Cloning $repo inside the box..."
-    local -a clone=(git clone)
-    [ -n "$branch" ] && clone+=(--branch "$branch")
-    clone+=("$repo" "$WORKSPACE")
-    box_ssh "$name" -- "${clone[@]}" ||
-      warn "git clone failed inside the box — the sandbox was still created.
-         Fix and retry from inside:  isopod shell $name   then: git clone ... $WORKSPACE
+  if [ "${#repos[@]}" -gt 0 ]; then
+    # Each repo clones into its own subfolder ($WORKSPACE/<name>), so a box can
+    # hold more than one repo and any SSH-capable IDE sees them all as folders.
+    # repo_subs[] was resolved and collision-checked during validation above.
+    local url sub i
+    local -a clone
+    for i in "${!repos[@]}"; do
+      url="${repos[$i]}"
+      sub="${repo_subs[$i]}"
+      info "Cloning $url -> $WORKSPACE/$sub inside the box..."
+      clone=(git clone)
+      [ -n "$branch" ] && clone+=(--branch "$branch")
+      clone+=("$url" "$WORKSPACE/$sub")
+      box_ssh "$name" -- "${clone[@]}" ||
+        warn "git clone failed inside the box — the sandbox was still created.
+         Fix and retry from inside:  isopod shell $name   then: git clone $url $WORKSPACE/$sub
          (private repo? use an https token URL, or copy a deploy key in with copy-in)"
+    done
   elif [ "${#copies[@]}" -gt 0 ]; then
     do_copy_in "$name" "${copies[@]}"
   fi
@@ -296,6 +320,18 @@ cmd_create() {
   # State the kernel-hardening posture too (its guest-sysctl arm only applies to
   # microVM boxes), so what the box actually got is legible at create time.
   harden_posture_note "$BOX_HARDEN"
+}
+
+repo_subdir() { # repo_subdir <url> — print the workspace subfolder name for a repo URL
+  # Last path segment, with any trailing slash, ".git" suffix, or scp-style
+  # "host:" prefix removed (git@host:org/repo.git -> repo, https://h/me/proj ->
+  # proj). Prints nothing and fails when the result would be empty.
+  local b="${1%/}"
+  b="${b##*/}" # basename after the last '/'
+  b="${b##*:}" # scp-style git@host:repo carries no '/'
+  b="${b%.git}"
+  [ -n "$b" ] || return 1
+  printf '%s' "$b"
 }
 
 do_copy_in() { # do_copy_in <name> <path>...

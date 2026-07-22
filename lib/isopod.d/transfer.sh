@@ -72,15 +72,24 @@ cmd_fetch() {
 
   # Locate the git repo inside the box: $WORKSPACE itself, or — if the workspace
   # holds a single git subfolder (e.g. a repo cloned into a named dir) — that one.
-  # lib/find_box_repo.sh runs the probe; stream it into the box over SSH (sh -s
-  # reads it from stdin, so the remote shell never re-parses it) and pass
-  # $WORKSPACE in as an env var the box expands.
+  # A box may hold more than one repo (multiple --repo clones), so when the
+  # choice is ambiguous we list the repos and ask for --path. lib/find_box_repo.sh
+  # runs the probe; stream it into the box over SSH (sh -s reads it from stdin, so
+  # the remote shell never re-parses it) and pass $WORKSPACE in as an env var.
   local repo="$inbox_path"
   if [ -z "$repo" ]; then
     local finder="$ISOPOD_LIB/find_box_repo.sh"
     [ -f "$finder" ] || die "missing helper: $finder (is your isopod install complete?)"
-    repo=$(box_ssh "$name" -- WORKSPACE="$WORKSPACE" sh -s 2>/dev/null <"$finder") ||
+    repo=$(box_ssh "$name" -- WORKSPACE="$WORKSPACE" sh -s 2>/dev/null <"$finder") || repo=""
+    if [ -z "$repo" ]; then
+      # No repo, or more than one — enumerate what's there so the user can pick.
+      local repolist
+      repolist=$(box_ssh "$name" -- WORKSPACE="$WORKSPACE" LIST_ALL=1 sh -s 2>/dev/null <"$finder") || repolist=""
+      [ -n "$repolist" ] &&
+        die "more than one repo in the box under $WORKSPACE — pick one with --path <in-box-repo>:
+$(printf '%s\n' "$repolist" | sed 's/^/    /')"
       die "no git repo found in the box under $WORKSPACE — pass --path <in-box-repo>"
+    fi
   fi
 
   if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
