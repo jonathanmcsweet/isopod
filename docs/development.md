@@ -29,7 +29,7 @@ toolchain required). Tool versions are pinned in
 
 | Tool | Role | Scope | Stage |
 |------|------|-------|-------|
-| ShellCheck (`-S warning`) | static analysis / linting | `isopod`, `install.sh`, `verify-host-isolation.sh`, `test/*.sh` | commit |
+| ShellCheck (`-S warning`) | static analysis / linting | `isopod`, `lib/isopod.d/*.sh`, `share/isopod-entrypoint`, `lib/find_box_repo.sh`, `install.sh`, `verify-host-isolation.sh`, `test/{run,packaging,egress-render,brew-formula}.sh` | commit |
 | shfmt (`-i 2 -ci`) | formatting | the above + `test/helper.bash`, `completions/isopod.bash` | commit |
 | actionlint | lint GitHub Actions workflows | `.github/workflows/*` | commit |
 

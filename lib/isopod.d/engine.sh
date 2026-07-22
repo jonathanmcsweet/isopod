@@ -26,7 +26,7 @@ detect_engine() {
   # Apple `container` has no `info`; its liveness is `container system status`.
   if ! engine_healthcheck "$ENGINE"; then
     case "$ENGINE" in
-      podman) die "podman is installed but not working. On macOS/Windows run: podman machine init && podman machine start" ;;
+      podman) die "podman is installed but not working. On macOS run: podman machine init && podman machine start" ;;
       docker) die "docker is installed but the daemon is not reachable. Start Docker (or Docker Desktop) and retry." ;;
       container) die "Apple 'container' is installed but its service is not running. Start it: container system start" ;;
       *) die "engine '$ENGINE' is not responding." ;;

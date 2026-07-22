@@ -130,7 +130,7 @@ doctor_virt_linux() {
     if [ -n "$mvm" ]; then
       printf '  [ok]      /dev/kvm present — Tier 3 microVM runtimes detected: %s\n' "$mvm"
       case " $mvm " in
-        *" krun "*) printf '  [note]    krun is fine for `isopod shell`/copy/export, but its TSI networking stalls\n            SSH port-forwards, so `isopod code` (Remote-SSH) fails — use kata for the IDE\n' ;;
+        *" krun "*) printf '  [note]    isopod runs krun with passt (krun.use_passt=1), so `isopod code` works;\n            kata is selected first when both are installed\n' ;;
       esac
     else
       printf '  [ok]      /dev/kvm present — Tier 3 microVM ready; install kata (crun-vm cannot boot isopod images)\n'

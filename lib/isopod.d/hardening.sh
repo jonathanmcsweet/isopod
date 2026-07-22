@@ -321,8 +321,8 @@ runtime_preflight() { # runtime_preflight <engine>
   fi
   # A Tier 3 microVM needs hardware virtualization. On a native Linux host that is
   # /dev/kvm; a missing node means the run will almost certainly fail. Warn rather
-  # than die: on macOS/Windows the engine runs in its own VM (libkrun uses HVF /
-  # Hyper-V there), so a host /dev/kvm check would be a false negative.
+  # than die: on macOS the engine runs in its own VM (libkrun uses HVF there),
+  # so a host /dev/kvm check would be a false negative.
   if [ "$tier" = 3 ] && [ "$(uname -s)" = Linux ] && [ ! -e /dev/kvm ]; then
     warn "microVM runtime '$rt' needs hardware virtualization but /dev/kvm is absent on this host.
      The box will likely fail to start. Enable KVM (or nested virt), or switch to a Tier 2

@@ -153,9 +153,10 @@ refresh_port() { # refresh stored port + ssh config if the mapping changed
 # (at create) is trusted blindly. A box's key is fixed at first boot and persists
 # across start/stop/reconfigure, and a recreated box gets a fresh box dir (hence
 # an empty known_hosts), so an already-pinned box should never present a
-# different key. If one does, warn loudly instead of silently re-pinning — that
-# is the honest signal that the loopback port may have been taken over. isopod
-# still adopts the new key so the tool keeps working; the warning is the alert.
+# different key. If one does, fail closed (refuse to connect) instead of
+# silently re-pinning — that is the honest signal that the loopback port may
+# have been taken over. ISOPOD_ACCEPT_NEW_HOSTKEY=1 opts back into adopting the
+# new key for a deliberate out-of-band rebuild.
 scan_host_key() { # scan_host_key <name>
   local name="$1" host port kh tmp tries=0 max="${ISOPOD_SSH_WAIT_TRIES:-30}"
   kh="$(box_dir "$name")/known_hosts"
