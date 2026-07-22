@@ -346,7 +346,7 @@ flatpak_access_hint() { # flatpak_access_hint <app-id>
 }
 
 cmd_code() {
-  local name="" app="codium"
+  local name="" app="codium" new_window=1
   while [ $# -gt 0 ]; do
     # accept --opt=value as an alias for --opt value (e.g. --app=cursor)
     case "$1" in
@@ -357,6 +357,10 @@ cmd_code() {
         app="$2"
         shift 2
         ;;
+      --reuse-window)
+        new_window=0
+        shift
+        ;;
       -*) die "unknown option: $1" ;;
       *)
         name="$1"
@@ -364,7 +368,8 @@ cmd_code() {
         ;;
     esac
   done
-  [ -n "$name" ] || die "usage: isopod code <name> [--app codium|cursor|windsurf|code]"
+  [ -n "$name" ] ||
+    die "usage: isopod code <name> [--app codium|cursor|windsurf|code] [--reuse-window]"
   open_box "$name"
   acquire_lock # may start the box and refresh the shared ssh_config
 
@@ -392,13 +397,21 @@ Flatpak users: 'flatpak list | grep -i ${app}' to confirm the app ID is installe
   fi
 
   local uri ide_log
+  local -a ide_args=()
   uri="vscode-remote://ssh-remote+$(ctr_name "$name")$WORKSPACE"
   ide_log="$(box_dir "$name")/ide-launch.log"
+  # VS Code and its forks are single-instance: without --new-window a second
+  # launch hands the URI to the already-running process, which may reuse the
+  # window of another box (or open nothing at all if that instance is stuck).
+  [ "$new_window" -eq 1 ] && ide_args+=(--new-window)
+  ide_args+=(--folder-uri "$uri")
   info "Opening $app -> $uri"
   # Capture the IDE's own output to a per-box log rather than /dev/null, so a
   # silent launch failure is at least inspectable afterwards.
-  "${IDE_CMD[@]}" --folder-uri "$uri" >"$ide_log" 2>&1 &
+  "${IDE_CMD[@]}" "${ide_args[@]}" >"$ide_log" 2>&1 &
   disown || true
-  info "(if the window doesn't open, check the launch log: $ide_log)"
+  info "(if the window doesn't open, check the launch log: $ide_log — an IDE
+       process that is already running but not responding will swallow the
+       request; quit it and retry)"
   render_tmpl code-note.txt
 }

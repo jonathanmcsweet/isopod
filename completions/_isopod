@@ -65,6 +65,7 @@ _isopod() {
         code)
           _arguments \
             '--app[IDE to launch]:app:(codium vscodium cursor windsurf code)' \
+            '--reuse-window[reuse an open IDE window instead of opening a new one]' \
             '1:sandbox:_isopod_boxes'
           ;;
         rm)
