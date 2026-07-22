@@ -4,7 +4,7 @@ Usage:
   isopod create <name> [options]      Create and start a new sandbox
   isopod list                         List sandboxes and their status
   isopod info <name>                  Show connection details for a sandbox
-  isopod code <name> [--app APP]      Open the sandbox in VSCodium (or APP)
+  isopod code <name> [--app APP]      Open the sandbox in a new VSCodium window (or APP)
   isopod shell <name> [-- cmd...]     Open a shell (or run cmd) inside the sandbox
   isopod start <name>                 Start a stopped sandbox
   isopod stop <name>                  Stop a running sandbox
@@ -89,6 +89,14 @@ Options for reconfigure (or edit config.yaml; each accepts '--opt value' and '--
   --memory <size>       New memory limit, e.g. 8g (blank clears it)
   --cpus <n>            New CPU limit, e.g. 4 (blank clears it)
   --color <preset|hex>  Re-tint the IDE window
+
+Options for code (each accepts both '--opt value' and '--opt=value'):
+  --app <name>          IDE to launch: codium (default), vscodium, cursor,
+                        windsurf, code
+  --reuse-window        Reuse an already-open IDE window instead of opening a
+                        new one. These editors are single-instance, so without
+                        this flag isopod passes --new-window to keep each box
+                        in its own window.
 
 Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--opt=value'):
   --name <new name>     New author/committer name to write. Defaults to
