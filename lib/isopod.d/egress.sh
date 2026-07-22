@@ -207,8 +207,7 @@ egress_rules_loaded() {
 #         CONTAINER ESCAPE away — weaker than pf. Used when pf can't be scoped.
 #
 # The allow-list's filtering proxy is a Linux systemd service on either backend,
-# so on macOS both enforce lan-deny only (see egress_apply). Windows/WSL users run
-# isopod inside the Linux side and take the native Linux path above.
+# so on macOS both enforce lan-deny only (see egress_apply).
 #
 # NOTE: the Linux host path is covered by CI; both macOS paths (podman-machine ssh,
 # and pfctl) have NOT been exercised from CI (no macOS runner) — validate on a real

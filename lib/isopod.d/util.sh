@@ -19,9 +19,9 @@ die() {
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Host OS family isopod is running ON — NOT where boxes run. On macOS (and
-# Windows/WSL) the container engine runs boxes inside its own Linux VM (podman
-# machine / Docker Desktop), so the host that runs the `isopod` script and the
+# Host OS family isopod is running ON — NOT where boxes run. On macOS the
+# container engine runs boxes inside its own Linux VM (podman machine / Docker
+# Desktop), so the host that runs the `isopod` script and the
 # host whose kernel/firewall backs the boxes are two different machines. Egress
 # enforcement (nftables) and Tier-3 virtualization (/dev/kvm) live in that VM,
 # not on the Mac — several callers branch on this. Echoes: linux | macos | other.
@@ -77,7 +77,7 @@ ${body}EOF"
 # generated ssh_config and per-box meta files), so two concurrent invocations
 # can't corrupt them or pick colliding ports/colors. We use an atomic `mkdir`
 # rather than flock(1) because mkdir is atomic on every platform isopod runs on
-# (Linux, macOS, Windows/WSL). A lock left behind by a crashed process is
+# (Linux, macOS). A lock left behind by a crashed process is
 # reclaimed via a POSIX `kill -0` liveness check.
 LOCK_DIR=""
 acquire_lock() {

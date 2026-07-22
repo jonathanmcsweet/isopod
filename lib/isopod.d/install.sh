@@ -63,8 +63,8 @@ cmd_install() {
   # channel — the package must be baked at build time instead.
   if ! "$ENGINE" exec --user root "$ctr" true 2>/dev/null; then
     die "cannot run a privileged install in '$name' — the engine can't exec as root here
-     (a microVM runtime, or an otherwise incompatible box). Add the package at build time:
-       recreate with --dockerfile <file> (or --dev), or 'isopod reconfigure $name --dockerfile <file>'."
+     (a microVM runtime, or an otherwise incompatible box). Add the package at build time
+     instead: recreate the box with 'isopod create ... --dockerfile <file>' (or --dev)."
   fi
 
   local mgr

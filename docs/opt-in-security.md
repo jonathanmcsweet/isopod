@@ -48,8 +48,8 @@ or container escape is contained by the VM. Enable it through the **same**
   `ISOPOD_RUNTIME=kata isopod create …` — the supported Tier 3 microVM; the default
   when installed, and it works with VSCodium Remote-SSH (`isopod code`).
 - **krun** (libkrun, Podman-native): `ISOPOD_RUNTIME=krun isopod create …` — the
-  lightest microVM, but its TSI networking breaks `isopod code` (see below), so it
-  is never auto-selected and is only for `isopod shell`/copy/export.
+  lightest microVM. isopod runs it with passt (`krun.use_passt=1`) so `isopod
+  code` works (see the note below); auto-selected when kata is not installed.
 
 > **crun-vm is not usable with isopod.** It boots VM disk images (a containerdisk,
 > a `--rootfs` disk image, or a bootc container), not the plain OCI container image
@@ -79,12 +79,12 @@ distro — doctor is the check that it's wired up.
 handler backed by [libkrun](https://github.com/containers/libkrun), so it's
 Podman-native):
 
-> **⚠ krun breaks `isopod code`.** libkrun's TSI networking stalls bulk data over
-> the SSH port-forward the IDE's remote server needs (upstream bugs
+> **Why passt?** libkrun's *default* TSI networking stalls bulk data over the SSH
+> port-forward the IDE's remote server needs (upstream bugs
 > [libkrun#579](https://github.com/libkrun/libkrun/issues/579) and
 > [#510](https://github.com/libkrun/libkrun/issues/510)), so VSCodium/Cursor/
-> JetBrains fail to connect (WebSocket 1006). isopod never auto-selects krun; use
-> it only for `isopod shell`/copy/export, or use **Kata** for the IDE.
+> JetBrains would fail to connect (WebSocket 1006). isopod therefore always adds
+> `krun.use_passt=1`, giving the guest a real virtio-net stack.
 
 Fedora example (more distros to come):
 ```sh
@@ -120,9 +120,9 @@ krun).
 
 When a Tier 3 runtime is active and you pass no `--memory`, isopod sizes the
 guest with a default (2g; override with `--memory` or `ISOPOD_MICROVM_MEMORY`),
-since a microVM boots a fixed-size guest. The Tier 1 fingerprint masks become
-largely redundant under a microVM — the guest has its own `/proc` and `/sys`, so
-they are left on but cost nothing.
+since a microVM boots a fixed-size guest. isopod skips the Tier 1 fingerprint
+masks under a microVM — the guest has its own `/proc` and `/sys`, so there is no
+host data there to mask.
 
 ### Tuning the guest (krun annotations)
 
@@ -156,20 +156,23 @@ engine VM), there are a few routes on macOS, and `isopod doctor` reports which y
 Mac can use:
 
 1. **Apple `container` — a native per-box VM (recommended; any Apple Silicon).**
-   Apple's [`container`](https://github.com/apple/container) It is a macOS-native engine
-   (not a Linux port), and each box gets a routable per-box vmnet subnet the host pf
-   egress backend already scopes to, so a box that escapes its VM still can't flush the
-   firewall without root on your Mac. This is the intended "Tier 3 for macOS."
+   [`container`](https://github.com/apple/container) is a macOS-native engine
+   (not a Linux port). Each box gets a routable per-box vmnet subnet the host pf
+   egress backend already scopes to, so a box that escapes its VM still can't
+   flush the firewall without root on your Mac. This is the intended "Tier 3
+   for macOS," and isopod's box lifecycle (create/code/shell/start/stop/rm) is
+   wired to it — `reconfigure` is the one unsupported operation (the engine has
+   no image-commit primitive). See [docs/macos-host-egress.md](macos-host-egress.md).
 
-3. **Nested `krun`/`kata` inside the engine VM (needs Apple M3+/macOS 15).** Apple
-   exposes nested virtualization only on M3 or later chips running macOS
-   15+. Doctor tells you when your chip/OS qualifies and marks it experimental. On other
-   Macs the engine VM stays the boundary.
+2. **Nested `krun`/`kata` inside the engine VM (needs Apple M3+/macOS 15).**
+   Apple exposes nested virtualization only on M3 or later chips running macOS
+   15+. `isopod doctor` tells you when your chip/OS qualifies and marks it
+   experimental. On other Macs the engine VM stays the boundary.
 
-5. **krunvm (fallback).** [krunvm](https://github.com/containers/krunvm) also boots an
-   OCI image as its own microVM on Hypervisor.framework, but it is Linux-oriented and
-   not well tested on macOS, so it is a fallback rather than the recommended path.
-   `isopod doctor` notes it if `brew install krunvm` has made it available.
+3. **krunvm (not integrated).** [krunvm](https://github.com/containers/krunvm)
+   also boots an OCI image as its own microVM on Hypervisor.framework, but it
+   is Linux-oriented, not well tested on macOS, and isopod does not wire it up
+   as an engine — mentioned here only as a route that exists upstream.
 
 ## Network egress isolation (`egress lan-deny`)
 - a dedicated bridge network (`isopod0`, fixed subnet) the firewall can target;
@@ -245,9 +248,11 @@ the VM (which has systemd) is the natural follow-up.
 >   to the pf backend.
 >
 > The Apple `container` engine (per-box VM + vmnet subnet) is the intended home for
-> the pf backend and is detected by `isopod doctor`; its box lifecycle integration
-> is experimental. See **[docs/macos-host-egress.md](macos-host-egress.md)** and
-> validate with `test/macos-egress-check.sh`.
+> the pf backend and is detected by `isopod doctor`; its box lifecycle
+> (create/code/shell/start/stop/rm) is wired up, though still labeled
+> experimental since there's no macOS CI runner to exercise it automatically.
+> See **[docs/macos-host-egress.md](macos-host-egress.md)** and validate with
+> `test/macos-egress-check.sh`.
 
 **Fails closed.** If a box is configured for `egress lan-deny` but the host firewall
 is not loaded, `isopod create` (and `reconfigure`) **refuse**, rather than starting a
@@ -365,5 +370,4 @@ rules, the systemd unit is what keeps the proxy up across reboots; re-run
   `systemd` service (`tinyproxy`), which is not ported to macOS. On macOS `isopod
   egress apply` falls back to `lan-deny` (loaded inside the `podman machine` VM),
   and an *explicit* `egress allow-list` fails closed with a steer to `lan-deny`
-  rather than silently starting a box the proxy isn't filtering. There is no
-  Windows-native path (run isopod inside WSL2).
+  rather than silently starting a box the proxy isn't filtering.
