@@ -6,76 +6,38 @@ the project overview, see the [README](../README.md).
 
 ## Manual installation
 
-### Fedora
+### Linux, per-user (recommended; no sudo)
+
+The same steps work on every supported distro:
 
 ```sh
-# Per-user (recommended; no sudo)
 mkdir -p ~/.local/share ~/.local/bin
 cp -r ./isopod-project ~/.local/share/isopod
 chmod +x ~/.local/share/isopod/isopod
 ln -sf ~/.local/share/isopod/isopod ~/.local/bin/isopod
-
-# Fedora already includes ~/.local/bin on PATH for login shells. If `isopod`
-# isn't found, add this to ~/.bashrc:  export PATH="$HOME/.local/bin:$PATH"
-
-sudo dnf install -y podman openssh-clients   # runtime prerequisites
-isopod doctor
 ```
 
-### Immutable Fedora (Silverblue / Kinoite / Universal Blue / Bazzite)
+Then install the runtime prerequisites and check the result with `isopod doctor`:
 
-On the atomic/immutable Fedora desktops, `/usr` is read-only — but the places
-you'd install to are still writable, so isopod installs cleanly *without* layering
-anything or rebooting:
+- **Fedora:** `sudo dnf install -y podman openssh-clients`. `~/.local/bin` is
+  already on `PATH` for login shells; if `isopod` isn't found, add
+  `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`.
+- **Debian / Ubuntu:** `sudo apt update && sudo apt install -y podman openssh-client`.
+  `~/.local/bin` is on `PATH` only if it existed at login — log out and back in,
+  or run `export PATH="$HOME/.local/bin:$PATH"` (and add the same line to `~/.bashrc`).
+- **Immutable Fedora (Silverblue / Kinoite / Universal Blue / Bazzite):** the
+  per-user steps above work unchanged, with no layering and no reboot — `$HOME`
+  is a symlink to the always-writable `/var/home`, and `~/.local/bin` is already
+  on `PATH`. Podman ships on these images; if it's somehow missing, layer it with
+  `rpm-ostree install podman` (that one does need a reboot). **Install isopod on
+  the host, not inside a Toolbx/Distrobox** — isopod orchestrates *host*
+  containers via the host's podman, which a toolbox can't reach. (`install.sh`
+  detects immutable Fedora and, if it can't find podman or docker either, prints
+  this same warning.) For system-wide installs, `/usr/local` and `/opt` are
+  symlinks into the writable `/var`, so the steps below also work without
+  touching the immutable image.
 
-- `$HOME` is a symlink to `/var/home` and is fully writable, so the per-user
-  layout (`~/.local/share` + `~/.local/bin`) is the recommended path and works
-  exactly as on regular Fedora.
-- `/usr/local` and `/opt` are symlinks into the always-writable `/var`, so a
-  "system-wide" install there also works without touching the immutable image.
-
-```sh
-# Per-user (recommended) — identical to regular Fedora, no sudo, no reboot
-mkdir -p ~/.local/share ~/.local/bin
-cp -r ./isopod-project ~/.local/share/isopod
-chmod +x ~/.local/share/isopod/isopod
-ln -sf ~/.local/share/isopod/isopod ~/.local/bin/isopod
-# (~/.local/bin is already on PATH on the Fedora atomic desktops)
-
-isopod doctor
-```
-
-Two things specific to immutable Fedora worth knowing:
-
-- **Podman is already on the host** on these images, which is exactly what isopod
-  needs. If for some reason it's missing, layer it with
-  `rpm-ostree install podman` (this one does need a reboot). 
-
-- **Install isopod on the host, not inside a Toolbx/Distrobox.** It's tempting to
-  put CLI tools in a toolbox on these systems, but isopod orchestrates *host*
-  containers via the host's podman — from inside a toolbox it can't reach that
-  podman, and your sandboxes would be nested containers. The commands above
-  install to the host's `~/.local`, which is correct. (The `install.sh` script
-  detects immutable Fedora and prints this same warning.)
-
-### Debian / Ubuntu
-
-```sh
-# Per-user (recommended; no sudo)
-mkdir -p ~/.local/share ~/.local/bin
-cp -r ./isopod-project ~/.local/share/isopod
-chmod +x ~/.local/share/isopod/isopod
-ln -sf ~/.local/share/isopod/isopod ~/.local/bin/isopod
-
-# On Debian/Ubuntu, ~/.local/bin is on PATH only if it existed at login.
-# If `isopod` isn't found after install, either log out and back in, or run:
-export PATH="$HOME/.local/bin:$PATH"        # and add the same line to ~/.bashrc
-
-sudo apt update && sudo apt install -y podman openssh-client
-isopod doctor
-```
-
-System-wide on any of the above (all users, needs sudo):
+### Linux, system-wide (all users, needs sudo)
 
 ```sh
 sudo cp -r ./isopod-project /usr/local/lib/isopod
@@ -107,22 +69,13 @@ isopod doctor
 
 No Homebrew? Use the per-user layout instead: `cp -r ./isopod-project ~/.local/share/isopod`, symlink into `~/.local/bin`, and add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` (macOS defaults to zsh).
 
-### Windows
-
-Run isopod **inside WSL2** — it's a bash tool and Podman/Docker live in the Linux side. From a WSL2 Ubuntu shell, follow the Ubuntu/Debian instructions above. Then, to drive it from VSCodium:
-
-- **Simplest:** run VSCodium *inside* WSL via WSLg.
-- **VSCodium on Windows:** WSL2 forwards `127.0.0.1` ports to Windows, so copy the generated `Host isopod-<name>` block from `~/.config/isopod/ssh_config` (in WSL) into `C:\Users\<you>\.ssh\config`, adjusting the `IdentityFile` / `UserKnownHostsFile` paths to a Windows-accessible copy of those files.
-
-(There's no native PowerShell port; WSL2 is the supported path.)
-
 ### Verifying and updating
 
 `isopod doctor` checks for podman/docker, the SSH client tools, and any installed IDEs. To update later, replace the program directory (e.g. `~/.local/share/isopod`) with the new version — the symlink keeps working untouched. To uninstall, remove that directory and the symlink; your containers' state under `~/.config/isopod` is separate and can be cleaned up with `isopod rm` first.
 
 ## Window colors
 
-`--color` accepts a preset (`red orange amber green teal blue purple magenta gray`) or any `#rrggbb` hex. Without it, colors auto-rotate so consecutive containers differ. The script writes `workbench.colorCustomizations` (title bar, status bar, activity bar, plus a `[containername]` window title) into `.vscode/settings.json` *inside the container's workspace*. Because the setting lives in the container, every IDE window attached to that container is tinted, and your local windows are untouched.
+`--color` accepts a preset (`red orange amber green teal blue purple magenta gray`) or any `#rrggbb` hex. Without it, isopod derives a preset deterministically from a hash of the box's name — the same name always gets the same color, and it's unaffected by other boxes being created or deleted (with 9 presets, two names can still land on the same one). The script writes `workbench.colorCustomizations` (title bar, status bar, activity bar, plus a `[containername]` window title) into `.vscode/settings.json` *inside the container's workspace*. Because the setting lives in the container, every IDE window attached to that container is tinted, and your local windows are untouched.
 
 ## Platform notes
 
@@ -135,14 +88,9 @@ flatpak override --user --filesystem=$HOME/.ssh:ro \
   --filesystem=$HOME/.config/isopod:ro com.vscodium.codium
 ```
 
-**macOS.** Containers run inside the `podman machine` (or Docker Desktop) Linux VM — which is a *real* VM boundary between the agent and your Mac. Published ports are forwarded to `127.0.0.1` on the Mac. One-time setup: `podman machine init && podman machine start`.
+**macOS.** Containers run inside the `podman machine` (or Docker Desktop) Linux VM — a *real* VM boundary between the agent and your Mac. Published ports are forwarded to `127.0.0.1` on the Mac. One-time setup: `podman machine init && podman machine start`.
 
-Because that VM — not the Mac — is where boxes actually run, two host-side security features live inside it on macOS:
-
-- **Egress firewall.** There is no nftables on macOS, and the box bridge is inside the VM, so `isopod egress apply` loads the same `security/egress-host.nft` ruleset *inside the podman machine VM* (`podman machine ssh sudo nft -f -`) rather than on the Mac. `pfctl` on the Mac is the wrong layer (it only sees post-NAT traffic sourced from the VM). The allow-list proxy mode is Linux-only for now, so on macOS `egress apply` enforces `lan-deny`; run a rootful machine and keep it started. See [opt-in-security.md](opt-in-security.md#macos).
-- **Tier-3 virtualization.** macOS has no `/dev/kvm`; the equivalent is Apple's Hypervisor.framework (`sysctl kern.hv_support`), which already backs the engine VM — so a plain container on macOS is VM-isolated from your Mac. For a per-box hardware boundary, [`krunvm`](https://github.com/containers/krunvm) runs each box as its own microVM directly on Hypervisor.framework (any Apple Silicon, no nested virt; isopod integration experimental), or a *nested* `runtime krun` inside the engine VM on Apple M3+/macOS 15+. `isopod doctor` probes your chip and macOS version and reports which applies. See [opt-in-security.md](opt-in-security.md#macos-the-engine-vm-is-already-the-boundary).
-
-**Windows.** Run isopod inside WSL2 (where podman/docker live). Two options for the GUI: (a) run VSCodium inside WSL via WSLg or (b) run VSCodium on Windows natively — WSL2 forwards `127.0.0.1` ports to Windows, so copy the generated `Host isopod-<name>` block from `~/.config/isopod/ssh_config` (in WSL) into `C:\Users\you\.ssh\config`, adjusting the `IdentityFile`/`UserKnownHostsFile` paths to a Windows copy of those files.
+Because that VM — not the Mac — is where boxes actually run, the egress firewall and Tier-3 virtualization work differently on macOS: `isopod egress apply` enforces inside the VM (or on the Mac itself via pf when boxes run under Apple `container`), and the engine VM already gives plain containers a hardware boundary. See [opt-in-security.md](opt-in-security.md#macos-the-engine-vm-is-already-the-boundary) and [macos-host-egress.md](macos-host-egress.md).
 
 ## How state is laid out
 
