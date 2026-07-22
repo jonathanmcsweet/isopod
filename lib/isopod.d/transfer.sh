@@ -160,7 +160,7 @@ remap_to_mailmap() {
   : >"$dst"
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
-    line="${line%$'\r'}"                    # tolerate CRLF (Windows editors)
+    line="${line%$'\r'}"                    # tolerate CRLF line endings
     line="${line#"${line%%[![:space:]]*}"}" # ltrim for the comment/blank test
     case "$line" in '' | '#'*) continue ;; esac
     case "$line" in *'->'*) ;; *) die "remap file $src line $lineno: expected 'old -> new'" ;; esac

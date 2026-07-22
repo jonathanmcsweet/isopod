@@ -6,7 +6,6 @@
 # Primary OS: Linux. macOS: works via podman machine / Docker Desktop; the
 # Homebrew formula depends on `bash`, so brew installs get a modern bash
 # automatically (stock /bin/bash 3.2 is not supported).
-# Windows: run inside WSL2 (see README).
 #
 # This entry script is the shared constant surface: many globals below are read
 # only by the sourced lib/isopod.d/ modules, not here. shellcheck lints each file
@@ -25,7 +24,8 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="2.7.2"
+ISOPOD_VERSION="2.7.3"
+
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
 _resolve_script_dir() {
