@@ -67,10 +67,11 @@ jobs:
           # formula depends on `bash`, so CI tests with the same bash that real
           # brew installs get.
           brew install bash shellcheck shfmt
-          # Create a virtual environment and install pexpect there
-          python3 -m venv /tmp/isopod_venv
-          source /tmp/isopod_venv/bin/activate
-          python3 -m pip install pexpect || true
+          # pexpect drives the interactive prompt tests; if it can't install,
+          # test/run.sh skips them rather than failing.
+          python3 -m pip install pexpect \
+            || python3 -m pip install --break-system-packages pexpect \
+            || true
           # Explicit path: the step shell is /bin/bash (3.2), so a bare `bash`
           # would depend on PATH order. Scripts launched FROM the suite resolve
           # `#!/usr/bin/env bash` via PATH, where Homebrew bin comes first.
