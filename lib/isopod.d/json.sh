@@ -167,4 +167,3 @@ egress_denied_json() {
     "$(egr_run_root grep -iE 'filter|refused|denied' "$ISOPOD_EGRESS_PROXY_LOG" 2>/dev/null |
       grep -oE '[A-Za-z0-9._-]+\.[A-Za-z]{2,}' | sort -u | json_lines_array)"
 }
-
