@@ -867,7 +867,7 @@ cmd_egress() {
   local action="${1:-status}"
   shift 2>/dev/null || true
   case "$action" in
-    status | "") egress_status ;;
+    status | "") egress_status "$@" ;;
     apply) egress_apply enforce ;;
     observe) egress_apply observe ;;
     persist) egress_persist ;;
@@ -894,7 +894,11 @@ cmd_egress() {
   esac
 }
 
-egress_status() {
+egress_status() { # egress_status [--json]
+  if [ "${1:-}" = "--json" ]; then
+    egress_status_json
+    return
+  fi
   # Build the mode-specific block and the firewall line as locals, then lay them
   # out via share/egress-status.txt (static text lives in share/, not inline).
   local mode mode_block="" fw_line
