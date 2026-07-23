@@ -33,8 +33,10 @@ allow-listed hosts are reachable) — set ISOPOD_EGRESS=off or 'no-egress' in
 hardening.conf to turn it off.
 
 Options for create (each accepts both '--opt value' and '--opt=value'):
-  --repo <url>          Git repo to clone inside the box (https or ssh URL)
-  --branch <name>       Branch to clone (with --repo)
+  --repo <url>          Git repo to clone into the box (https or ssh URL;
+                        repeatable). Each clones into its own workspace
+                        subfolder, so a box can hold more than one repo.
+  --branch <name>       Branch to clone (applies to every --repo)
   --copy <path>         Host folder/file to COPY into the box (repeatable).
                         This is the explicit allowlist — nothing else from
                         the host is ever visible inside the box.
@@ -138,6 +140,7 @@ Secrets (host-stored, injected per box):
 
 Examples:
   isopod create myproj --repo https://github.com/me/proj --color teal
+  isopod create app --repo https://github.com/me/api --repo https://github.com/me/web
   isopod create web --repo https://github.com/me/web --dockerfile ./Dockerfile --expose 3000
   isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
   isopod code myproj
