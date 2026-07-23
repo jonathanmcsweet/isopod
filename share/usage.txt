@@ -2,8 +2,8 @@ isopod $ISOPOD_VERSION — isolated AI-coding sandboxes for VSCodium & friends
 
 Usage:
   isopod create <name> [options]      Create and start a new sandbox
-  isopod list                         List sandboxes and their status
-  isopod info <name>                  Show connection details for a sandbox
+  isopod list [--json]                List sandboxes and their status
+  isopod info <name> [--json]         Show connection details for a sandbox
   isopod code <name> [--app APP]      Open the sandbox in a new VSCodium window (or APP)
   isopod shell <name> [-- cmd...]     Open a shell (or run cmd) inside the sandbox
   isopod start <name>                 Start a stopped sandbox
