@@ -335,5 +335,9 @@ if [ "$DRYRUN" -eq 1 ]; then
   printf '\n%s(--check) no changes were made.%s\n' "$c_dim" "$c_rst"
 else
   printf '\n%sDone.%s Verify with: %sisopod doctor%s\n' "$c_grn" "$c_rst" "$c_dim" "$c_rst"
-  [ "$on_path" -eq 1 ] && printf 'Try: %sisopod create demo --color teal%s\n' "$c_dim" "$c_rst"
+  # An `[ ... ] && printf` here would make a successful install exit 1 whenever
+  # BINDIR is not already on PATH (it is the script's last command).
+  if [ "$on_path" -eq 1 ]; then
+    printf 'Try: %sisopod create demo --color teal%s\n' "$c_dim" "$c_rst"
+  fi
 fi
