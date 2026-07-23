@@ -597,7 +597,7 @@ egress_apply_proxy() { # egress_apply_proxy <Yes|No>
   # shellcheck disable=SC2034
   local FILTER_DEFAULT_DENY="$1"
   have "$ISOPOD_EGRESS_PROXY_BIN" ||
-    die "'$ISOPOD_EGRESS_PROXY_BIN' not found — install tinyproxy (apt/dnf/brew install tinyproxy)"
+    die "'$ISOPOD_EGRESS_PROXY_BIN' not found — install tinyproxy (apt/dnf/pacman/emerge/brew)"
   have systemctl ||
     die "egress allow-list needs systemd (systemctl) to run the proxy as a persistent unit"
   # Prefer the packaged 'tinyproxy' account to drop privileges; fall back to

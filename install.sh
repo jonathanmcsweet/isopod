@@ -98,16 +98,34 @@ done
 OS="$(uname -s)"
 IS_IMMUTABLE=0
 DISTRO=""
+DISTRO_LIKE=""
 if [ "$OS" = "Linux" ] && [ -r /etc/os-release ]; then
   # shellcheck disable=SC1091
   . /etc/os-release
   DISTRO="${ID:-}"
+  DISTRO_LIKE="${ID_LIKE:-}"
   # Immutable Fedora variants (Silverblue/Kinoite/Sericea/atomic, Universal Blue)
   # are detectable by ostree being the deployment mechanism.
   if [ -d /run/ostree ] || [ -f /run/ostree-booted ] || have rpm-ostree; then
     IS_IMMUTABLE=1
   fi
 fi
+
+# The packaging family whose install hint we print, from ID and then ID_LIKE, so
+# derivatives (Manjaro/EndeavourOS -> arch, Mint/Pop -> debian) resolve to their
+# parent. Echoes fedora|debian|arch|gentoo, or nothing when unrecognized.
+distro_family() {
+  local d
+  for d in $DISTRO $DISTRO_LIKE; do
+    case "$d" in
+      fedora | rhel | centos) printf 'fedora' && return 0 ;;
+      debian | ubuntu) printf 'debian' && return 0 ;;
+      arch | archlinux) printf 'arch' && return 0 ;;
+      gentoo) printf 'gentoo' && return 0 ;;
+    esac
+  done
+  return 0
+}
 
 # --- choose install locations ----------------------------------------------
 # Program files go in <libroot>/isopod; the entry point is symlinked into <bindir>.
@@ -322,14 +340,43 @@ if [ "$DRYRUN" -eq 0 ] && ! have podman && ! have docker; then
     printf '   %sDo NOT install isopod inside a toolbox/distrobox%s — it must reach the\n' "$c_yel" "$c_rst"
     printf '   host podman to manage your sandboxes. This installer put it on the host.\n'
   else
-    case "$DISTRO" in
-      fedora | rhel | centos) printf '       %ssudo dnf install -y podman openssh-clients%s\n' "$c_dim" "$c_rst" ;;
-      ubuntu | debian) printf '       %ssudo apt install -y podman openssh-client%s\n' "$c_dim" "$c_rst" ;;
+    case "$(distro_family)" in
+      fedora) printf '       %ssudo dnf install -y podman openssh-clients%s\n' "$c_dim" "$c_rst" ;;
+      debian) printf '       %ssudo apt install -y podman openssh-client%s\n' "$c_dim" "$c_rst" ;;
+      arch)
+        printf '       %ssudo pacman -S --needed podman openssh%s\n' "$c_dim" "$c_rst"
+        printf '       %s(rootless networking: pacman -S --needed netavark aardvark-dns passt fuse-overlayfs)%s\n' "$c_dim" "$c_rst"
+        ;;
+      gentoo)
+        printf '       %ssudo emerge --ask app-containers/podman net-misc/openssh%s\n' "$c_dim" "$c_rst"
+        printf '       %s(build podman with USE="rootless" so the setuid newuidmap/newgidmap helpers land)%s\n' "$c_dim" "$c_rst"
+        ;;
       *) [ "$OS" = "Darwin" ] && printf '       %sbrew install podman && podman machine init && podman machine start%s\n' "$c_dim" "$c_rst" ||
         printf '       install podman or docker via your package manager\n' ;;
     esac
   fi
 fi
+
+# Rootless podman needs a subordinate UID/GID range for this user. Fedora and
+# Debian/Ubuntu create one with the account; Arch and Gentoo do not, so podman
+# fails at first run with "no subuid ranges found for user".
+check_subid() {
+  [ "$OS" = "Linux" ] || return 0
+  [ "$(id -u)" -ne 0 ] || return 0 # root runs podman rootful — no mapping needed
+  have podman || return 0
+  local u f
+  u="$(id -un)"
+  for f in /etc/subuid /etc/subgid; do
+    awk -F: -v user="$u" -v uid="$(id -u)" \
+      '$1 == user || $1 == uid { found = 1 } END { exit !found }' "$f" 2>/dev/null && continue
+    warn "no rootless subuid/subgid range for '$u' in $f — podman cannot start containers as this user."
+    printf '   Add one, then let podman pick it up:\n'
+    printf '       %ssudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 %s%s\n' "$c_dim" "$u" "$c_rst"
+    printf '       %spodman system migrate%s\n' "$c_dim" "$c_rst"
+    return 0
+  done
+}
+[ "$DRYRUN" -eq 1 ] || check_subid
 
 if [ "$DRYRUN" -eq 1 ]; then
   printf '\n%s(--check) no changes were made.%s\n' "$c_dim" "$c_rst"
