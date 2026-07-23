@@ -14,7 +14,7 @@ repos:
         args: ["-S", "warning"]
         # Matches the lint scope in test/run.sh. .bats files use non-standard
         # syntax shellcheck can't parse, so they're intentionally excluded.
-        files: '^(isopod|lib/isopod\.d/[^/]+\.sh|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|test/(run|packaging|egress-render|brew-formula)\.sh)$'
+        files: '^(isopod|lib/isopod\.d/[^/]+\.sh|share/isopod-entrypoint|lib/find_box_repo\.sh|install\.sh|verify-host-isolation\.sh|test/(run|packaging|egress-render|brew-formula|distro-install)\.sh)$'
 
   - repo: https://github.com/scop/pre-commit-shfmt
     rev: v3.13.1-1
