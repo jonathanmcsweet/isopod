@@ -185,7 +185,9 @@ cmd_secret() {
       fi
       info "stored secret '$name' ($(secret_backend) backend)"
       ;;
-    ls | list) secret_store_ls ;;
+    ls | list)
+      if [ "${1:-}" = "--json" ]; then secret_ls_json; else secret_store_ls; fi
+      ;;
     rm | remove | delete)
       local name="${1:-}"
       [ -n "$name" ] || die "usage: isopod secret rm <NAME>"
