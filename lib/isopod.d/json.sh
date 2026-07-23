@@ -206,3 +206,79 @@ secret_ls_json() {
   done < <(secret_store_ls)
   printf ']}\n'
 }
+
+# One `doctor --json` check object. <level> is ok|warn|error|na (na = not
+# applicable / absent). <id> is a stable slug, <label> human text, <hint> a
+# short fix hint ("" when none).
+doctor_check_json() { # doctor_check_json <level> <id> <label> <hint>
+  printf '{"level":%s,"id":%s,"label":%s,"hint":%s}' \
+    "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(json_str "$4")"
+}
+
+# `isopod doctor --json`: a machine-readable health summary of the actionable
+# prerequisite checks (a subset of the human `doctor` narrative), so the
+# dashboard can render a checklist. Probes are the same `have`/`info` primitives
+# the text doctor uses; the long platform/virt advisories stay text-only.
+doctor_json() {
+  local -a checks=()
+  local t missing=""
+  for t in ssh ssh-keygen ssh-keyscan; do have "$t" || missing+=" $t"; done
+  if [ -n "$missing" ]; then
+    checks+=("$(doctor_check_json error ssh-tools "SSH client tools" "missing:$missing — install openssh")")
+  else
+    checks+=("$(doctor_check_json ok ssh-tools "SSH client tools" "")")
+  fi
+  if have git; then
+    checks+=("$(doctor_check_json ok git "git (fetch, remap)" "")")
+  else
+    checks+=("$(doctor_check_json warn git "git (fetch, remap)" "install git for isopod fetch/remap")")
+  fi
+  if have git-filter-repo; then
+    checks+=("$(doctor_check_json ok remap "remap backend" "git-filter-repo")")
+  elif have python3; then
+    checks+=("$(doctor_check_json ok remap "remap backend" "python3 fallback")")
+  else
+    checks+=("$(doctor_check_json warn remap "remap backend" "install git-filter-repo or python3")")
+  fi
+  local have_engine=0
+  if have podman; then
+    if podman info >/dev/null 2>&1; then
+      have_engine=1
+      checks+=("$(doctor_check_json ok podman "podman" "working")")
+    else
+      checks+=("$(doctor_check_json warn podman "podman" "installed but not working (podman machine start?)")")
+    fi
+  else
+    checks+=("$(doctor_check_json na podman "podman" "not installed")")
+  fi
+  if have docker; then
+    if docker info >/dev/null 2>&1; then
+      have_engine=1
+      checks+=("$(doctor_check_json ok docker "docker" "daemon reachable")")
+    else
+      checks+=("$(doctor_check_json warn docker "docker" "installed but daemon not reachable")")
+    fi
+  else
+    checks+=("$(doctor_check_json na docker "docker" "not installed")")
+  fi
+  [ "$have_engine" = 1 ] ||
+    checks+=("$(doctor_check_json error engine "container engine" "no working engine — start podman or docker")")
+  if [ -f "$HARDENING_CONF" ]; then
+    checks+=("$(doctor_check_json ok hardening "hardening profile" "$HARDENING_CONF")")
+  else
+    checks+=("$(doctor_check_json warn hardening "hardening profile" "missing — boxes start without fingerprint masks")")
+  fi
+  local egmode
+  egmode="$(active_egress)"
+  case "$egmode" in
+    allow-list | lan-deny) checks+=("$(doctor_check_json ok egress "egress isolation" "$egmode")") ;;
+    *) checks+=("$(doctor_check_json warn egress "egress isolation" "off — set egress lan-deny/allow-list in hardening.conf")") ;;
+  esac
+  local out="" c first=1
+  for c in "${checks[@]}"; do
+    [ "$first" = 1 ] || out+=","
+    first=0
+    out+="$c"
+  done
+  printf '{"version":%s,"checks":[%s]}\n' "$(json_str "$ISOPOD_VERSION")" "$out"
+}

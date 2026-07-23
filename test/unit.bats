@@ -1571,3 +1571,37 @@ EOF
   run secret_ls_json
   assert_output '{"backend":"file","secrets":[]}'
 }
+@test "doctor_check_json emits a level/id/label/hint object" {
+  run doctor_check_json warn git "git (fetch, remap)" "install git"
+  assert_output '{"level":"warn","id":"git","label":"git (fetch, remap)","hint":"install git"}'
+}
+@test "doctor_json summarizes prerequisite checks and flags a missing engine" {
+  HARDENING_CONF="$BATS_TEST_TMPDIR/hardening.conf"
+  : >"$HARDENING_CONF"
+  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git) return 0 ;; *) return 1 ;; esac; }
+  active_egress() { printf 'lan-deny\n'; }
+  run doctor_json
+  assert_success
+  assert_output --partial "\"version\":\"$ISOPOD_VERSION\""
+  assert_output --partial '{"level":"ok","id":"ssh-tools"'
+  assert_output --partial '{"level":"ok","id":"egress","label":"egress isolation","hint":"lan-deny"}'
+  # No podman/docker on PATH -> a hard engine error.
+  assert_output --partial '{"level":"error","id":"engine"'
+}
+@test "gc --json lists unreferenced isopod images without removing" {
+  detect_engine() { ENGINE=podman; }
+  podman() {
+    [ "$1" = images ] &&
+      printf 'localhost/isopod-base:v1\nlocalhost/isopod-box-abc:v1\nlocalhost/isopod-user:keep\ndocker.io/library/alpine:latest\n'
+  }
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nimage=localhost/isopod-user:keep\n' >"$(box_dir demo)/meta"
+  run cmd_gc --json
+  assert_output '{"images":["localhost/isopod-base:v1","localhost/isopod-box-abc:v1"]}'
+}
+@test "gc --json emits an empty array when nothing is unreferenced" {
+  detect_engine() { ENGINE=podman; }
+  podman() { [ "$1" = images ] && printf 'docker.io/library/alpine:latest\n'; }
+  run cmd_gc --json
+  assert_output '{"images":[]}'
+}
