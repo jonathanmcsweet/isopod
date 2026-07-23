@@ -1,4 +1,4 @@
-usage: isopod egress [status|apply|observe|persist|unpersist|allow <domain>|log [-f]|denied|rules]
+usage: isopod egress [status|apply|observe|persist|unpersist|allow <domain>|allowlist|log [-f]|denied|rules]
   status     mode, network, and proxy/firewall state (--json for machine-readable output)
   apply      load the host firewall; for allow-list also (re)start the filtering proxy
   persist    install a systemd unit that re-applies the firewall on boot
@@ -6,6 +6,7 @@ usage: isopod egress [status|apply|observe|persist|unpersist|allow <domain>|log 
   observe    allow-list only: run the proxy permit-all but log everything, to discover
              which domains a workflow needs; then switch back with apply
   allow      add a domain to your allow-list override and reload the proxy
+  allowlist  show the baseline vs user allow-list (--json for machine-readable output)
   log        tail the proxy access log (-f to follow)
-  denied     show hostnames the proxy refused (candidates to allow)
+  denied     show hostnames the proxy refused (candidates to allow; --json available)
   rules      print the rendered nftables ruleset that apply would load

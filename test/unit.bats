@@ -1501,3 +1501,44 @@ EOF
   run egress_status_json
   assert_output '{"mode":"off","firewall":"unknown","network":"isopod0","subnet":"10.88.7.0/24","dns":"1.1.1.1","proxy":null}'
 }
+@test "json_lines_array renders empty and populated input, skipping blanks" {
+  run json_lines_array </dev/null
+  assert_output '[]'
+  run json_lines_array <<<$'a\n\nb.c'
+  assert_output '["a","b.c"]'
+}
+@test "egress_allowlist_domains strips comments, blanks, and trailing tokens" {
+  local f="$BATS_TEST_TMPDIR/base.conf"
+  printf '# a comment\ngithub.com\n\n  *.anthropic.com  # inline\nexample.org extra-token\n' >"$f"
+  run egress_allowlist_domains "$f"
+  assert_line --index 0 'github.com'
+  assert_line --index 1 '*.anthropic.com'
+  assert_line --index 2 'example.org'
+  assert_equal "${#lines[@]}" 3
+}
+@test "egress_allowlist_domains on a missing file emits nothing" {
+  run egress_allowlist_domains "$BATS_TEST_TMPDIR/nope.conf"
+  assert_success
+  assert_output ''
+}
+@test "egress_allowlist_json splits baseline vs user" {
+  ISOPOD_EGRESS_ALLOWLIST="$BATS_TEST_TMPDIR/base.conf"
+  USER_EGRESS_ALLOWLIST="$BATS_TEST_TMPDIR/user.conf"
+  printf 'github.com\n*.anthropic.com\n' >"$ISOPOD_EGRESS_ALLOWLIST"
+  printf 'example.com\n' >"$USER_EGRESS_ALLOWLIST"
+  run egress_allowlist_json
+  assert_output '{"baseline":["github.com","*.anthropic.com"],"user":["example.com"]}'
+}
+@test "egress_allowlist_json emits empty arrays when no files exist" {
+  ISOPOD_EGRESS_ALLOWLIST="$BATS_TEST_TMPDIR/none-base.conf"
+  USER_EGRESS_ALLOWLIST="$BATS_TEST_TMPDIR/none-user.conf"
+  run egress_allowlist_json
+  assert_output '{"baseline":[],"user":[]}'
+}
+@test "egress_denied_json extracts unique refused hostnames from the proxy log" {
+  ISOPOD_EGRESS_PROXY_LOG="$BATS_TEST_TMPDIR/proxy.log"
+  printf 'CONNECT ok.example.com allowed\nFilter: denied tracker.evil.net\nrefused ads.evil.net\nFilter: denied tracker.evil.net\n' >"$ISOPOD_EGRESS_PROXY_LOG"
+  egr_run_root() { "$@"; }
+  run egress_denied_json
+  assert_output '{"hostnames":["ads.evil.net","tracker.evil.net"]}'
+}

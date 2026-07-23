@@ -132,3 +132,38 @@ egress_status_json() {
     "$(json_str "$ISOPOD_EGRESS_DNS")" \
     "$proxy"
 }
+
+# Emit newline-separated stdin lines as a JSON array of strings. Blank lines are
+# skipped; order is preserved. Empty input -> [].
+json_lines_array() {
+  local line first=1
+  printf '['
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    json_str "$line"
+  done
+  printf ']'
+}
+
+# `isopod egress allowlist --json`: the layered allow-list as two arrays, so the
+# dashboard can show baseline (shipped defaults) vs user (added via `egress
+# allow`) and diff them. Domains are the raw first token of each file line
+# (comments stripped) — not the anchored regexes egress_filter_regexes builds.
+egress_allowlist_json() {
+  printf '{"baseline":%s,"user":%s}\n' \
+    "$(egress_allowlist_domains "$ISOPOD_EGRESS_ALLOWLIST" | json_lines_array)" \
+    "$(egress_allowlist_domains "$USER_EGRESS_ALLOWLIST" | json_lines_array)"
+}
+
+# `isopod egress denied --json`: hostnames the proxy refused, as a JSON object.
+# Best-effort and needs root to read the proxy log (same source as the text
+# `egress denied`); dies if the log is absent so the caller surfaces the reason.
+egress_denied_json() {
+  [ -f "$ISOPOD_EGRESS_PROXY_LOG" ] ||
+    die "no proxy log at $ISOPOD_EGRESS_PROXY_LOG (has 'sudo isopod egress apply' run?)"
+  printf '{"hostnames":%s}\n' \
+    "$(egr_run_root grep -iE 'filter|refused|denied' "$ISOPOD_EGRESS_PROXY_LOG" 2>/dev/null |
+      grep -oE '[A-Za-z0-9._-]+\.[A-Za-z]{2,}' | sort -u | json_lines_array)"
+}
