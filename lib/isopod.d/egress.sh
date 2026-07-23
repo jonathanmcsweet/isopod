@@ -441,6 +441,19 @@ egress_proxy_active() {
   return 1
 }
 
+# Read the domains of a single allow-list file to stdout, one per line: the
+# first whitespace token of each line, comments (`#…`) stripped, blanks skipped.
+# Missing file -> no output. Shared by the --json emitter and any text view.
+egress_allowlist_domains() { # egress_allowlist_domains <file>
+  local line dom _
+  [ -f "$1" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    read -r dom _ <<<"$line" || true
+    [ -n "${dom:-}" ] && printf '%s\n' "$dom"
+  done <"$1"
+}
+
 # Translate the layered allow-list (baseline + user override) into anchored
 # POSIX-extended regexes for tinyproxy's host filter, one per line, on stdout:
 #   foo.com    -> ^(.*\.)?foo\.com$   (apex + any subdomain)
@@ -877,7 +890,12 @@ cmd_egress() {
       egress_allow "$1"
       ;;
     log) egress_log "$@" ;;
-    denied) egress_denied ;;
+    denied)
+      if [ "${1:-}" = "--json" ]; then egress_denied_json; else egress_denied; fi
+      ;;
+    allowlist)
+      if [ "${1:-}" = "--json" ]; then egress_allowlist_json; else egress_allowlist_show; fi
+      ;;
     rules | show)
       # On the macOS host-pf backend, show the pf ruleset (with the box subnet
       # substituted); otherwise the active nft ruleset.
@@ -890,7 +908,7 @@ cmd_egress() {
       fi
       ;;
     -h | --help | help) render_tmpl egress-help.txt ;;
-    *) die "unknown egress action: $action (try: isopod egress status|apply|observe|persist|unpersist|allow|log|denied|rules)" ;;
+    *) die "unknown egress action: $action (try: isopod egress status|apply|observe|persist|unpersist|allow|allowlist|log|denied|rules)" ;;
   esac
 }
 
@@ -1010,4 +1028,17 @@ egress_denied() {
   egr_run_root grep -iE 'filter|refused|denied' "$ISOPOD_EGRESS_PROXY_LOG" 2>/dev/null |
     grep -oE '[A-Za-z0-9._-]+\.[A-Za-z]{2,}' | sort -u |
     sed 's/^/  /' || printf '  (none logged)\n'
+}
+
+# Show the layered allow-list: shipped baseline first, then the user additions.
+egress_allowlist_show() {
+  local dom
+  info "baseline allow-list ($ISOPOD_EGRESS_ALLOWLIST):"
+  egress_allowlist_domains "$ISOPOD_EGRESS_ALLOWLIST" | sed 's/^/  /' || true
+  info "your additions ($USER_EGRESS_ALLOWLIST):"
+  if [ -s "$USER_EGRESS_ALLOWLIST" ]; then
+    egress_allowlist_domains "$USER_EGRESS_ALLOWLIST" | sed 's/^/  /'
+  else
+    printf '  (none — add with: isopod egress allow <domain>)\n'
+  fi
 }
