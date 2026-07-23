@@ -69,6 +69,11 @@ USER_EGRESS_ALLOWLIST="$CONFIG_DIR/egress-allowlist.conf"
 # names-only index here; the file backend also keeps 0600 value files.
 SECRETS_DIR="$CONFIG_DIR/secrets"
 SECRETS_INDEX="$SECRETS_DIR/index"
+# Subordinate UID/GID ranges rootless podman maps the box's users through. Read
+# (never written) by the subid check in engine detection and `isopod doctor`;
+# overridable so the test suite can point at fixtures.
+SUBUID_FILE="${ISOPOD_SUBUID_FILE:-/etc/subuid}"
+SUBGID_FILE="${ISOPOD_SUBGID_FILE:-/etc/subgid}"
 DEFAULT_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
 IMAGE_LAYER_VERSION="3" # bump to force image rebuild when Dockerfile changes
 CONTAINER_USER="dev"

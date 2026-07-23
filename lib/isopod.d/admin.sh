@@ -230,6 +230,16 @@ cmd_doctor() {
     if podman info >/dev/null 2>&1; then
       printf '  [ok]      podman (working)\n'
     else printf '  [warn]    podman installed but not working (podman machine start?)\n'; fi
+    # Rootless podman needs a subuid/subgid range for this user; Arch and Gentoo
+    # do not create one with the account.
+    if is_linux && [ "$(id -u)" -ne 0 ]; then
+      if subid_ranges_ok; then
+        printf '  [ok]      rootless subuid/subgid range for %s\n' "$(id -un)"
+      else
+        printf '  [warn]    no rootless subuid/subgid range — podman cannot start containers as this user\n'
+        subid_fix_hint | while IFS= read -r l; do printf '            %s\n' "$l"; done
+      fi
+    fi
   else printf '  [--]      podman not installed\n'; fi
   if have docker; then
     if docker info >/dev/null 2>&1; then
