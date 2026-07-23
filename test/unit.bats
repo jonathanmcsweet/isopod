@@ -1428,3 +1428,25 @@ EOF
   assert_stub_called 'secret-tool store .*service isopod name TOK'
   assert_stub_not_called 's3kr1tv4lu3'
 }
+
+# ---- repo_subdir -------------------------------------------------------------
+@test "repo_subdir strips .git and derives the basename" {
+  run repo_subdir "https://github.com/me/proj.git"
+  assert_output "proj"
+}
+@test "repo_subdir handles scp-style git@host:org/repo.git" {
+  run repo_subdir "git@github.com:org/api.git"
+  assert_output "api"
+}
+@test "repo_subdir handles scp-style with no path segment" {
+  run repo_subdir "git@github.com:api.git"
+  assert_output "api"
+}
+@test "repo_subdir ignores a trailing slash" {
+  run repo_subdir "https://github.com/me/web/"
+  assert_output "web"
+}
+@test "repo_subdir keeps a repo without a .git suffix" {
+  run repo_subdir "https://github.com/me/web"
+  assert_output "web"
+}
