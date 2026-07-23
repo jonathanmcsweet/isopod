@@ -53,7 +53,7 @@ cmd_rm() {
 # box's meta still points at it via `image` or `base`. Safe: a removed base
 # image is simply rebuilt on the next create.
 cmd_gc() {
-  local force=0 dry=0
+  local force=0 dry=0 json=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
@@ -67,9 +67,14 @@ cmd_gc() {
         dry=1
         shift
         ;;
+      --json)
+        json=1
+        shift
+        ;;
       -h | --help)
-        printf 'usage: isopod gc [--dry-run] [--force]\n'
+        printf 'usage: isopod gc [--dry-run] [--force] [--json]\n'
         printf '  Remove isopod-managed images that no box still references.\n'
+        printf '  --json lists the unreferenced images (never removes) for tooling.\n'
         return 0
         ;;
       *) die "unknown option for gc: $1" ;;
@@ -98,6 +103,16 @@ cmd_gc() {
         ;;
     esac
   done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+  # Machine-readable preview: list the candidates, never remove. No prompts, so a
+  # UI can show reclaimable images before offering a one-click `gc --force`.
+  if [ "$json" -eq 1 ]; then
+    if [ "${#victims[@]}" -eq 0 ]; then
+      printf '{"images":[]}\n'
+    else
+      printf '{"images":%s}\n' "$(printf '%s\n' "${victims[@]}" | json_lines_array)"
+    fi
+    return 0
+  fi
   if [ "${#victims[@]}" -eq 0 ]; then
     info "nothing to collect — no unreferenced isopod images."
     return 0
@@ -187,6 +202,10 @@ doctor_virt_macos() {
 }
 
 cmd_doctor() {
+  if [ "${1:-}" = "--json" ]; then
+    doctor_json
+    return
+  fi
   printf 'isopod %s\n\n' "$ISOPOD_VERSION"
   local ok=1
   for t in ssh ssh-keygen ssh-keyscan; do
