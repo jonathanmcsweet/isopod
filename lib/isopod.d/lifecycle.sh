@@ -2,6 +2,10 @@
 # sourced by isopod — not executable on its own; defines box lifecycle, reconfigure, shell, and IDE launch.
 
 cmd_list() {
+  if [ "${1:-}" = "--json" ]; then
+    cmd_list_json
+    return
+  fi
   detect_engine
   # Two passes so the NAME/SSH columns size to the actual data instead of a fixed
   # width that long box names would overflow.
@@ -30,11 +34,21 @@ cmd_list() {
 }
 
 cmd_info() {
-  local name="${1:-}"
-  [ -n "$name" ] || die "usage: isopod info <name>"
+  local name="" json=0 a
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      *) [ -z "$name" ] && name="$a" ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: isopod info <name> [--json]"
   open_box "$name"
   acquire_lock # refresh_port may rewrite the shared ssh_config
   refresh_port "$name"
+  if [ "$json" = 1 ]; then
+    cmd_info_json "$name"
+    return
+  fi
   local forwards
   forwards=$(meta_get "$name" expose || true)
   [ -n "$forwards" ] || forwards="(none — see --expose)"

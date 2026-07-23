@@ -320,6 +320,18 @@ The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — and it's wri
 
 On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box. (The Apple `container` engine has no image-commit primitive, so `reconfigure` isn't supported there — recreate the box instead.)
 
+## Machine-readable output (`--json`)
+
+Three commands accept `--json` and print a single JSON document on stdout (no other text), for scripts and tools that drive isopod — such as the Podman Desktop dashboard extension:
+
+| Command | Output |
+| --- | --- |
+| `isopod list --json` | Array of box summaries: `name`, `status`, `ssh_host`, `port`, `color`, `engine` |
+| `isopod info <name> --json` | One box object: the summary fields plus `forwards`, `secrets` (names only), `workspace` |
+| `isopod egress status --json` | Egress state: `mode`, `firewall`, `network`, `subnet`, `dns`, `proxy` |
+
+`port` and `color` are `null` when unknown; `forwards` and `secrets` are empty arrays when unset. Fields may be added over time but are not renamed or removed; errors still exit non-zero with a message on stderr.
+
 ## Testing
 
 isopod ships a test suite under `test/` using [bats-core](https://github.com/bats-core/bats-core) and pexpect for interactive prompts.

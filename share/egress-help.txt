@@ -1,5 +1,5 @@
 usage: isopod egress [status|apply|observe|persist|unpersist|allow <domain>|log [-f]|denied|rules]
-  status     mode, network, and proxy/firewall state
+  status     mode, network, and proxy/firewall state (--json for machine-readable output)
   apply      load the host firewall; for allow-list also (re)start the filtering proxy
   persist    install a systemd unit that re-applies the firewall on boot
   unpersist  remove that boot unit

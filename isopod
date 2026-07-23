@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="2.8.0"
+ISOPOD_VERSION="2.9.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -149,7 +149,7 @@ ISOPOD_EGRESS_PROXY_LOG="${ISOPOD_EGRESS_PROXY_LOG:-$ISOPOD_EGRESS_PROXY_LOG_DIR
 # exists for everything after it). Each defines functions and their globals
 # only; no module runs code at source time.
 # ---------------------------------------------------------------------------
-for _mod in util engine ssh color hardening egress runargs secret create transfer lifecycle install admin; do
+for _mod in util engine ssh color hardening egress json runargs secret create transfer lifecycle install admin; do
   if [ ! -f "$ISOPOD_LIB/isopod.d/$_mod.sh" ]; then
     # raw printf, not die: die() itself lives in the first module
     printf 'error: missing module: %s (is your isopod install complete?)\n' \

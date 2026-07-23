@@ -965,3 +965,98 @@ seed_secret() { # seed_secret <name> <value>
   assert_failure
   assert_output --partial "empty value"
 }
+
+# ---- machine-readable output (--json) ----------------------------------------
+# The field names and shapes are a published contract consumed by external
+# tooling (the Podman Desktop dashboard extension). Each test parses the output
+# with python3 -m json.tool, so anything that is not a valid JSON document fails.
+
+@test "list --json emits a valid JSON array with the contract fields" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run bash -c "'$ISOPOD_ROOT/isopod' list --json 2>/dev/null | python3 -m json.tool"
+  assert_success
+  assert_output --partial '"name": "demo"'
+  assert_output --partial '"status": "running"'
+  assert_output --partial '"ssh_host": "isopod-demo"'
+  assert_output --partial '"port": 45678'
+  assert_output --partial '"color": "#0f766e"'
+  assert_output --partial '"engine": "podman"'
+}
+
+@test "list --json prints only the JSON document on stdout" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run bash -c "'$ISOPOD_ROOT/isopod' list --json 2>/dev/null"
+  assert_success
+  assert_output --regexp '^\['
+  refute_output --partial 'NAME'
+}
+
+@test "list --json with no boxes is an empty array" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+  run bash -c "'$ISOPOD_ROOT/isopod' list --json 2>/dev/null | python3 -m json.tool"
+  assert_success
+  assert_output '[]'
+}
+
+@test "list --json escapes quotes, backslashes, and control characters" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+  # Hand-written meta: create validates colors, but list must survive (and
+  # correctly escape) whatever is on disk. The value has a quote, a backslash,
+  # and a tab; the box name itself carries a quote.
+  mkdir -p "$ISOPOD_CONFIG_DIR/boxes/we\"ird"
+  printf 'engine=podman\nport=4222\ncolor=te"al\\pain\tted\n' \
+    >"$ISOPOD_CONFIG_DIR/boxes/we\"ird/meta"
+  run bash -c "'$ISOPOD_ROOT/isopod' list --json 2>/dev/null | python3 -m json.tool"
+  assert_success
+  assert_output --partial '"name": "we\"ird"'
+  assert_output --partial '"color": "te\"al\\pain\tted"'
+}
+
+@test "info --json emits the contract object with forwards and secrets arrays" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+  "$ISOPOD_ROOT/isopod" create demo --color teal --expose 3001:3000 --expose 8080
+  # Secret NAMES only must appear — never paths or values. Replace the meta
+  # line create wrote (meta_get reads the first match, so appending is ignored).
+  sed_i 's|^secrets=.*|secrets=API_KEY:/run/secrets/API_KEY,TOKEN:/run/secrets/TOKEN|' \
+    "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run bash -c "'$ISOPOD_ROOT/isopod' info demo --json 2>/dev/null | python3 -m json.tool"
+  assert_success
+  assert_output --partial '"name": "demo"'
+  assert_output --partial '"port": 45678'
+  assert_output --partial '"3001:3000"'
+  assert_output --partial '"8080:8080"'
+  assert_output --partial '"API_KEY"'
+  assert_output --partial '"TOKEN"'
+  refute_output --partial '/run/secrets'
+  assert_output --partial '"workspace": "/home/dev/workspace"'
+}
+
+@test "info --json renders empty forwards and secrets as empty arrays" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run bash -c "'$ISOPOD_ROOT/isopod' info demo --json 2>/dev/null"
+  assert_success
+  assert_output --partial '"forwards":[]'
+  assert_output --partial '"secrets":[]'
+  refute_output --partial '(none'
+}
+
+@test "info without --json is unchanged by the json path" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" info demo
+  assert_success
+  assert_output --partial 'name      : demo'
+  refute_output --partial '"name"'
+}
+
+@test "egress status --json emits a valid JSON object with the contract fields" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+  run bash -c "'$ISOPOD_ROOT/isopod' egress status --json 2>/dev/null | python3 -m json.tool"
+  assert_success
+  assert_output --partial '"mode":'
+  assert_output --partial '"firewall":'
+  assert_output --partial '"network": "isopod0"'
+  assert_output --partial '"subnet": "10.88.7.0/24"'
+  assert_output --partial '"dns": "1.1.1.1"'
+  assert_output --partial '"proxy":'
+}

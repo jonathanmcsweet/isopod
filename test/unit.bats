@@ -1450,3 +1450,54 @@ EOF
   run repo_subdir "https://github.com/me/web"
   assert_output "web"
 }
+
+# ---- json emission (--json output helpers) -------------------------------------
+@test "json_escape escapes backslash, double-quote, and control characters" {
+  run json_escape $'a\\b"c\td\ne'
+  assert_output 'a\\b\"c\u0009d\u000ae'
+}
+@test "json_escape leaves plain strings unchanged" {
+  run json_escape 'isopod-demo'
+  assert_output 'isopod-demo'
+}
+@test "json_str_or_null quotes a value and maps empty to null" {
+  run json_str_or_null 'teal'
+  assert_output '"teal"'
+  run json_str_or_null ''
+  assert_output 'null'
+}
+@test "json_port_or_null emits an integer port and maps junk to null" {
+  run json_port_or_null 4222
+  assert_output '4222'
+  run json_port_or_null '?'
+  assert_output 'null'
+  run json_port_or_null ''
+  assert_output 'null'
+}
+@test "json_csv_array renders empty and populated lists" {
+  run json_csv_array ''
+  assert_output '[]'
+  run json_csv_array '8080:8080,3001:3000'
+  assert_output '["8080:8080","3001:3000"]'
+}
+@test "egress_status_json reports an active allow-list with a running proxy" {
+  ISOPOD_EGRESS=allow-list
+  egress_rules_loaded() { return 0; }
+  egress_proxy_active() { return 0; }
+  run egress_status_json
+  assert_output '{"mode":"allow-list","firewall":"active","network":"isopod0","subnet":"10.88.7.0/24","dns":"1.1.1.1","proxy":{"running":true,"port":8118}}'
+}
+@test "egress_status_json maps a stopped proxy and an unloaded firewall" {
+  ISOPOD_EGRESS=allow-list
+  egress_rules_loaded() { return 1; }
+  egress_proxy_active() { return 1; }
+  run egress_status_json
+  assert_output --partial '"firewall":"inactive"'
+  assert_output --partial '"proxy":{"running":false,"port":8118}'
+}
+@test "egress_status_json emits mode off and a null proxy when egress is disabled" {
+  ISOPOD_EGRESS=off
+  egress_rules_loaded() { return 2; }
+  run egress_status_json
+  assert_output '{"mode":"off","firewall":"unknown","network":"isopod0","subnet":"10.88.7.0/24","dns":"1.1.1.1","proxy":null}'
+}
