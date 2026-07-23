@@ -1542,3 +1542,32 @@ EOF
   run egress_denied_json
   assert_output '{"hostnames":["ads.evil.net","tracker.evil.net"]}'
 }
+@test "box_secret_names lists the NAME of each NAME:path spec" {
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nsecrets=ANTHROPIC_API_KEY:/run/secrets/ANTHROPIC_API_KEY,GH_TOKEN:/run/secrets/GH_TOKEN\n' >"$(box_dir demo)/meta"
+  run box_secret_names demo
+  assert_line --index 0 'ANTHROPIC_API_KEY'
+  assert_line --index 1 'GH_TOKEN'
+  assert_equal "${#lines[@]}" 2
+}
+@test "box_secret_names emits nothing when a box attaches no secrets" {
+  mkdir -p "$(box_dir plain)"
+  printf 'engine=podman\n' >"$(box_dir plain)/meta"
+  run box_secret_names plain
+  assert_output ''
+}
+@test "secret_ls_json reports backend, names, and per-box attribution" {
+  ISOPOD_SECRET_BACKEND=file
+  printf 'v1' | secret_store_set ANTHROPIC_API_KEY
+  printf 'v2' | secret_store_set UNUSED_KEY
+  mkdir -p "$(box_dir a)" "$(box_dir b)"
+  printf 'engine=podman\nsecrets=ANTHROPIC_API_KEY:/run/secrets/ANTHROPIC_API_KEY\n' >"$(box_dir a)/meta"
+  printf 'engine=podman\nsecrets=ANTHROPIC_API_KEY:/run/secrets/ANTHROPIC_API_KEY\n' >"$(box_dir b)/meta"
+  run secret_ls_json
+  assert_output '{"backend":"file","secrets":[{"name":"ANTHROPIC_API_KEY","boxes":["a","b"]},{"name":"UNUSED_KEY","boxes":[]}]}'
+}
+@test "secret_ls_json emits an empty secrets array when none are stored" {
+  ISOPOD_SECRET_BACKEND=file
+  run secret_ls_json
+  assert_output '{"backend":"file","secrets":[]}'
+}

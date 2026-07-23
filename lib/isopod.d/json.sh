@@ -167,3 +167,42 @@ egress_denied_json() {
     "$(egr_run_root grep -iE 'filter|refused|denied' "$ISOPOD_EGRESS_PROXY_LOG" 2>/dev/null |
       grep -oE '[A-Za-z0-9._-]+\.[A-Za-z]{2,}' | sort -u | json_lines_array)"
 }
+
+# The secret NAMES a box's meta attaches (the NAME of each NAME:path spec), one
+# per line. Empty when the box attaches none. Names only — never values.
+box_secret_names() { # box_secret_names <boxname>
+  local specs spec
+  specs=$(meta_get "$1" secrets 2>/dev/null || true)
+  [ -n "$specs" ] || return 0
+  local IFS=,
+  for spec in $specs; do
+    spec="${spec%%:*}"
+    [ -n "$spec" ] && printf '%s\n' "$spec"
+  done
+}
+
+# `isopod secret ls --json`: the managed secret names (never values), the active
+# storage backend, and which boxes attach each name — so the dashboard can show
+# a names-only index with per-box attribution in one call.
+secret_ls_json() {
+  local name d bname first=1 boxlist boxes_first
+  printf '{"backend":%s,"secrets":[' "$(json_str "$(secret_backend)")"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    boxlist=""
+    boxes_first=1
+    for d in "$BOXES_DIR"/*/; do
+      [ -d "$d" ] || continue
+      bname="$(basename "$d")"
+      if box_secret_names "$bname" | grep -qxF "$name"; then
+        [ "$boxes_first" = 1 ] || boxlist+=","
+        boxes_first=0
+        boxlist+="$(json_str "$bname")"
+      fi
+    done
+    printf '{"name":%s,"boxes":[%s]}' "$(json_str "$name")" "$boxlist"
+  done < <(secret_store_ls)
+  printf ']}\n'
+}
