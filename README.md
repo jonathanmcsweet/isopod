@@ -37,10 +37,17 @@ and your existing box names.
 
 ### Manual installation
 
-Don't use Homebrew? Per-platform manual install steps (Fedora,
-immutable Fedora, Debian/Ubuntu, system-wide, macOS) and how to
-verify and update an install live in
+Don't use Homebrew? Manual install steps by distro family — Debian (Ubuntu,
+Mint, Pop!_OS, Zorin, MX), Fedora, Fedora immutable (Silverblue, Kinoite,
+Bazzite), Arch (Manjaro, EndeavourOS, CachyOS), Gentoo — plus system-wide,
+macOS, and how to verify and update an install, live in
 **[docs/installation-and-platform.md](docs/installation-and-platform.md)**.
+Derivatives follow their parent family: isopod and `install.sh` read `ID` and
+then `ID_LIKE` from `/etc/os-release`.
+
+On Arch and Gentoo, add a rootless subuid/subgid range for your account before
+the first box — those distros don't create one (`install.sh` and `isopod doctor`
+print the fix).
 
 ## Quick start
 
@@ -343,7 +350,14 @@ RUN_LIVE=1 test/run.sh   # also runs live end-to-end tests against real podman/d
 
 Contributing? Install the ShellCheck + shfmt [pre-commit hooks](docs/development.md) first (`pip install pre-commit && pre-commit install`) so linting and formatting run on every commit.
 
-CI runs on both GitLab and GitHub with the same core jobs — lint (shellcheck + bash syntax + python), test (stubbed + interactive, runs anywhere), and a manual `live-isolation` job that needs a podman-capable runner. GitHub additionally runs `macos` (BSD-userland lint + test) and `brew-formula` (installs isopod through the Homebrew tap formula built from the checkout); job names differ slightly between the two CI systems, but the roles match.
+CI runs on both GitLab and GitHub with the same core jobs — lint (shellcheck + bash syntax + python), test (stubbed + interactive, runs anywhere), and a manual `live-isolation` job that needs a podman-capable runner. GitHub additionally runs `macos` (BSD-userland lint + test), `brew-formula` (installs isopod through the Homebrew tap formula built from the checkout), and `distro-install` (runs `install.sh` for real on Fedora, immutable Fedora, Ubuntu, Arch, and Gentoo images); job names differ slightly between the two CI systems, but the roles match.
+
+Run one distro check locally against any image:
+
+```sh
+docker run --rm -v "$PWD:/src:ro" -w /src archlinux:latest \
+  bash test/distro-install.sh pacman     # expected package-manager hint
+```
 
 - **GitLab CI/CD** (`.gitlab-ci.yml`) — should run identically under [`gitlab-ci-local`](https://github.com/firecow/gitlab-ci-local) for debugging pipelines on your own machine before pushing.
 

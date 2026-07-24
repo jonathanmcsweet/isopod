@@ -17,25 +17,93 @@ chmod +x ~/.local/share/isopod/isopod
 ln -sf ~/.local/share/isopod/isopod ~/.local/bin/isopod
 ```
 
-Then install the runtime prerequisites and check the result with `isopod doctor`:
+Then install the runtime prerequisites for your distro **family** and check the
+result with `isopod doctor`. Derivatives follow their parent — isopod reads `ID`
+and then `ID_LIKE` from `/etc/os-release`, so a distro not named below is
+handled as whatever family it declares.
 
-- **Fedora:** `sudo dnf install -y podman openssh-clients`. `~/.local/bin` is
-  already on `PATH` for login shells; if `isopod` isn't found, add
-  `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`.
-- **Debian / Ubuntu:** `sudo apt update && sudo apt install -y podman openssh-client`.
-  `~/.local/bin` is on `PATH` only if it existed at login — log out and back in,
-  or run `export PATH="$HOME/.local/bin:$PATH"` (and add the same line to `~/.bashrc`).
-- **Immutable Fedora (Silverblue / Kinoite / Universal Blue / Bazzite):** the
-  per-user steps above work unchanged, with no layering and no reboot — `$HOME`
-  is a symlink to the always-writable `/var/home`, and `~/.local/bin` is already
-  on `PATH`. Podman ships on these images; if it's somehow missing, layer it with
-  `rpm-ostree install podman` (that one does need a reboot). **Install isopod on
-  the host, not inside a Toolbx/Distrobox** — isopod orchestrates *host*
-  containers via the host's podman, which a toolbox can't reach. (`install.sh`
-  detects immutable Fedora and, if it can't find podman or docker either, prints
-  this same warning.) For system-wide installs, `/usr/local` and `/opt` are
-  symlinks into the writable `/var`, so the steps below also work without
-  touching the immutable image.
+| Family | Covers (non-exhaustive) |
+| --- | --- |
+| [Debian](#debian-family) | Ubuntu, Linux Mint, Pop!_OS, Zorin OS, MX Linux, elementary OS, Raspberry Pi OS |
+| [Fedora](#fedora-family) | RHEL, CentOS Stream, AlmaLinux, Rocky Linux, Nobara |
+| [Fedora immutable](#fedora-immutable-family) | Silverblue, Kinoite, Sericea, Bazzite, Bluefin, Aurora (Universal Blue) |
+| [Arch](#arch-family) | Manjaro, EndeavourOS, CachyOS, Garuda, ArcoLinux |
+| [Gentoo](#gentoo-family) | Calculate Linux, Redcore Linux |
+
+#### Debian family
+
+```sh
+sudo apt update && sudo apt install -y podman openssh-client
+```
+
+`~/.local/bin` is on `PATH` only if it existed at login — log out and back in, or
+run `export PATH="$HOME/.local/bin:$PATH"` (and add the same line to `~/.bashrc`).
+
+#### Fedora family
+
+```sh
+sudo dnf install -y podman openssh-clients
+```
+
+`~/.local/bin` is already on `PATH` for login shells; if `isopod` isn't found, add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`.
+
+#### Fedora immutable family
+
+The per-user steps above work unchanged, with no layering and no reboot — `$HOME`
+is a symlink to the always-writable `/var/home`, and `~/.local/bin` is already on
+`PATH`. Podman ships on these images; if it's somehow missing, layer it with
+`rpm-ostree install podman` (that one does need a reboot). **Install isopod on the
+host, not inside a Toolbx/Distrobox** — isopod orchestrates *host* containers via
+the host's podman, which a toolbox can't reach. (`install.sh` detects an ostree
+deployment and, if it can't find podman or docker either, prints this same
+warning.) For system-wide installs, `/usr/local` and `/opt` are symlinks into the
+writable `/var`, so the steps below also work without touching the immutable image.
+
+#### Arch family
+
+```sh
+sudo pacman -S --needed podman openssh
+sudo pacman -S --needed netavark aardvark-dns passt fuse-overlayfs   # rootless networking
+```
+
+Podman's rootless networking pieces are separate packages here. Arch does not give
+new accounts a subuid/subgid range, so add one before the first box (see
+[Rootless podman needs a subuid/subgid range](#rootless-podman-needs-a-subuidsubgid-range)).
+`~/.local/bin` is on `PATH` via `/etc/profile.d` on a current install; if `isopod`
+isn't found, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`.
+
+#### Gentoo family
+
+```sh
+sudo emerge --ask app-containers/podman net-misc/openssh \
+  app-containers/netavark app-containers/aardvark-dns net-misc/passt
+```
+
+Build podman with `USE="rootless"` so the setuid `newuidmap`/`newgidmap` helpers
+from `sys-apps/shadow` are installed — without them rootless containers cannot map
+users. Gentoo also does not create a subuid/subgid range with the account (see
+below), and a custom kernel needs `CONFIG_USER_NS` plus cgroup v2 for rootless
+podman. Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` if
+`~/.local/bin` isn't already on `PATH`.
+
+On an OpenRC system everything works except two egress features: `isopod egress
+allow-list` and `isopod egress persist` install systemd units, so they need
+systemd; `egress lan-deny` (plain nftables) does not.
+
+### Rootless podman needs a subuid/subgid range
+
+Rootless podman maps the container's users through a subordinate UID/GID range
+assigned to your account in `/etc/subuid` and `/etc/subgid`. Fedora and
+Debian/Ubuntu create one when the account is created; **Arch and Gentoo do not**,
+and podman then fails with `no subuid ranges found for user`. Add a range once:
+
+```sh
+sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
+podman system migrate     # let podman pick up the new range
+```
+
+`install.sh` and `isopod doctor` both check for this and print the same fix.
 
 ### Linux, system-wide (all users, needs sudo)
 

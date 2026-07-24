@@ -26,7 +26,15 @@ detect_engine() {
   # Apple `container` has no `info`; its liveness is `container system status`.
   if ! engine_healthcheck "$ENGINE"; then
     case "$ENGINE" in
-      podman) die "podman is installed but not working. On macOS run: podman machine init && podman machine start" ;;
+      podman)
+        # The usual Linux cause is a missing subordinate UID/GID range; name it
+        # instead of the macOS advice, which does not apply there.
+        if is_linux && ! subid_ranges_ok; then
+          die "podman is installed but not working.
+$(subid_fix_hint)"
+        fi
+        die "podman is installed but not working. On macOS run: podman machine init && podman machine start"
+        ;;
       docker) die "docker is installed but the daemon is not reachable. Start Docker (or Docker Desktop) and retry." ;;
       container) die "Apple 'container' is installed but its service is not running. Start it: container system start" ;;
       *) die "engine '$ENGINE' is not responding." ;;
@@ -45,6 +53,38 @@ engine_healthcheck() { # engine_healthcheck <engine>
     container) container system status >/dev/null 2>&1 ;;
     *) "$1" info >/dev/null 2>&1 ;;
   esac
+}
+
+# Rootless podman maps the box's users through a subordinate UID/GID range
+# assigned to the invoking user in /etc/subuid and /etc/subgid. Fedora and
+# Debian/Ubuntu add one when the account is created; Arch and Gentoo leave both
+# files empty, so podman fails with "no subuid ranges found for user". Returns 0
+# when a range exists, or when the check does not apply (macOS, or running as
+# root, where podman is rootful and needs no mapping).
+subid_ranges_ok() {
+  is_linux || return 0
+  [ "$(id -u)" -ne 0 ] || return 0
+  local f user uid
+  user="$(id -un)"
+  uid="$(id -u)"
+  for f in "$SUBUID_FILE" "$SUBGID_FILE"; do
+    [ -r "$f" ] || return 1
+    # Exact field match via awk (not a regex), so a username with regex
+    # metacharacters can't match the wrong line. Either form counts: shadow
+    # writes the name, some tools write the numeric uid.
+    awk -F: -v u="$user" -v n="$uid" '$1 == u || $1 == n { found = 1 } END { exit !found }' "$f" ||
+      return 1
+  done
+}
+
+# How to add the missing range (share/rootless-subid.txt). Printed by both the
+# engine error and `isopod doctor`.
+subid_fix_hint() {
+  # Consumed by the template via render_tmpl (invisible to the linter).
+  local sub_user
+  sub_user="$(id -un)"
+  : "$sub_user"
+  render_tmpl rootless-subid.txt
 }
 
 ctr_name() { printf 'isopod-%s' "$1"; }

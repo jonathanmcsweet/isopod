@@ -1605,3 +1605,104 @@ EOF
   run cmd_gc --json
   assert_output '{"images":[]}'
 }
+
+# ---- rootless subuid/subgid ranges (Arch and Gentoo don't create one) --------
+@test "subid_ranges_ok accepts a range recorded under the user name" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid"
+  SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'root:0:1\n%s:100000:65536\n' "$(id -un)" >"$SUBUID_FILE"
+  cp "$SUBUID_FILE" "$SUBGID_FILE"
+  is_linux() { return 0; }
+  id() { case "$1" in -u) printf '1000\n' ;; -un) command id -un ;; esac; }
+  run subid_ranges_ok
+  assert_success
+}
+@test "subid_ranges_ok accepts a range recorded under the numeric uid" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid"
+  SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf '4242:100000:65536\n' >"$SUBUID_FILE"
+  cp "$SUBUID_FILE" "$SUBGID_FILE"
+  is_linux() { return 0; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  run subid_ranges_ok
+  assert_success
+}
+@test "subid_ranges_ok rejects a file that lists only other users" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid"
+  SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'someoneelse:100000:65536\n' >"$SUBUID_FILE"
+  cp "$SUBUID_FILE" "$SUBGID_FILE"
+  is_linux() { return 0; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  run subid_ranges_ok
+  assert_failure
+}
+@test "subid_ranges_ok rejects a subgid file with no entry (subuid alone is not enough)" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid"
+  SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'someone:100000:65536\n' >"$SUBUID_FILE"
+  : >"$SUBGID_FILE"
+  is_linux() { return 0; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  run subid_ranges_ok
+  assert_failure
+}
+@test "subid_ranges_ok rejects missing subuid/subgid files" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/nope-subuid"
+  SUBGID_FILE="$BATS_TEST_TMPDIR/nope-subgid"
+  is_linux() { return 0; }
+  run subid_ranges_ok
+  assert_failure
+}
+@test "subid_ranges_ok does not apply on macOS or as root" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/nope-subuid"
+  SUBGID_FILE="$BATS_TEST_TMPDIR/nope-subgid"
+  is_linux() { return 1; }
+  run subid_ranges_ok
+  assert_success
+  is_linux() { return 0; }
+  id() { case "$1" in -u) printf '0\n' ;; -un) printf 'root\n' ;; esac; }
+  run subid_ranges_ok
+  assert_success
+}
+@test "subid_fix_hint names the user and the usermod fix" {
+  id() { case "$1" in -un) printf 'someone\n' ;; -u) printf '4242\n' ;; esac; }
+  run subid_fix_hint
+  assert_success
+  assert_output --partial "range for 'someone'"
+  assert_output --partial 'usermod --add-subuids 100000-165535 --add-subgids 100000-165535 someone'
+  assert_output --partial 'podman system migrate'
+}
+@test "doctor_json warns when rootless podman has no subuid range" {
+  HARDENING_CONF="$BATS_TEST_TMPDIR/hardening.conf"
+  : >"$HARDENING_CONF"
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid"
+  SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  : >"$SUBUID_FILE"
+  : >"$SUBGID_FILE"
+  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git | podman) return 0 ;; *) return 1 ;; esac; }
+  podman() { return 1; } # installed, but `podman info` fails — the subid symptom
+  is_linux() { return 0; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  active_egress() { printf 'lan-deny\n'; }
+  run doctor_json
+  assert_success
+  assert_output --partial '{"level":"warn","id":"subid"'
+  assert_output --partial 'podman system migrate'
+}
+@test "doctor_json reports an ok subuid range when one exists" {
+  HARDENING_CONF="$BATS_TEST_TMPDIR/hardening.conf"
+  : >"$HARDENING_CONF"
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid"
+  SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'someone:100000:65536\n' >"$SUBUID_FILE"
+  cp "$SUBUID_FILE" "$SUBGID_FILE"
+  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git | podman) return 0 ;; *) return 1 ;; esac; }
+  podman() { return 0; }
+  is_linux() { return 0; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  active_egress() { printf 'lan-deny\n'; }
+  run doctor_json
+  assert_success
+  assert_output --partial '{"level":"ok","id":"subid","label":"rootless subuid/subgid range","hint":""}'
+}

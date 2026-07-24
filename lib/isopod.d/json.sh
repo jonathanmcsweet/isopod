@@ -251,6 +251,18 @@ doctor_json() {
   else
     checks+=("$(doctor_check_json na podman "podman" "not installed")")
   fi
+  # Rootless podman's subuid/subgid range (Arch and Gentoo do not create one with
+  # the account). Only meaningful where rootless podman is what runs boxes.
+  if have podman && is_linux && [ "$(id -u)" -ne 0 ]; then
+    local sub_user
+    sub_user="$(id -un)"
+    if subid_ranges_ok; then
+      checks+=("$(doctor_check_json ok subid "rootless subuid/subgid range" "")")
+    else
+      checks+=("$(doctor_check_json warn subid "rootless subuid/subgid range" \
+        "none for $sub_user — sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $sub_user, then podman system migrate")")
+    fi
+  fi
   if have docker; then
     if docker info >/dev/null 2>&1; then
       have_engine=1

@@ -22,14 +22,16 @@ toolchain required). Tool versions are pinned in
 > If you installed pre-commit with `pip install --user`, its binary lands in
 > `~/.local/bin`, which may not be on your `PATH`. Add
 > `export PATH="$HOME/.local/bin:$PATH"` to your shell profile if `pre-commit`
-> isn't found. Also note pre-commit needs `python3-venv` to build the hook
-> environments (`sudo apt install python3-venv` on Debian/Ubuntu).
+> isn't found. Also note pre-commit needs Python's `venv` module to build the
+> hook environments — a separate package on Debian/Ubuntu
+> (`sudo apt install python3-venv`), part of `python3` on Fedora, Arch, and
+> Gentoo.
 
 ## What the hooks enforce
 
 | Tool | Role | Scope | Stage |
 |------|------|-------|-------|
-| ShellCheck (`-S warning`) | static analysis / linting | `isopod`, `lib/isopod.d/*.sh`, `share/isopod-entrypoint`, `lib/find_box_repo.sh`, `install.sh`, `verify-host-isolation.sh`, `test/{run,packaging,egress-render,brew-formula}.sh` | commit |
+| ShellCheck (`-S warning`) | static analysis / linting | `isopod`, `lib/isopod.d/*.sh`, `share/isopod-entrypoint`, `lib/find_box_repo.sh`, `install.sh`, `verify-host-isolation.sh`, `test/{run,packaging,egress-render,brew-formula,distro-install}.sh` | commit |
 | shfmt (`-i 2 -ci`) | formatting | the above + `test/helper.bash`, `completions/isopod.bash` | commit |
 | actionlint | lint GitHub Actions workflows | `.github/workflows/*` | commit |
 

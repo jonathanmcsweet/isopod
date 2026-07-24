@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck -S warning isopod lib/isopod.d/*.sh install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh verify-host-isolation.sh
+          shellcheck -S warning isopod lib/isopod.d/*.sh install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh test/distro-install.sh verify-host-isolation.sh
           bash -n isopod lib/isopod.d/*.sh install.sh verify-host-isolation.sh
           # lint the discrete python helpers under lib/
           sudo apt-get install -y -qq python3 python3-pyflakes
@@ -76,6 +76,59 @@ jobs:
           # would depend on PATH order. Scripts launched FROM the suite resolve
           # `#!/usr/bin/env bash` via PATH, where Homebrew bin comes first.
           "$(brew --prefix)/bin/bash" test/run.sh
+
+  # -------------------------------------------------------------------------
+  # Distro install smoke: run install.sh for real on each Linux distro isopod
+  # documents, and check it lands a working CLI and prints that distro's engine
+  # hint. GitHub hosts only Ubuntu/Windows/macOS runners, so the other distros
+  # run as container images on the Ubuntu runner.
+  #
+  # Deliberately cheap: no container engine is installed inside these images
+  # (podman-in-podman needs a privileged runner — that is what live-isolation is
+  # for), and no packages are installed at all — every image already has the
+  # bash + coreutils install.sh needs. Cost is the image pull.
+  #
+  # The checkout happens on the runner (which has git) and is mounted into the
+  # image read-only, so minimal images without git/node work unchanged.
+  #
+  # "fedora-immutable" is the plain Fedora image with /run/ostree-booted created:
+  # that file is one of the signals install.sh uses to detect Silverblue/Kinoite/
+  # Universal Blue, so it exercises the immutable branch without pulling a
+  # multi-gigabyte ostree desktop image.
+  # -------------------------------------------------------------------------
+  distro-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fedora
+            image: fedora:latest
+            setup: "true"
+            expect: dnf
+          - name: fedora-immutable
+            image: fedora:latest
+            setup: "touch /run/ostree-booted"
+            expect: rpm-ostree
+          - name: ubuntu
+            image: ubuntu:24.04
+            setup: "true"
+            expect: apt
+          - name: arch
+            image: archlinux:latest
+            setup: "true"
+            expect: pacman
+          - name: gentoo
+            image: gentoo/stage3:latest
+            setup: "true"
+            expect: emerge
+    steps:
+      - uses: actions/checkout@v5
+      - name: install.sh smoke on ${{ matrix.name }}
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src ${{ matrix.image }} \
+            bash -c '${{ matrix.setup }} && bash test/distro-install.sh ${{ matrix.expect }}'
 
   # -------------------------------------------------------------------------
   # Homebrew formula: install isopod through the real tap formula, built from
