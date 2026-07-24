@@ -1,0 +1,4 @@
+rootless podman needs a subuid/subgid range for '$sub_user' ($SUBUID_FILE, $SUBGID_FILE).
+Fedora and Debian/Ubuntu create one with the account; Arch and Gentoo do not. Add one:
+  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $sub_user
+  podman system migrate

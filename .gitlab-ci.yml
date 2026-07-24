@@ -30,7 +30,7 @@ shellcheck:
   stage: lint
   script:
     - apt-get update -qq && apt-get install -y -qq shellcheck
-    - shellcheck -S warning isopod lib/isopod.d/*.sh install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh verify-host-isolation.sh
+    - shellcheck -S warning isopod lib/isopod.d/*.sh install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh test/distro-install.sh verify-host-isolation.sh
     - bash -n isopod lib/isopod.d/*.sh install.sh verify-host-isolation.sh
     # lint the discrete python helpers under lib/
     - apt-get install -y -qq python3 python3-pyflakes
@@ -59,6 +59,18 @@ unit-and-integration:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
+
+# ---------------------------------------------------------------------------
+# NOT MIRRORED HERE: the `distro-install` matrix in .github/workflows/ci.yml
+# (install.sh smoke on Fedora, immutable Fedora, Ubuntu, Arch, Gentoo). GitLab
+# clones the repository INSIDE the job image, so every distro image would need
+# git — which Arch and especially Gentoo cannot supply cheaply. GitHub clones on
+# the runner and mounts the checkout into the image, so the images stay bare.
+# Run the same check locally against any image:
+#
+#   docker run --rm -v "$PWD:/src:ro" -w /src archlinux:latest \
+#     bash test/distro-install.sh pacman
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Stage 3: live — REAL containers, exercising the isolation guarantees.

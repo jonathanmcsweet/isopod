@@ -86,7 +86,9 @@ Podman-native):
 > JetBrains would fail to connect (WebSocket 1006). isopod therefore always adds
 > `krun.use_passt=1`, giving the guest a real virtio-net stack.
 
-Fedora example (more distros to come):
+Fedora example. On Arch and Gentoo krun is not in the official repositories —
+install it from the AUR or build libkrun + crun yourself, then register the
+runtime path the same way (only the path in `containers.conf` changes):
 ```sh
 sudo dnf install -y crun-krun        # Fedora (recent releases, or the slp Copr)
 sudo usermod -aG kvm "$USER"          # rootless access to /dev/kvm (re-login after)

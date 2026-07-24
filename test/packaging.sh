@@ -50,8 +50,8 @@ ok "release tarball ships share/ (incl. Dockerfile)"
 prefix="$(mktemp -d)"
 home="$(mktemp -d)"
 trap 'rm -rf "$prefix" "$home"' EXIT
-# install.sh exits non-zero when no container engine is present (CI slim images
-# have none); that is unrelated to packaging, so gate on the render, not on it.
+# Gate on the render, not on the installer's exit status: what this check proves
+# is that the packaged layout resolves its templates.
 HOME="$home" XDG_DATA_HOME="$home/.local/share" \
   ./install.sh --prefix "$prefix" --no-extension >/dev/null 2>&1 || true
 
