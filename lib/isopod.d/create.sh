@@ -7,7 +7,7 @@
 cmd_create() {
   local name="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
-  local container_opt=0 dev_tools=0 harden_opt=""
+  local container_opt=0 dev_tools=0 harden_opt="" runtime_opt=""
   local -a repos=() copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
@@ -72,6 +72,10 @@ cmd_create() {
       --container)
         container_opt=1
         shift
+        ;;
+      --runtime)
+        runtime_opt="$2"
+        shift 2
         ;;
       --dev)
         dev_tools=1
@@ -165,6 +169,9 @@ cmd_create() {
   # Resolve the effective runtime (microVM by default, --container to opt out) and
   # egress mode (allow-list by default, degrades gracefully) BEFORE the microVM
   # memory sizing and the preflights below, which both read the resolved values.
+  # --runtime <name> pins a specific runtime (e.g. krun); resolve_runtime reads it
+  # via active_runtime, and --container still overrides it to a plain container.
+  [ -n "$runtime_opt" ] && export ISOPOD_RUNTIME="$runtime_opt"
   resolve_runtime "$ENGINE" "$container_opt"
   resolve_egress "$ENGINE"
 
