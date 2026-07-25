@@ -65,6 +65,9 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
   --container           Run as a PLAIN container instead of the default microVM
                         (lower isolation). Use when no microVM runtime/KVM is
                         available, or you accept a shared-kernel sandbox.
+  --runtime <name>      Pin a specific OCI runtime (e.g. krun, kata, runsc)
+                        instead of auto-selecting. Same effect as ISOPOD_RUNTIME.
+                        --container overrides this.
   --dev                 Add the dev/test toolchain (nested podman/docker, the
                         docker group, shellcheck/shfmt/pexpect/nftables) so the
                         box can run isopod's own test suite. Off by default —
