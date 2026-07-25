@@ -50,21 +50,51 @@ json_csv_array() { # json_csv_array <csv>
   printf ']'
 }
 
+# The box's effective runtime and its isolation class. `runtime` is the meta
+# value recorded at create ("container" for a plain Tier 1 container, else the
+# runtime name). `isolation` classifies that via the share/runtimes tier table:
+# container (Tier 1, shared kernel) | sandbox (Tier 2) | microvm (Tier 3, own
+# kernel) | unknown (a configured runtime not in the table). An Apple `container`
+# box is always its own VM, so it reports microvm regardless of runtime.
+box_isolation() { # box_isolation <name> -> prints the isolation class
+  local name="$1" rt tier
+  [ "$(box_engine "$name")" = container ] && {
+    printf microvm
+    return
+  }
+  rt=$(meta_get "$name" runtime 2>/dev/null || true)
+  case "$rt" in
+    '' | container)
+      printf container
+      return
+      ;;
+  esac
+  tier=$(runtime_tier "$rt" 2>/dev/null || true)
+  case "$tier" in
+    3) printf microvm ;;
+    2) printf sandbox ;;
+    *) printf unknown ;;
+  esac
+}
+
 # The six shared box fields as `"key":value` pairs (no surrounding braces), so
 # the list element and the info object can't drift apart. Values come from the
 # same sources as the text output: box_status, meta, ctr_name, box_engine.
 box_facts_json() { # box_facts_json <name>
-  local name="$1" status port color
+  local name="$1" status port color runtime
   status=$(box_status "$name" 2>/dev/null || printf 'missing')
   port=$(meta_get "$name" port 2>/dev/null || true)
   color=$(meta_get "$name" color 2>/dev/null || true)
-  printf '"name":%s,"status":%s,"ssh_host":%s,"port":%s,"color":%s,"engine":%s' \
+  runtime=$(meta_get "$name" runtime 2>/dev/null || true)
+  printf '"name":%s,"status":%s,"ssh_host":%s,"port":%s,"color":%s,"engine":%s,"runtime":%s,"isolation":%s' \
     "$(json_str "$name")" \
     "$(json_str "${status:-missing}")" \
     "$(json_str "$(ctr_name "$name")")" \
     "$(json_port_or_null "$port")" \
     "$(json_str_or_null "$color")" \
-    "$(json_str "$(box_engine "$name")")"
+    "$(json_str "$(box_engine "$name")")" \
+    "$(json_str "${runtime:-container}")" \
+    "$(json_str "$(box_isolation "$name")")"
 }
 
 # `isopod list --json`: a JSON array (possibly empty) of box summaries.
