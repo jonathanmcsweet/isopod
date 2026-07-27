@@ -316,9 +316,9 @@ teardown() { isopod_teardown_env; }
   assert_success
   assert_output --partial "--tmpfs"
   assert_output --partial "/sys/class/net"
-  refute_output --partial "/dev/null"    # /proc file masks are not attempted
+  refute_output --partial "/dev/null" # /proc file masks are not attempted
   refute_output --partial "/proc/cmdline"
-  refute_output --partial "mask="        # docker has no mask flag
+  refute_output --partial "mask=" # docker has no mask flag
 }
 
 @test "resolve_runtime_flag: podman gets an on-PATH bare name as an absolute path" {
@@ -472,7 +472,7 @@ teardown() { isopod_teardown_env; }
   ENGINE=podman
   mkdir -p "$(box_dir demo)"
   printf 'engine=podman\nport=2222\negress=lan-deny\n' >"$(box_dir demo)/meta"
-  egress_can_enforce() { return 0; } # pretend rootful
+  egress_can_enforce() { return 0; }  # pretend rootful
   egress_rules_loaded() { return 1; } # pretend firewall not loaded
   run egress_start_check demo
   assert_output --partial "OPEN network"
@@ -1578,7 +1578,7 @@ EOF
 @test "doctor_json summarizes prerequisite checks and flags a missing engine" {
   HARDENING_CONF="$BATS_TEST_TMPDIR/hardening.conf"
   : >"$HARDENING_CONF"
-  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git) return 0 ;; *) return 1 ;; esac; }
+  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git) return 0 ;; *) return 1 ;; esac }
   active_egress() { printf 'lan-deny\n'; }
   run doctor_json
   assert_success
@@ -1613,7 +1613,7 @@ EOF
   printf 'root:0:1\n%s:100000:65536\n' "$(id -un)" >"$SUBUID_FILE"
   cp "$SUBUID_FILE" "$SUBGID_FILE"
   is_linux() { return 0; }
-  id() { case "$1" in -u) printf '1000\n' ;; -un) command id -un ;; esac; }
+  id() { case "$1" in -u) printf '1000\n' ;; -un) command id -un ;; esac }
   run subid_ranges_ok
   assert_success
 }
@@ -1623,7 +1623,7 @@ EOF
   printf '4242:100000:65536\n' >"$SUBUID_FILE"
   cp "$SUBUID_FILE" "$SUBGID_FILE"
   is_linux() { return 0; }
-  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac }
   run subid_ranges_ok
   assert_success
 }
@@ -1633,7 +1633,7 @@ EOF
   printf 'someoneelse:100000:65536\n' >"$SUBUID_FILE"
   cp "$SUBUID_FILE" "$SUBGID_FILE"
   is_linux() { return 0; }
-  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac }
   run subid_ranges_ok
   assert_failure
 }
@@ -1643,7 +1643,7 @@ EOF
   printf 'someone:100000:65536\n' >"$SUBUID_FILE"
   : >"$SUBGID_FILE"
   is_linux() { return 0; }
-  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac }
   run subid_ranges_ok
   assert_failure
 }
@@ -1661,12 +1661,12 @@ EOF
   run subid_ranges_ok
   assert_success
   is_linux() { return 0; }
-  id() { case "$1" in -u) printf '0\n' ;; -un) printf 'root\n' ;; esac; }
+  id() { case "$1" in -u) printf '0\n' ;; -un) printf 'root\n' ;; esac }
   run subid_ranges_ok
   assert_success
 }
 @test "subid_fix_hint names the user and the usermod fix" {
-  id() { case "$1" in -un) printf 'someone\n' ;; -u) printf '4242\n' ;; esac; }
+  id() { case "$1" in -un) printf 'someone\n' ;; -u) printf '4242\n' ;; esac }
   run subid_fix_hint
   assert_success
   assert_output --partial "range for 'someone'"
@@ -1680,10 +1680,10 @@ EOF
   SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
   : >"$SUBUID_FILE"
   : >"$SUBGID_FILE"
-  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git | podman) return 0 ;; *) return 1 ;; esac; }
+  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git | podman) return 0 ;; *) return 1 ;; esac }
   podman() { return 1; } # installed, but `podman info` fails — the subid symptom
   is_linux() { return 0; }
-  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac }
   active_egress() { printf 'lan-deny\n'; }
   run doctor_json
   assert_success
@@ -1697,12 +1697,51 @@ EOF
   SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
   printf 'someone:100000:65536\n' >"$SUBUID_FILE"
   cp "$SUBUID_FILE" "$SUBGID_FILE"
-  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git | podman) return 0 ;; *) return 1 ;; esac; }
+  have() { case "$1" in ssh | ssh-keygen | ssh-keyscan | git | podman) return 0 ;; *) return 1 ;; esac }
   podman() { return 0; }
   is_linux() { return 0; }
-  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac; }
+  id() { case "$1" in -u) printf '4242\n' ;; -un) printf 'someone\n' ;; esac }
   active_egress() { printf 'lan-deny\n'; }
   run doctor_json
   assert_success
   assert_output --partial '{"level":"ok","id":"subid","label":"rootless subuid/subgid range","hint":""}'
+}
+
+# ---- export: a live workspace changing under tar -----------------------------
+# tar runs inside the running box, so a file can change size/mtime mid-read
+# (node_modules, a build dir, a lockfile). GNU tar then exits 1 with 'file
+# changed as we read it' — a warning, not a corrupt archive. box_tar_out is
+# mocked to emit a complete stream and return the exit code under test.
+@test "export keeps the archive when the box tar warns (exit 1)" {
+  seed="$TEST_TMP/seed"
+  mkdir -p "$seed"
+  echo micro >"$seed/f.txt"
+  WORKSPACE=/home/dev/workspace
+  open_box() { :; }
+  box_tar_out() {
+    tar -C "$seed" -cf - .
+    return 1
+  }
+  run cmd_export demo "$TEST_TMP/out"
+  assert_success
+  assert_output --partial "point-in-time snapshot"
+  assert [ -f "$TEST_TMP/out/f.txt" ]
+}
+
+# A real box-side failure (exit >= 2) must still fail loudly and leave no
+# half-written export behind.
+@test "export fails and removes the dest on a fatal box tar error (exit 2)" {
+  seed="$TEST_TMP/seed"
+  mkdir -p "$seed"
+  echo x >"$seed/f.txt"
+  WORKSPACE=/home/dev/workspace
+  open_box() { :; }
+  box_tar_out() {
+    tar -C "$seed" -cf - .
+    return 2
+  }
+  run cmd_export demo "$TEST_TMP/out"
+  assert_failure
+  assert_output --partial "export failed"
+  assert [ ! -e "$TEST_TMP/out" ]
 }

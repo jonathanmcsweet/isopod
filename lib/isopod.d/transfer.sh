@@ -21,11 +21,27 @@ cmd_export() {
   # `-p` (don't honor box-controlled mode bits, incl. setuid/setgid) and force
   # ownership to the extracting user with --no-same-owner. Modern GNU tar also
   # refuses absolute paths / `..`; bsdtar (macOS) differs, so we stay explicit.
+  #
+  # tar runs inside the LIVE box, so a file can change size/mtime between stat
+  # and read (node_modules, a build dir, a lockfile). GNU tar then prints
+  # 'file changed as we read it' and exits 1 — a warning, not a corrupt archive.
+  # Under `set -o pipefail` a bare `| tar || die` turns that into a failure and
+  # deletes the export, so inspect PIPESTATUS: abort only on a fatal box-side
+  # error (exit >= 2) or a failed host extract. The warning lines are filtered on
+  # the host, which works whatever tar the box ships (busybox lacks --warning).
   mkdir -p "$dest"
-  box_tar_out "$name" "$WORKSPACE" | tar -C "$dest" --no-same-owner -xf - || {
+  local -a rc
+  set +e
+  box_tar_out "$name" "$WORKSPACE" 2> >(grep -v 'file changed as we read it' >&2) |
+    tar -C "$dest" --no-same-owner -xf -
+  rc=("${PIPESTATUS[@]}")
+  set -e
+  if [ "${rc[1]}" -ne 0 ] || [ "${rc[0]}" -gt 1 ]; then
     rm -rf "$dest"
     die "export failed (is '$name' running? try: isopod start $name)"
-  }
+  fi
+  [ "${rc[0]}" -eq 1 ] &&
+    info "Some files changed while being read (a live workspace) — the copy is a point-in-time snapshot."
   info "Done: $dest"
 }
 
