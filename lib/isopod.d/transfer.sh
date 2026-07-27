@@ -10,11 +10,55 @@ cmd_copy_in() {
 }
 
 cmd_export() {
-  local name="${1:-}" dest="${2:-}"
-  [ -n "$name" ] || die "usage: isopod export <name> [dest-dir]"
+  local name="" dest="" gitignore=0
+  local -a excludes=()
+  while [ $# -gt 0 ]; do
+    # accept --opt=value as an alias for --opt value (e.g. --exclude=node_modules)
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
+    case "$1" in
+      --exclude)
+        [ -n "${2:-}" ] || die "export: --exclude needs a pattern"
+        excludes+=("$2")
+        shift 2
+        ;;
+      --gitignore | --exclude-vcs-ignores)
+        gitignore=1
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      -*) die "unknown option for export: $1" ;;
+      *)
+        if [ -z "$name" ]; then
+          name="$1"
+        elif [ -z "$dest" ]; then
+          dest="$1"
+        else die "unexpected argument: $1"; fi
+        shift
+        ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: isopod export <name> [dest] [--exclude <pattern>]... [--gitignore]"
   open_box "$name"
   dest="${dest:-./isopod-$name-export}"
   [ -e "$dest" ] && die "destination already exists: $dest"
+
+  # Optional filters, applied by the box-side tar so excluded trees are never
+  # even read (no bandwidth, no 'file changed' churn). --gitignore honors the
+  # box's .gitignore-style files (tar's --exclude-vcs-ignores); --exclude adds
+  # explicit glob patterns, single-quoted via shq so the box shell can't expand
+  # them before tar does. Both need GNU tar in the box (busybox lacks them).
+  local -a tarx=()
+  [ "$gitignore" -eq 1 ] && tarx+=(--exclude-vcs-ignores)
+  local pat
+  for pat in ${excludes[@]+"${excludes[@]}"}; do
+    tarx+=("--exclude=$(shq "$pat")")
+  done
+
   info "Copying $WORKSPACE out of the box to $dest ..."
   # Stream the workspace out as a tar archive (preserves mtimes/symlinks). The
   # box may be compromised, so treat its archive as untrusted on the host: drop
@@ -32,7 +76,7 @@ cmd_export() {
   mkdir -p "$dest"
   local -a rc
   set +e
-  box_tar_out "$name" "$WORKSPACE" 2> >(grep -v 'file changed as we read it' >&2) |
+  box_tar_out "$name" "$WORKSPACE" ${tarx[@]+"${tarx[@]}"} 2> >(grep -v 'file changed as we read it' >&2) |
     tar -C "$dest" --no-same-owner -xf -
   rc=("${PIPESTATUS[@]}")
   set -e

@@ -1745,3 +1745,35 @@ EOF
   assert_output --partial "export failed"
   assert [ ! -e "$TEST_TMP/out" ]
 }
+
+# --exclude / --gitignore are applied by the box-side tar. Capture the options
+# box_tar_out is handed and confirm both reach it, with globs single-quoted so
+# the box shell can't expand them before tar does.
+@test "export forwards --exclude and --gitignore to the box tar" {
+  seed="$TEST_TMP/seed"
+  mkdir -p "$seed"
+  echo x >"$seed/f.txt"
+  WORKSPACE=/home/dev/workspace
+  open_box() { :; }
+  box_tar_out() {
+    printf '%s\n' "$*" >"$TEST_TMP/opts"
+    tar -C "$seed" -cf - .
+  }
+  run cmd_export demo "$TEST_TMP/out" --gitignore --exclude '*.log' --exclude=node_modules
+  assert_success
+  run cat "$TEST_TMP/opts"
+  assert_output --partial "--exclude-vcs-ignores"
+  assert_output --partial "--exclude='*.log'"
+  assert_output --partial "--exclude='node_modules'"
+}
+
+@test "shq single-quotes a value so the box shell keeps globs literal" {
+  run shq '*.log'
+  assert_output "'*.log'"
+  # re-parsing the quoted form in a fresh shell (as the box shell does) must
+  # yield the original, embedded single quote and all
+  local q
+  q="$(shq "a'b*.log")"
+  run bash -c "printf %s $q"
+  assert_output "a'b*.log"
+}
