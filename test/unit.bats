@@ -311,6 +311,43 @@ teardown() { isopod_teardown_env; }
   refute_output --partial "/proc/cmdline"
 }
 
+@test "mask-microvm closes the device tree on Tier 3 only" {
+  # The ordinary masks close the ALIAS views (/sys/bus/pci, /sys/class/nvme,
+  # /sys/block); /sys/devices is the real tree behind them and still yields host
+  # PCI topology and NVMe hardware serials. It can only be masked under a microVM,
+  # where the box reads its guest's sysfs and nothing needs the container's copy.
+  ISOPOD_RUNTIME=krun run hardening_run_args podman
+  assert_success
+  assert_output --partial "/sys/devices:"
+
+  # Tier 1: the container's /sys IS the box's /sys — masking it would break tools
+  # in the box that read /sys/devices/system/cpu.
+  run hardening_run_args podman
+  assert_success
+  refute_output --partial "/sys/devices:"
+
+  # Tier 2 shares the host kernel the same way, so it is excluded too.
+  ISOPOD_RUNTIME=runsc run hardening_run_args podman
+  assert_success
+  refute_output --partial "/sys/devices:"
+}
+
+@test "mask-microvm reaches docker's --tmpfs list under a microVM" {
+  ISOPOD_RUNTIME=kata-runtime run hardening_run_args docker
+  assert_success
+  assert_output --partial "/sys/devices"
+}
+
+@test "unmask drops a mask-microvm entry from the baseline" {
+  mkdir -p "$ISOPOD_CONFIG_DIR"
+  printf 'unmask /sys/devices\n' >"$ISOPOD_CONFIG_DIR/hardening.conf"
+  ISOPOD_RUNTIME=krun run hardening_run_args podman
+  assert_success
+  refute_output --partial "/sys/devices:"
+  # the unrelated DMI subtree mask is untouched
+  assert_output --partial "/sys/devices/virtual/dmi"
+}
+
 @test "hardening_run_args keeps host masks under a Tier 2 runtime" {
   # gVisor is not a separate-kernel VM, so the masks still apply.
   ISOPOD_RUNTIME=runsc run hardening_run_args podman
