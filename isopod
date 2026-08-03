@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="2.16.0"
+ISOPOD_VERSION="2.17.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -85,6 +85,22 @@ CONTAINER_UID="1000" # uid/gid of CONTAINER_USER (share/Dockerfile); owns the se
 # the loopback host port isopod publishes.
 BOX_SSHD_PORT="2222"
 WORKSPACE="/home/dev/workspace"
+# Optional data volume (`isopod create --disk`). A sparse image file inside the
+# box's OWN container layer, which the entrypoint formats ext4 and loop-mounts at
+# boot. It is not a host bind mount: no host directory is exposed to the box, so
+# the copy-not-mount isolation model is unchanged — the guest kernel just gets a
+# block device whose backing file the box already owns. microVM boxes only; a
+# plain container has no loop devices.
+BOX_DISK_IMAGE="/var/lib/isopod/data.img"
+BOX_DISK_DEFAULT_MOUNT="/mnt/data"
+# `--nested-containers` puts the data volume here instead: rootless podman's
+# default graph root. Nested podman needs it — containers/storage cannot apply
+# image layers on the virtiofs filesystem a microVM box boots from (it cannot
+# carry the multiple uids/gids container storage needs), so layer extraction
+# fails with "setting up pivot dir: permission denied" until its storage sits on
+# a real block device. See docs/opt-in-security.md "Nested containers".
+NESTED_STORAGE_MOUNT="/home/$CONTAINER_USER/.local/share/containers"
+NESTED_DISK_DEFAULT_SIZE="20g"
 # Default guest memory when a Tier 3 microVM runtime is active and the user gave
 # no --memory (a microVM boots a fixed-size guest; without this it would be
 # starved). Override with ISOPOD_MICROVM_MEMORY or an explicit --memory.
