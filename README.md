@@ -217,6 +217,11 @@ Even with every mask on, a **plain shared-kernel container cannot hide these** �
 
 A **Tier 2 runtime** (gVisor `runsc`) already presents a synthetic `/proc`/`/sys`, closing the device tree, `/proc/version`, and boot id. A **Tier 3 microVM runtime** (Kata or krun) also closes `uname`, RAM/CPU identity, and the timing channels — the box runs on its own guest kernel behind a hardware boundary. See [docs/opt-in-security.md](docs/opt-in-security.md#microvm-runtimes-kata-krun--tier-3).
 
+Two more, which depend on your egress mode rather than the runtime:
+
+- **Your DNS resolvers** — `/etc/resolv.conf` in the box is podman's copy of the host's. `egress lan-deny` replaces it by pinning `--dns` to a public resolver; with egress **off** the box reads your real nameservers and search domain.
+- **Your LAN position** — with egress **off** the box gets an address on your LAN, so `/etc/hosts` discloses your subnet. Under `lan-deny` or `allow-list` the box sits on isopod's own fixed `10.88.7.0/24` bridge, which says nothing about your network.
+
 Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a Tier 3 microVM runtime (or a full VM); isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
 
 ### Kernel attack-surface hardening (`--harden`)
