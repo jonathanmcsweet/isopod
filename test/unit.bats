@@ -1407,6 +1407,28 @@ EOF
   [ "$dev" != "$nested" ]
 }
 
+# ---- box entrypoint: drop the runtime's OCI config copy -----------------------
+
+@test "the entrypoint removes the krun OCI config copy" {
+  # crun writes the container's whole config.json into the rootfs as
+  # /.krun_config.json (mode 0444). On a microVM box the guest's / IS that
+  # rootfs, so it is readable by every process in the box — including on a
+  # --no-sudo box — and it carries the host username, home layout and uid.
+  run grep -c 'rm -f /\.krun_config\.json' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  assert_output "1"
+}
+
+@test "the entrypoint drops the OCI config before sshd accepts logins" {
+  # Ordering is the whole point: once sshd is up, anything in the box could read
+  # the file. The removal must come first, not somewhere after the bootstrap.
+  local rm_line sshd_line
+  rm_line=$(grep -n 'rm -f /\.krun_config\.json' "$ISOPOD_ENTRYPOINT" | cut -d: -f1)
+  sshd_line=$(grep -n 'exec /usr/sbin/sshd' "$ISOPOD_ENTRYPOINT" | cut -d: -f1)
+  [ -n "$rm_line" ] && [ -n "$sshd_line" ]
+  [ "$rm_line" -lt "$sshd_line" ]
+}
+
 # ---- secrets: names, paths, specs ---------------------------------------------
 
 @test "valid_secret_name accepts typical env-style names" {
