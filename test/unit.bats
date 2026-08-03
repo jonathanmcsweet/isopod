@@ -274,16 +274,43 @@ teardown() { isopod_teardown_env; }
   assert_output --partial "runsc"
 }
 
-@test "hardening_run_args skips host masks under a Tier 3 microVM" {
-  # A microVM has its own kernel + virtual devices, so the host-fingerprint masks
-  # protect nothing there: emit the runtime flag, but none of the masks.
+@test "hardening_run_args drops /sys dir masks under a Tier 3 microVM" {
+  # A microVM's device tree is synthetic, so the /sys masks protect nothing there.
   ISOPOD_RUNTIME=krun run hardening_run_args podman
   assert_success
   assert_output --partial "--runtime"
   assert_output --partial "krun"
-  refute_output --partial "mask="
-  refute_output --partial "/proc/cmdline"
   refute_output --partial "/sys/class"
+  refute_output --partial "/sys/bus"
+}
+
+@test "hardening_run_args KEEPS /proc file masks under a Tier 3 microVM" {
+  # crun's krun handler exports the CONTAINER rootfs to the guest over virtio-fs,
+  # so the container's /proc rides along under the guest's procfs — and its
+  # /proc/cmdline is still the HOST kernel's boot line (LUKS UUID, ostree hash).
+  # Dropping these masks on Tier 3 leaked exactly what the profile exists to hide.
+  ISOPOD_RUNTIME=krun run hardening_run_args podman
+  assert_success
+  assert_output --partial "mask="
+  assert_output --partial "/proc/cmdline"
+  assert_output --partial "/proc/config.gz"
+}
+
+@test "hardening_run_args masks the host kernel build config on every tier" {
+  # /proc/config.gz is the host kernel's full build config — a precise host
+  # fingerprint — and is readable in a plain container too, not just a microVM.
+  run hardening_run_args podman
+  assert_success
+  assert_output --partial "/proc/config.gz"
+}
+
+@test "hardening_run_args emits nothing to mask for docker under a microVM" {
+  # Docker can't bind-mask /proc files (runc rejects it), so once the /sys dir
+  # masks are dropped on Tier 3 there is nothing left for it to apply.
+  ISOPOD_RUNTIME=kata-runtime run hardening_run_args docker
+  assert_success
+  refute_output --partial "--tmpfs"
+  refute_output --partial "mask="
 }
 
 @test "hardening_run_args keeps host masks under a Tier 2 runtime" {
