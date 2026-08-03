@@ -11,7 +11,8 @@
 # Layered: the shipped baseline (HARDENING_CONF) is read first, then the user's
 # own overrides (USER_HARDENING_CONF, in their config dir) on top — so a tweak
 # never silently drops the baseline, and upgrades keep delivering new masks.
-# Directives: `mask <path> [file]`, `unmask <path>` (drop a baseline mask),
+# Directives: `mask <path> [file]`, `mask-microvm <path> [file]` (applied only
+# under a Tier 3 runtime), `unmask <path>` (drop a baseline mask, of either kind),
 # `runtime <name>`, `no-runtime`.
 #
 # The two engines mask differently:
@@ -28,17 +29,22 @@
 HARD_RUNTIME=""
 HARD_MASKS=()
 HARD_FMASKS=()
+# Masks that are only SAFE under a Tier 3 microVM; empty on every other tier.
+HARD_VMMASKS=()
+HARD_VMFMASKS=()
 parse_hardening() {
   HARD_RUNTIME=""
   HARD_MASKS=()
   HARD_FMASKS=()
+  HARD_VMMASKS=()
+  HARD_VMFMASKS=()
   local -a conf_files=()
   [ -f "$HARDENING_CONF" ] && conf_files+=("$HARDENING_CONF")
   [ -f "$USER_HARDENING_CONF" ] && conf_files+=("$USER_HARDENING_CONF")
   [ "${#conf_files[@]}" -eq 0 ] && return 1
 
   local runtime="" key path kind line conf m
-  local -a masks=() fmasks=() keep=()
+  local -a masks=() fmasks=() vmmasks=() vmfmasks=() keep=()
   for conf in "${conf_files[@]}"; do
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line%%#*}"                       # strip comments
@@ -51,6 +57,10 @@ parse_hardening() {
           [ -n "${path:-}" ] || continue
           if [ "${kind:-}" = "file" ]; then fmasks+=("$path"); else masks+=("$path"); fi
           ;;
+        mask-microvm) # a mask that is only SAFE under a Tier 3 microVM (see below)
+          [ -n "${path:-}" ] || continue
+          if [ "${kind:-}" = "file" ]; then vmfmasks+=("$path"); else vmmasks+=("$path"); fi
+          ;;
         unmask) # drop a baseline mask (by path), from either dir or file masks
           [ -n "${path:-}" ] || continue
           keep=()
@@ -59,6 +69,12 @@ parse_hardening() {
           keep=()
           for m in "${fmasks[@]:-}"; do [ -n "$m" ] && [ "$m" != "$path" ] && keep+=("$m"); done
           fmasks=("${keep[@]:-}")
+          keep=()
+          for m in "${vmmasks[@]:-}"; do [ -n "$m" ] && [ "$m" != "$path" ] && keep+=("$m"); done
+          vmmasks=("${keep[@]:-}")
+          keep=()
+          for m in "${vmfmasks[@]:-}"; do [ -n "$m" ] && [ "$m" != "$path" ] && keep+=("$m"); done
+          vmfmasks=("${keep[@]:-}")
           ;;
         egress | no-egress) ;; # network egress isolation, resolved by active_egress
         *) warn "hardening profile: ignoring unknown directive '$key'" ;;
@@ -76,6 +92,8 @@ parse_hardening() {
   # callers can trust "${#HARD_FMASKS[@]}" as a real count.
   for m in "${masks[@]:-}"; do [ -n "$m" ] && HARD_MASKS+=("$m"); done
   for m in "${fmasks[@]:-}"; do [ -n "$m" ] && HARD_FMASKS+=("$m"); done
+  for m in "${vmmasks[@]:-}"; do [ -n "$m" ] && HARD_VMMASKS+=("$m"); done
+  for m in "${vmfmasks[@]:-}"; do [ -n "$m" ] && HARD_VMFMASKS+=("$m"); done
   return 0
 }
 
@@ -131,18 +149,38 @@ hardening_run_args() { # hardening_run_args <engine>
   # untouched — and closes the exported copy. Reaching that copy needs root inside
   # the box (mounts inherited into an unprivileged user namespace are locked
   # against exposing what is beneath them), which a default box grants via sudo.
+  # `mask-microvm` paths are added ONLY under a Tier 3 microVM, because they are
+  # unsafe to mask on any other tier. /sys/devices is the case this exists for:
+  # the masks above close the ALIAS views of the device tree (/sys/bus/pci,
+  # /sys/class/nvme, /sys/block), but /sys/devices is the real tree behind them
+  # and still yields host PCI topology and NVMe hardware serials. On Tier 1 it
+  # cannot simply be masked — the container's /sys IS the box's /sys, and tools in
+  # the box legitimately read /sys/devices/system/cpu. Under a microVM that
+  # objection disappears: the box reads its GUEST's sysfs, and the container's
+  # copy exists only to be exported to that guest, so nothing in the box needs it.
+  local -a vm_masks=() vm_fmasks=()
+  if [ -n "$HARD_RUNTIME" ] && [ "$(runtime_tier "$HARD_RUNTIME" 2>/dev/null)" = 3 ]; then
+    vm_masks=("${HARD_VMMASKS[@]:-}")
+    vm_fmasks=("${HARD_VMFMASKS[@]:-}")
+  fi
+
   local p
   if [ "$engine" = "docker" ]; then
-    for p in "${HARD_MASKS[@]:-}"; do [ -n "$p" ] && printf '%s\n' "--tmpfs" "$p"; done
+    for p in "${HARD_MASKS[@]:-}" "${vm_masks[@]:-}"; do [ -n "$p" ] && printf '%s\n' "--tmpfs" "$p"; done
     # File masks intentionally omitted on Docker (runc rejects /proc binds);
     # build_run_args surfaces the one-time warning.
   else
     local joined=""
-    for p in "${HARD_MASKS[@]:-}" "${HARD_FMASKS[@]:-}"; do
+    for p in "${HARD_MASKS[@]:-}" "${vm_masks[@]:-}" "${HARD_FMASKS[@]:-}" "${vm_fmasks[@]:-}"; do
       [ -n "$p" ] && joined="${joined:+$joined:}$p"
     done
     [ -n "$joined" ] && printf '%s\n' "--security-opt" "mask=$joined"
   fi
+  # Both branches end in a `[ ... ] && printf`, which is false whenever the last
+  # item is empty — and an empty mask-microvm list expands to exactly one empty
+  # item on the tiers that skip it. Return success explicitly so the caller does
+  # not read that as a failure.
+  return 0
 }
 
 # The runtime isopod will run boxes under, resolved the same way as the box
