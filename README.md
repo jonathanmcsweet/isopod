@@ -12,6 +12,7 @@
 - Copying and exporting to your local host instead of binding to your personal folders
 - MicroVMs and allow-lists when extra hardening is needed
 - Completely offline containers if desired
+- Box-local data volumes, and optional nested containers, without mounting anything from your host
 
 ## Install
 
@@ -143,6 +144,8 @@ The container cannot see the host filesystem. Files cross the boundary in five w
 3. `isopod export` to copy changes back to the host machine
 4. `isopod fetch` git history copied back to your local machine
 5. `git push` to your remote server
+
+A `--disk` data volume is not a sixth way: it is box-local storage (an image file in the box's own layer) and gives the box no access to the host filesystem — see [Data volumes](#data-volumes---disk).
 
 Copy-not-mount is an integrity control, not a confidentiality one. Nothing the agent writes reaches your host except through a transfer you invoke and can review. There is no live mount where it could plant git hooks, `Makefile` edits, or editor task files that your host tools would execute the next time you touch the directory. What you copy *in*, however, is fully readable by the agent; limiting where that can be sent is the job of [egress isolation](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list), not the copy model.
 
@@ -313,6 +316,43 @@ isopod create web --repo <url> --expose 8080         # same port on both sides
 
 Port mappings are set at create time (engine port mappings can't be added to a *running* container) and restored across stop/start. `isopod info <name>` lists them. To add or change ports later without starting over, use `isopod reconfigure` (below). In the VSCodium Remote-SSH window, ports a server opens are also auto-forwarded by the IDE.
 
+### Data volumes (`--disk`)
+
+`--disk` gives a box a dedicated filesystem separate from its container layer:
+
+```sh
+isopod create build --repo <url> --disk 20g              # ext4 at /mnt/data
+isopod create build --repo <url> --disk 50g:/srv/cache   # pick the mountpoint
+```
+
+This is **box-local storage, not a host mount.** isopod puts a sparse ext4 image inside the box's own container layer and the box's entrypoint loop-mounts it at boot. No host directory is exposed, so [the isolation model](#the-isolation-model) is unchanged — the guest kernel gets a block device backed by a file the box already owns, and the host side sees nothing it didn't already have.
+
+That is a deliberate choice over the obvious alternative. A host-backed volume (`podman -v`) would break copy-not-mount: it is exactly the live mount where an agent could plant git hooks, `Makefile` edits, or editor task files that your host tools would later execute. On a microVM box it is worse than that — libkrun exposes host directories over virtio-fs, and [its own documentation warns](https://github.com/containers/libkrun) that virtio-fs offers "no protection against the guest attempting to access other directories in the same filesystem, or even other filesystems in the host." So isopod does not offer one.
+
+Two limits follow from the design:
+
+- **microVM boxes only.** Attaching the image needs a loop device, which needs the box's own kernel; `--container` boxes are refused at create time rather than handed a box whose volume silently never mounted.
+- **A `--disk` box can't be `reconfigure`d.** `reconfigure` snapshots the container layer, and the volume's backing image lives in that layer — a 20g disk would make a 20g snapshot. Export your work and recreate instead.
+
+The volume survives `stop`/`start` and is destroyed with the box. It is *storage*, not a backup: `isopod export` still only reaches the workspace.
+
+### Running containers inside a box (`--nested-containers`)
+
+```sh
+isopod create ci --repo <url> --nested-containers        # 20g volume, or --disk 40g
+isopod shell ci -- podman run --rm docker.io/library/busybox echo hello
+```
+
+This installs rootless podman in the box and puts its storage on a `--disk` volume. The volume is not optional: **container storage cannot live on the filesystem a microVM box boots from.** A krun box's root is virtiofs, and virtiofs cannot carry the multiple uids/gids that containers/storage needs, so image-layer extraction fails with:
+
+```
+ApplyLayer ... setting up pivot dir: mkdir .../.pivot_root2168677766: permission denied
+```
+
+That failure is independent of the graph driver — `vfs`, `overlay`, and `fuse-overlayfs` all hit it — and it is not a version bug to wait out; upstream podman rejects putting storage on virtiofs for the same reason. Moving the graph root onto a real block device is the fix, and it also lets podman use `overlay` instead of the space-hungry `vfs` fallback. isopod additionally hands the box user `/dev/fuse` and `/dev/net/tun` (owner-only, mode `0600`), which rootless podman needs for storage and slirp4netns networking.
+
+A nested engine is real added attack surface *inside* the box, which is why it is opt-in. The boundary around the box is unchanged: the microVM is still the isolation edge, and nested containers run within it.
+
 ### Changing a box after create (`reconfigure`)
 
 A container's run settings — ports, memory, cpus, fingerprint masks — can't be edited in place; the engine bakes them in at creation. So every box has a readable config you can change, and isopod re-applies it for you:
@@ -325,7 +365,7 @@ isopod reconfigure web
 
 The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — and it's written as a **real, valid Compose service** (engine-correct: podman gets `security_opt: mask=…`, docker gets `tmpfs` directory masks — it can't mask `/proc` files), so you can read, copy, or adapt it elsewhere. But **isopod owns and parses it; it does not launch boxes from it** — a working box also needs the per-box SSH key, pinned host key, and cloned workspace that Compose can't set up, so `docker compose up` on it gives a bare container. isopod reads a few fields back on `reconfigure` (`ports`, `mem_limit`, `cpus`, `x-isopod-color`); the rest is a managed reference.
 
-On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box. (The Apple `container` engine has no image-commit primitive, so `reconfigure` isn't supported there — recreate the box instead.)
+On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box. (The Apple `container` engine has no image-commit primitive, so `reconfigure` isn't supported there — recreate the box instead. A box with a [`--disk` volume](#data-volumes---disk) is also excluded, because its backing image sits in the layer being snapshotted.)
 
 ## Machine-readable output (`--json`)
 

@@ -10,7 +10,7 @@ Usage:
   isopod stop <name>                  Stop a running sandbox
   isopod config <name>                Show a box's editable config (config.yaml)
   isopod reconfigure <name> [opts]    Apply new run settings to an existing box
-  isopod export <name> [dest]         Copy the workspace OUT of the sandbox
+  isopod export <name> [dest]         Copy the workspace OUT (--exclude PAT, --gitignore)
   isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
   isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
   isopod copy-in <name> <path>...     Copy more host folders INTO the sandbox
@@ -68,6 +68,20 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
   --runtime <name>      Pin a specific OCI runtime (e.g. krun, kata, runsc)
                         instead of auto-selecting. Same effect as ISOPOD_RUNTIME.
                         --container overrides this.
+  --disk <size[:path]>  Add a data volume of <size> (e.g. 20g) mounted at <path>
+                        (default $BOX_DISK_DEFAULT_MOUNT). It is box-local storage, NOT a
+                        host mount: isopod puts an ext4 image in the box's own
+                        layer and loop-mounts it, so no host directory is ever
+                        exposed. Survives stop/start, destroyed with the box.
+                        microVM boxes only (a container has no loop devices),
+                        and a box with one cannot be 'isopod reconfigure'd.
+  --nested-containers   Run containers INSIDE the box: installs rootless podman
+                        and puts its storage on a --disk volume (default
+                        $NESTED_DISK_DEFAULT_SIZE, override the size with --disk <size>). Required
+                        because container storage cannot live on the virtiofs
+                        filesystem a microVM box boots from. Also hands the box
+                        user /dev/fuse and /dev/net/tun. Adds real attack
+                        surface inside the box — off by default.
   --dev                 Add the dev/test toolchain (nested podman/docker, the
                         docker group, shellcheck/shfmt/pexpect/nftables) so the
                         box can run isopod's own test suite. Off by default —
