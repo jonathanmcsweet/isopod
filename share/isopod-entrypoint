@@ -60,6 +60,22 @@ elif [ "${ISOPOD_SUDO:-}" = "0" ]; then
   rm -f "/etc/sudoers.d/$iso_u"
 fi
 
+# Name resolution note (allow-list egress only). isopod runs an allow-list box
+# with `--dns=none`, so this box has no resolver at all: proxied clients hand the
+# hostname to the allow-list proxy, which resolves it. podman drops the file
+# entirely rather than writing an empty one, so nothing owns /etc/resolv.conf and
+# we can put the explanation exactly where someone debugging "Could not resolve
+# host" will look first. Comments only — no nameserver line, so glibc falls back
+# to 127.0.0.1 and fails in milliseconds instead of hanging on a timeout.
+if [ "${ISOPOD_DNS_VIA_PROXY:-}" = "1" ] && [ ! -s /etc/resolv.conf ]; then
+  printf '%s\n' \
+    '# isopod: this box resolves names through the egress allow-list proxy, not' \
+    '# through DNS, so it has no nameserver of its own. "Could not resolve host"' \
+    '# means the domain is not allow-listed. Allow it from the HOST with:' \
+    '#     isopod egress allow <domain>' \
+    >/etc/resolv.conf 2>/dev/null || true
+fi
+
 # Secrets tmpfs (mounted by the host only when the box has secrets): hand it
 # to the in-box user so inject_secrets can write over SSH. Ownership is set
 # here rather than via tmpfs uid=/gid= mount options, which need podman >= 4.9
@@ -129,6 +145,6 @@ if [ -n "${ISOPOD_HARDEN:-}" ] && [ "$ISOPOD_HARDEN" != off ] &&
   done </etc/isopod/hardening-sysctl.conf
 fi
 
-unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN ISOPOD_DISK ISOPOD_NESTED
+unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN ISOPOD_DISK ISOPOD_NESTED ISOPOD_DNS_VIA_PROXY
 mkdir -p /run/sshd
 exec /usr/sbin/sshd -D -e
