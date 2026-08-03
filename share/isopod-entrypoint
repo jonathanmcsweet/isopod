@@ -11,6 +11,25 @@
 # they are consumed and unset before sshd runs so they never reach a login
 # session. The in-box user is baked into /etc/isopod-user at image build.
 
+# Drop the runtime's copy of the container's OCI config, first thing.
+#
+# crun's krun handler writes the whole config.json into the container rootfs as
+# /.krun_config.json for the guest to read at boot, mode 0444. On a microVM box
+# the guest's / IS that rootfs (exported over virtio-fs), so the file stays
+# readable by EVERY process in the box — no sudo and no namespace tricks needed,
+# which means --no-sudo boxes are exposed too. It carries host identity that
+# nothing in the box has any business seeing:
+#
+#   root.path      the host path to the container rootfs — host USERNAME and
+#                  home layout (e.g. /var/home/<user>/.local/share/containers/…)
+#   mount sources  host runtime paths, including the host UID (/run/user/<uid>/…)
+#
+# By the time this entrypoint runs, the guest has already booted from it, and
+# crun rewrites it on every container start — so removing it here is safe and
+# self-healing rather than a one-time repair. Absent on non-krun runtimes, where
+# this is simply a no-op.
+rm -f /.krun_config.json 2>/dev/null || true
+
 iso_u="$(cat /etc/isopod-user)"
 iso_h="/home/$iso_u"
 
