@@ -154,6 +154,16 @@ cmd_reconfigure() {
      Recreate the box with the new settings: copy your work out (isopod copy-out $name ...),
      then 'isopod rm $name' and 'isopod create $name ...'."
 
+  # A --disk box can't be reconfigured. reconfigure snapshots the container layer
+  # with `commit`, and the volume's backing image lives in that layer — the
+  # snapshot would copy the whole volume (a 20g disk makes a 20g image), and every
+  # box later built from it would carry a copy. Refuse rather than do that.
+  [ -n "$(meta_get "$name" disk 2>/dev/null || true)" ] &&
+    die "reconfigure is not supported on a box with a --disk data volume (its backing
+     image lives in the container layer that reconfigure snapshots).
+     Copy your work out (isopod export $name ...) plus anything on the volume, then
+     'isopod rm $name' and recreate with the new settings."
+
   # Reproduce the box's isolation tier: recreate it under the SAME runtime it was
   # created with, rather than re-defaulting (which could silently flip a plain
   # container into a microVM, or vice versa). "container" == plain Tier 1. A box

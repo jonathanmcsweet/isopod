@@ -1292,6 +1292,96 @@ EOF
   [[ "$joined" != *"ISOPOD_HARDEN"* ]]
 }
 
+# ---- data volumes (--disk) ----------------------------------------------------
+
+@test "parse_disk_spec defaults the mountpoint and normalizes the spec" {
+  parse_disk_spec 20g
+  [ "$DISK_SIZE" = "20g" ]
+  [ "$DISK_MOUNT" = "/mnt/data" ]
+  [ "$DISK_SPEC" = "20g:/mnt/data" ]
+}
+
+@test "parse_disk_spec keeps an explicit mountpoint" {
+  parse_disk_spec "512m:/srv/cache"
+  [ "$DISK_SIZE" = "512m" ]
+  [ "$DISK_MOUNT" = "/srv/cache" ]
+  [ "$DISK_SPEC" = "512m:/srv/cache" ]
+}
+
+@test "parse_disk_spec clears the globals for an empty spec" {
+  parse_disk_spec "20g"
+  parse_disk_spec ""
+  [ -z "$DISK_SIZE" ]
+  [ -z "$DISK_MOUNT" ]
+  [ -z "$DISK_SPEC" ]
+}
+
+@test "parse_disk_spec rejects a bad size" {
+  run parse_disk_spec "twenty"
+  assert_failure
+  assert_output --partial "invalid --disk size"
+  run parse_disk_spec "20gb"
+  assert_failure
+}
+
+@test "parse_disk_spec rejects mountpoints that are not plain absolute paths" {
+  # relative
+  run parse_disk_spec "20g:mnt/data"
+  assert_failure
+  assert_output --partial "invalid --disk mountpoint"
+  # shell metacharacters — the spec reaches the box as an env value
+  run parse_disk_spec '20g:/mnt/$(id)'
+  assert_failure
+  run parse_disk_spec '20g:/mnt/a b'
+  assert_failure
+  # traversal and trailing slash
+  run parse_disk_spec "20g:/mnt/../etc"
+  assert_failure
+  run parse_disk_spec "20g:/mnt/data/"
+  assert_failure
+}
+
+@test "parse_disk_spec refuses to mount the volume over the box root" {
+  run parse_disk_spec "20g:/"
+  assert_failure
+  assert_output --partial "pick a subdirectory"
+}
+
+@test "build_run_args passes the disk spec to the entrypoint" {
+  ENGINE=podman
+  BOX_DISK=20g:/mnt/data ISOPOD_RUNTIME=krun build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"ISOPOD_DISK=20g:/mnt/data"* ]]
+  # a data volume is box-local: no engine mount flag is involved
+  [[ "$joined" != *"--volume"* ]]
+  [[ "$joined" != *" -v "* ]]
+  [[ "$joined" != *"--mount"* ]]
+}
+
+@test "build_run_args omits the disk env on a box without one" {
+  ENGINE=podman
+  ISOPOD_RUNTIME=krun build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"ISOPOD_DISK"* ]]
+}
+
+@test "build_run_args passes the nested-containers env only when asked" {
+  ENGINE=podman
+  BOX_NESTED=1 ISOPOD_RUNTIME=krun build_run_args box img 127.0.0.1::2222 "" ""
+  [[ "${RUN_ARGS[*]}" == *"ISOPOD_NESTED=1"* ]]
+  ISOPOD_RUNTIME=krun build_run_args box img 127.0.0.1::2222 "" ""
+  [[ "${RUN_ARGS[*]}" != *"ISOPOD_NESTED"* ]]
+}
+
+@test "image_tag_for gives the nested image its own tag" {
+  local lean nested dev
+  lean=$(image_tag_for debian:bookworm-slim 0 0)
+  nested=$(image_tag_for debian:bookworm-slim 0 1)
+  dev=$(image_tag_for debian:bookworm-slim 1 0)
+  [ "$lean" != "$nested" ]
+  [ "$dev" != "$nested" ]
+}
+
 # ---- secrets: names, paths, specs ---------------------------------------------
 
 @test "valid_secret_name accepts typical env-style names" {

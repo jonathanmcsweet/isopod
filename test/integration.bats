@@ -870,6 +870,81 @@ seed_secret() { # seed_secret <name> <value>
   assert_success
 }
 
+@test "create --disk passes the volume to the box without any host mount" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal --disk 20g
+  assert_success
+  assert_stub_called 'podman run .*ISOPOD_DISK=20g:/mnt/data'
+  # box-local storage: create must never reach for a host bind mount or volume
+  assert_stub_not_called 'podman run .*--volume'
+  assert_stub_not_called 'podman run .*--mount'
+  run grep '^disk=20g:/mnt/data$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+@test "create --disk honors an explicit mountpoint" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal --disk 4g:/srv/cache
+  assert_success
+  assert_stub_called 'podman run .*ISOPOD_DISK=4g:/srv/cache'
+}
+
+@test "create --disk is refused on a plain container box (no loop devices)" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --container --disk 20g
+  assert_failure
+  assert_output --partial "--disk needs a microVM box"
+  # refused before any engine work — and no half-made box remains
+  assert_stub_not_called 'podman run'
+  [ ! -d "$ISOPOD_CONFIG_DIR/boxes/demo" ]
+}
+
+@test "create --disk rejects a bad spec before touching the engine" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --disk 20gb
+  assert_failure
+  assert_output --partial "invalid --disk size"
+  assert_stub_not_called 'podman run'
+  [ ! -d "$ISOPOD_CONFIG_DIR/boxes/demo" ]
+}
+
+@test "create --nested-containers implies a disk at podman's graph root" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal --nested-containers
+  assert_success
+  assert_stub_called 'podman run .*ISOPOD_DISK=20g:/home/dev/.local/share/containers'
+  assert_stub_called 'podman run .*ISOPOD_NESTED=1'
+  # the nested toolchain is a distinct image build
+  assert_stub_called 'podman build .*ISOPOD_NESTED=1'
+  run grep '^nested=1$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+@test "create --nested-containers takes a --disk size but not a mountpoint" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal \
+    --nested-containers --disk 40g
+  assert_success
+  assert_stub_called 'podman run .*ISOPOD_DISK=40g:/home/dev/.local/share/containers'
+
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo2 \
+    --nested-containers --disk 40g:/mnt/data
+  assert_failure
+  assert_output --partial "sets the --disk mountpoint itself"
+}
+
+@test "a plain box gets neither the disk nor the nested env" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_not_called 'podman run .*ISOPOD_DISK'
+  assert_stub_not_called 'podman run .*ISOPOD_NESTED'
+  assert_stub_called 'podman build .*ISOPOD_NESTED=0'
+}
+
+@test "reconfigure refuses a --disk box rather than snapshot the volume" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal --disk 20g
+  assert_success
+  run "$ISOPOD_ROOT/isopod" reconfigure demo --memory 4g
+  assert_failure
+  assert_output --partial "not supported on a box with a --disk data volume"
+  # the box must be left alone — no snapshot, no recreate
+  assert_stub_not_called 'podman commit'
+}
+
 @test "create --secret dies early when the secret is not stored" {
   export ISOPOD_SECRET_BACKEND=file
   run "$ISOPOD_ROOT/isopod" create demo --secret NOPE

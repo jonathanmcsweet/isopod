@@ -8,6 +8,7 @@ cmd_create() {
   local name="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
   local container_opt=0 dev_tools=0 harden_opt="" runtime_opt=""
+  local disk_opt="" nested=0
   local -a repos=() copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
@@ -81,6 +82,14 @@ cmd_create() {
         dev_tools=1
         shift
         ;;
+      --disk)
+        disk_opt="$2"
+        shift 2
+        ;;
+      --nested-containers)
+        nested=1
+        shift
+        ;;
       --harden)
         harden_opt="$2"
         shift 2
@@ -118,6 +127,20 @@ cmd_create() {
   fi
   [ -n "$memory" ] && { valid_memory "$memory" || die "invalid --memory '$memory' (e.g. 512m, 2g)"; }
   [ -n "$cpus" ] && { valid_cpus "$cpus" || die "invalid --cpus '$cpus' (a positive number, e.g. 1 or 1.5)"; }
+  # --nested-containers is --disk mounted at rootless podman's graph root: nested
+  # podman only works with its storage on a real block device (see the entry
+  # script's NESTED_STORAGE_MOUNT note). An explicit --disk size is honored; an
+  # explicit mountpoint is not, because any other one leaves podman unfixed.
+  if [ "$nested" -eq 1 ]; then
+    case "$disk_opt" in
+      *:*) die "--nested-containers sets the --disk mountpoint itself ($NESTED_STORAGE_MOUNT).
+     Pass a size only (e.g. --disk 40g), or drop --nested-containers to place the volume yourself." ;;
+      "") disk_opt="$NESTED_DISK_DEFAULT_SIZE:$NESTED_STORAGE_MOUNT" ;;
+      *) disk_opt="$disk_opt:$NESTED_STORAGE_MOUNT" ;;
+    esac
+  fi
+  # Validates into DISK_SIZE / DISK_MOUNT / DISK_SPEC (no-op when unset).
+  parse_disk_spec "$disk_opt"
   if [ "${#repos[@]}" -gt 0 ] && [ "${#copies[@]}" -gt 0 ]; then
     die "use either --repo or --copy, not both (you can 'isopod copy-in' later)"
   fi
@@ -175,6 +198,20 @@ cmd_create() {
   resolve_runtime "$ENGINE" "$container_opt"
   resolve_egress "$ENGINE"
 
+  # A data volume is a loop-mounted image inside the box, which needs the box's
+  # own kernel: a plain container has no loop devices to attach it to. Fail here
+  # rather than hand back a box whose volume silently never mounted. This runs
+  # after resolve_runtime so it sees the EFFECTIVE runtime — including a microVM
+  # default that degraded to a container because no runtime or KVM was available.
+  if [ -n "$DISK_SPEC" ]; then
+    [ "$ENGINE" = container ] &&
+      die "--disk is not supported on the Apple 'container' engine"
+    is_microvm_runtime ||
+      die "--disk needs a microVM box — a plain container has no loop devices to mount the volume on.
+     This box resolved to a plain container$([ "$container_opt" -eq 1 ] && printf ' (--container)' || printf ' (no microVM runtime or KVM available — see: isopod doctor)').
+     Create it under a microVM runtime, or drop --disk/--nested-containers."
+  fi
+
   # --dockerfile: build the project's Dockerfile first and use it as the base the
   # sandbox layers sshd/git onto (same role as --image, you just hand over a
   # Dockerfile). Done before the rollback is armed so a build error leaves no box.
@@ -192,7 +229,7 @@ cmd_create() {
   chmod 700 "$CONFIG_DIR" "$BOXES_DIR" "$(box_dir "$name")" 2>/dev/null || true
 
   local tag
-  tag=$(build_image "$base" "$dev_tools")
+  tag=$(build_image "$base" "$dev_tools" "$nested")
 
   info "Generating dedicated SSH keypair for this box..."
   ssh-keygen -t ed25519 -N '' -C "isopod-$name" -f "$(box_dir "$name")/id_ed25519" -q
@@ -222,6 +259,10 @@ cmd_create() {
     *) die "invalid --harden '$harden' (use: default | off)" ;;
   esac
   local BOX_HARDEN="$harden"
+  # Data volume + nested-container wiring for build_run_args (which turns these
+  # into the entrypoint's boot env) and the meta below.
+  local BOX_DISK="$DISK_SPEC"
+  local BOX_NESTED="$nested"
   # Secret specs for build_run_args (the tmpfs mount) and the meta below; the
   # VALUES stay in the host store — only name:path pairs travel through here.
   local BOX_SECRETS
@@ -270,6 +311,8 @@ cmd_create() {
       printf '%s' "${EXPOSE_SPECS[*]:-}"
     )"
     printf 'secrets=%s\n' "$BOX_SECRETS"
+    printf 'disk=%s\n' "$BOX_DISK"
+    printf 'nested=%s\n' "$BOX_NESTED"
   } >"$(box_dir "$name")/meta"
   write_box_config "$name"
 
@@ -327,6 +370,24 @@ cmd_create() {
   # State the kernel-hardening posture too (its guest-sysctl arm only applies to
   # microVM boxes), so what the box actually got is legible at create time.
   harden_posture_note "$BOX_HARDEN"
+  disk_posture_note "$name" "$BOX_DISK" "$BOX_NESTED"
+}
+
+# State what a --disk / --nested-containers box actually got. The volume is
+# formatted and mounted by the entrypoint at boot, so say where it landed and
+# that it is box-local storage that exposes no host directory.
+disk_posture_note() { # disk_posture_note <name> <disk-spec> <nested 0|1>
+  local name="$1" spec="$2" nested="${3:-0}" size mount
+  [ -n "$spec" ] || return 0
+  size="${spec%%:*}"
+  mount="${spec#*:}"
+  info "Data volume: $size ext4 at $mount — box-local (an image in the box's own
+     layer, loop-mounted; no host directory is exposed). It survives stop/start
+     and is destroyed with the box."
+  [ "$nested" = 1 ] &&
+    info "Nested containers: rootless podman is installed and its storage sits on that
+     volume. Try it with:  isopod shell $name -- podman run --rm docker.io/library/busybox echo hi"
+  return 0
 }
 
 repo_subdir() { # repo_subdir <url> — print the workspace subfolder name for a repo URL
