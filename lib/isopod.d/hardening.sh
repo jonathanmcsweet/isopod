@@ -113,22 +113,35 @@ hardening_run_args() { # hardening_run_args <engine>
   [ -n "$HARD_RUNTIME" ] &&
     printf '%s\n' "--runtime" "$(resolve_runtime_flag "$engine" "$HARD_RUNTIME")"
 
-  # The masks below hide HOST hardware that a Tier 1 container reads through the
-  # shared kernel's /proc and /sys. A Tier 3 microVM has its own guest kernel and
-  # only virtual devices (krun's synthetic DMI, a virtio NIC/PCI bus), so those
-  # same paths expose nothing about the host — the VM boundary is the isolation,
-  # not the masks. Skip them there: they protect nothing, and emitting host-
-  # fingerprint masks under a microVM would misrepresent what is doing the work.
-  [ -n "$HARD_RUNTIME" ] && [ "$(runtime_tier "$HARD_RUNTIME" 2>/dev/null)" = 3 ] && return 0
+  # DIRECTORY masks (/sys/*) hide HOST hardware that a Tier 1 container reads
+  # through the shared kernel. A Tier 3 microVM has its own guest kernel and only
+  # virtual devices (krun's synthetic DMI, a virtio NIC/PCI bus), so those paths
+  # expose nothing about the host there and the masks are dropped.
+  #
+  # FILE masks (/proc/*) are NOT dropped on Tier 3. crun's krun handler hands the
+  # guest the CONTAINER rootfs over virtio-fs — krun_add_virtiofs2(ctx, tag, "/")
+  # — and the container's own /proc travels inside it, sitting under the guest's
+  # procfs as a second mount. Root in the box can unmount the guest's /proc and
+  # read the container's, where /proc/cmdline is still the HOST kernel's boot
+  # line (LUKS volume UUID, ostree deployment hash, host OS) and /proc/config.gz
+  # is the HOST kernel's build config. Those are exactly what this profile exists
+  # to hide, so a microVM box needs the file masks as much as a container box.
+  local tier3=0
+  [ -n "$HARD_RUNTIME" ] && [ "$(runtime_tier "$HARD_RUNTIME" 2>/dev/null)" = 3 ] && tier3=1
 
   local p
   if [ "$engine" = "docker" ]; then
+    # Docker can't apply file masks at all (runc rejects /proc bind mounts), so a
+    # Tier 3 box there has nothing left to emit once the dir masks are dropped.
+    [ "$tier3" = 1 ] && return 0
     for p in "${HARD_MASKS[@]:-}"; do [ -n "$p" ] && printf '%s\n' "--tmpfs" "$p"; done
     # File masks intentionally omitted on Docker (runc rejects /proc binds);
     # build_run_args surfaces the one-time warning.
   else
     local joined=""
-    for p in "${HARD_MASKS[@]:-}" "${HARD_FMASKS[@]:-}"; do
+    local -a dirmasks=()
+    [ "$tier3" = 0 ] && dirmasks=("${HARD_MASKS[@]:-}")
+    for p in "${dirmasks[@]:-}" "${HARD_FMASKS[@]:-}"; do
       [ -n "$p" ] && joined="${joined:+$joined:}$p"
     done
     [ -n "$joined" ] && printf '%s\n' "--security-opt" "mask=$joined"
