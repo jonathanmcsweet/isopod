@@ -39,6 +39,10 @@ kata-qemu     3  virtio
 kata-fc       3  virtio
 kata-clh      3  virtio
 krun          3  virtio  # via passt (krun.use_passt=1); libkrun default is TSI
+crun-krun     3  virtio  # the binary krun is usually registered to (Fedora's
+                         # crun-krun package). Listed so a profile naming it
+                         # directly — or a path ending in it — still resolves a
+                         # tier, instead of silently losing every Tier 3 measure.
 
 # NOT listed: crun-vm. It runs VM DISK images (a "containerdisk", a --rootfs disk
 # image, or a bootc bootable container), not a plain OCI container image — which

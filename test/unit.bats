@@ -311,6 +311,38 @@ teardown() { isopod_teardown_env; }
   refute_output --partial "/proc/cmdline"
 }
 
+@test "runtime_tier resolves a runtime given as an absolute path" {
+  # A runtime reaches the tier lookup as a path from `runtime /usr/bin/krun`,
+  # from ISOPOD_RUNTIME/--runtime, or round-tripped through a box's meta on
+  # reconfigure. Matching only the table name meant no tier — and every Tier 3
+  # measure (microVM memory default, guest sysctls, mask-microvm) skipped
+  # silently.
+  [ "$(runtime_tier krun)" = 3 ]
+  [ "$(runtime_tier /usr/bin/krun)" = 3 ]
+  [ "$(runtime_tier /opt/kata/bin/kata-runtime)" = 3 ]
+  [ "$(runtime_tier runsc)" = 2 ]
+}
+
+@test "runtime_tier knows crun-krun, the binary krun is registered to" {
+  [ "$(runtime_tier crun-krun)" = 3 ]
+  [ "$(runtime_tier /usr/bin/crun-krun)" = 3 ]
+}
+
+@test "runtime_tier still reports nothing for an unknown runtime" {
+  run runtime_tier bogus
+  assert_failure
+  run runtime_tier /usr/bin/bogus
+  assert_failure
+}
+
+@test "a path-configured microVM still gets its Tier 3 masks" {
+  # The end-to-end consequence of the lookup above: configure krun by path and
+  # the box must still be treated as a microVM.
+  ISOPOD_RUNTIME=/usr/bin/crun-krun run hardening_run_args podman
+  assert_success
+  assert_output --partial "/sys/devices:"
+}
+
 @test "mask-microvm closes the device tree on Tier 3 only" {
   # The ordinary masks close the ALIAS views (/sys/bus/pci, /sys/class/nvme,
   # /sys/block); /sys/devices is the real tree behind them and still yields host
