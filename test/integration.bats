@@ -186,6 +186,20 @@ EOF
   assert_stub_called 'podman run .*--memory 2g'
 }
 
+@test "create keeps the /proc file masks on a Tier 3 microVM box" {
+  # Regression: isopod used to skip ALL masks under a microVM, on the assumption
+  # that the guest kernel meant there was no host data left to hide. But crun's
+  # krun handler exports the CONTAINER rootfs to the guest over virtio-fs, so the
+  # container's /proc rides along under the guest's procfs — and root in the box
+  # can unmount the guest's /proc and read the host's boot line from it.
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called 'podman run .*mask=.*/proc/cmdline'
+  assert_stub_called 'podman run .*mask=.*/proc/config.gz'
+  # the /sys device-tree masks are still dropped — the guest's is synthetic
+  assert_stub_not_called 'podman run .*mask=.*/sys/class/dmi'
+}
+
 @test "explicit --memory overrides the microVM default" {
   ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --memory 8g --color teal
   assert_success
