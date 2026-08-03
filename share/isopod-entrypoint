@@ -49,6 +49,50 @@ if [ -d /run/secrets ]; then
   chown "$iso_u:$iso_u" /run/secrets
 fi
 
+# Data volume (isopod create --disk). ISOPOD_DISK is "SIZE:MOUNTPOINT". The
+# backing image lives in this box's own container layer — there is NO host bind
+# mount, so no host directory is exposed; the guest kernel just gets a block
+# device over a file the box already owns. Formatted once, on the boot that
+# creates it, and loop-mounted on every boot after that.
+#
+# Nothing here is fatal: sshd must still come up so the box stays reachable and
+# the user can read the reason from `$ENGINE logs`.
+if [ -n "${ISOPOD_DISK:-}" ]; then
+  iso_disk_size="${ISOPOD_DISK%%:*}"
+  iso_disk_mount="${ISOPOD_DISK#*:}"
+  iso_disk_img="/var/lib/isopod/data.img"
+  mkdir -p /var/lib/isopod "$iso_disk_mount"
+  if [ ! -f "$iso_disk_img" ]; then
+    # Build under a temporary name and rename only on success, so an interrupted
+    # or failed mkfs never leaves a file a later boot would mount as formatted.
+    if truncate -s "$iso_disk_size" "$iso_disk_img.new" 2>/dev/null &&
+      mkfs.ext4 -q -F "$iso_disk_img.new" 2>/dev/null; then
+      mv "$iso_disk_img.new" "$iso_disk_img"
+    else
+      rm -f "$iso_disk_img.new"
+      echo "isopod: could not create the $iso_disk_size data volume" >&2
+    fi
+  fi
+  if [ -f "$iso_disk_img" ]; then
+    if mount -o loop "$iso_disk_img" "$iso_disk_mount" 2>/dev/null; then
+      chown "$iso_u:$iso_u" "$iso_disk_mount"
+    else
+      echo "isopod: could not mount the data volume at $iso_disk_mount" >&2
+      echo "isopod: loop devices need a microVM box (not --container)" >&2
+    fi
+  fi
+fi
+
+# Nested containers (isopod create --nested-containers). Rootless podman inside
+# the box needs /dev/fuse (fuse-overlayfs storage) and /dev/net/tun
+# (slirp4netns networking), both root-only by default. Hand them to the box user
+# specifically rather than making them world-accessible — the mode stays 0600.
+if [ "${ISOPOD_NESTED:-}" = "1" ]; then
+  for iso_dev in /dev/fuse /dev/net/tun; do
+    [ -e "$iso_dev" ] && chown "$iso_u" "$iso_dev" 2>/dev/null
+  done
+fi
+
 # Kernel hardening (default profile). isopod sets ISOPOD_HARDEN only for microVM
 # boxes, which have their own guest kernel — so applying these sysctls affects
 # only this box, never the host. Container boxes never receive it. Write straight
@@ -66,6 +110,6 @@ if [ -n "${ISOPOD_HARDEN:-}" ] && [ "$ISOPOD_HARDEN" != off ] &&
   done </etc/isopod/hardening-sysctl.conf
 fi
 
-unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN
+unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN ISOPOD_DISK ISOPOD_NESTED
 mkdir -p /run/sshd
 exec /usr/sbin/sshd -D -e

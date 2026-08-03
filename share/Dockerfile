@@ -26,6 +26,9 @@ ARG ISOPOD_SSHD_PORT=2222
 # Opt-in dev/test toolchain (nested engines + lint/test tools). Off by default so
 # the sandbox base stays minimal; `isopod create --dev` sets it to 1. See below.
 ARG ISOPOD_DEV_TOOLS=0
+# Opt-in nested container engine (`isopod create --nested-containers`). Off by
+# default so the sandbox base stays minimal; see the RUN block below.
+ARG ISOPOD_NESTED=0
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Essentials: sshd (remote access) plus git and common CLI tooling.
@@ -64,6 +67,29 @@ RUN if [ "$ISOPOD_DEV_TOOLS" = "1" ]; then \
       && { grep -q "^$ISOPOD_USER:" /etc/subuid \
            || usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$ISOPOD_USER"; } \
       && usermod -aG docker "$ISOPOD_USER"; \
+    fi
+
+# Rootless nested podman — installed ONLY when ISOPOD_NESTED=1 (isopod create
+# --nested-containers). A nested engine is real added attack surface inside the
+# box, so it is not in the default image. Skipped when the --dev toolchain above
+# already installed these. The box ALSO needs its container storage on a real
+# block device: containers/storage cannot apply image layers on the virtiofs
+# filesystem a microVM box boots from (virtiofs cannot carry the multiple
+# uids/gids container storage needs), and layer extraction fails there with
+# "setting up pivot dir: permission denied" no matter which graph driver is
+# selected. `--nested-containers` implies a `--disk` mounted at the graph root,
+# which is what makes it work. The subordinate IDs cover a base image whose user
+# already existed without them; /dev/fuse and /dev/net/tun are handed to the user
+# at boot by the entrypoint.
+RUN if [ "$ISOPOD_NESTED" = "1" ] && [ "$ISOPOD_DEV_TOOLS" != "1" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends \
+           podman uidmap slirp4netns fuse-overlayfs \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi \
+ && if [ "$ISOPOD_NESTED" = "1" ]; then \
+      grep -q "^$ISOPOD_USER:" /etc/subuid \
+        || usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$ISOPOD_USER"; \
     fi
 
 # Lock down sshd: key-only auth, single user, no root login. Double-quote the

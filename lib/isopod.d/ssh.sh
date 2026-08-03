@@ -271,9 +271,20 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
 box_tar_in() { # box_tar_in <name> <dest-dir>   (reads a tar stream on stdin)
   box_ssh "$1" -- tar -C "$2" -xpf -
 }
-box_tar_out() { # box_tar_out <name> <src-dir>  (writes a tar stream to stdout)
-  box_ssh "$1" -- tar -C "$2" -cf - .
+box_tar_out() { # box_tar_out <name> <src-dir> [tar-opts...]  (writes a tar stream to stdout)
+  local name="$1" src="$2"
+  shift 2
+  # Extra tar options (e.g. --exclude) go before -c. box_ssh space-joins argv and
+  # the box shell re-parses it, so any option carrying a glob must already be
+  # quoted for that shell — see shq and 'isopod export --exclude'.
+  box_ssh "$name" -- tar -C "$src" "$@" -cf - .
 }
+
+# Single-quote a value so a remote POSIX shell reached via box_ssh keeps it
+# literal. box_ssh joins its remote argv with spaces and the box's shell parses
+# the result, so an unquoted glob like '*.log' would expand in the box before the
+# remote program sees it. Wrap in single quotes and escape any embedded quote.
+shq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
 wait_for_ssh() { # wait until we can actually authenticate
   local name="$1" tries=0 max="${ISOPOD_SSH_WAIT_TRIES:-30}"
