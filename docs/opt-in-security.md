@@ -176,6 +176,76 @@ Mac can use:
    is Linux-oriented, not well tested on macOS, and isopod does not wire it up
    as an engine — mentioned here only as a route that exists upstream.
 
+## Data volumes (`--disk`) and nested containers (`--nested-containers`)
+
+`isopod create --disk 20g` gives a box a dedicated ext4 filesystem (default
+mountpoint `/mnt/data`). `--nested-containers` builds on it to run rootless
+podman inside the box. Both are opt-in and both are microVM-only.
+
+### Why the volume is not a host mount
+
+The volume's backing image is a sparse file inside the box's **own container
+layer**; the box's entrypoint formats it once and loop-mounts it on every boot.
+No engine mount flag is involved and no host path is named, so isopod's
+copy-not-mount model is untouched.
+
+The alternative — a host-backed volume or bind mount (`podman -v`) — was
+rejected on purpose:
+
+- It reintroduces the live-mount integrity risk copy-not-mount exists to remove:
+  a place where an agent can write git hooks, `Makefile` edits, or editor task
+  files that your *host* tools execute later.
+- On a microVM box it is worse. crun's krun handler exposes the box's root to
+  the guest with a single `krun_add_virtiofs2` call, and libkrun's own
+  documentation states that virtio-fs gives "no protection against the guest
+  attempting to access other directories in the same filesystem, or even other
+  filesystems in the host." Handing a host directory to a box that way weakens
+  the boundary the microVM was chosen for.
+
+A genuine host-attached **virtio-blk** disk would avoid both problems — the host
+would expose one opaque image file with no directory tree and no uid/gid
+semantics. It is not reachable today: libkrun implements virtio-blk, but crun's
+krun handler exposes no annotation for it (`krun.cpus`, `krun.ram_mib`,
+`krun.gpu_flags`, `krun.use_passt`, `krun.nested_virt`, `krun.variant` are the
+whole set, and `krun_set_root_disk` is used only for SEV). If that lands
+upstream it is the natural backend for this flag; the in-guest loop device is
+what makes the feature work now, with strictly less host exposure.
+
+### Why nested containers need the volume
+
+A microVM box boots with its root on **virtiofs**, and container storage cannot
+live there — virtiofs cannot carry the multiple uids/gids that
+containers/storage needs. Layer extraction fails with:
+
+```
+ApplyLayer ... setting up pivot dir: mkdir .../.pivot_root2168677766: permission denied
+```
+
+The graph driver is not the variable: `vfs`, `overlay`, and `fuse-overlayfs` all
+fail the same way, and upstream podman now refuses to put storage on virtiofs
+rather than fix it. Moving the graph root onto a real block device is the fix,
+which is why `--nested-containers` implies a `--disk` mounted at
+`/home/dev/.local/share/containers`. It also lets podman use `overlay` instead
+of falling back to `vfs`, which copies every layer in full.
+
+isopod also hands the box user `/dev/fuse` and `/dev/net/tun`, needed for
+fuse-overlayfs storage and slirp4netns networking. They are `chown`ed to that
+user with the mode left at `0600`, rather than made world-accessible.
+
+### What to weigh before turning these on
+
+- **Persistence weakens disposability.** A box's whole appeal is that it is
+  throwaway. Anything an agent leaves on the volume survives `stop`/`start`.
+  It is destroyed with the box (`isopod rm`), and `isopod export` does not
+  reach it — treat the volume as scratch space, not as a place to keep the only
+  copy of anything.
+- **A nested engine is added attack surface inside the box.** The microVM
+  boundary is unchanged — nested containers run within it — but the box itself
+  now has an engine, subordinate UID ranges, and two more device nodes.
+- **No `reconfigure`.** `reconfigure` snapshots the container layer, and the
+  volume's image lives in that layer, so a `--disk` box is refused rather than
+  turned into a snapshot the size of its disk.
+
 ## Network egress isolation (`egress lan-deny`)
 - a dedicated bridge network (`isopod0`, fixed subnet) the firewall can target;
 - `--dns` pinned to a public resolver, so the box can't query the host's
