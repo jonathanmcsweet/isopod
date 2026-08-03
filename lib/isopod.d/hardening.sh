@@ -4,8 +4,9 @@
 # Translate the hardening profile into `$ENGINE run` flags, printed one per line
 # for the caller to read into an array. Anti-fingerprinting (mask host-revealing
 # /proc and /sys paths) + an optional sandboxed runtime like gVisor. The masks
-# are a Tier 1/2 measure only: a Tier 3 microVM has its own kernel and virtual
-# devices, so they are skipped there (see the tier check below).
+# apply on every tier, microVM included — a Tier 3 guest has its own /proc and
+# /sys, but crun also exports the CONTAINER rootfs (with the host's procfs and
+# sysfs mounted into it) to the guest over virtio-fs. See hardening_run_args.
 #
 # Layered: the shipped baseline (HARDENING_CONF) is read first, then the user's
 # own overrides (USER_HARDENING_CONF, in their config dir) on top — so a tweak
@@ -113,35 +114,31 @@ hardening_run_args() { # hardening_run_args <engine>
   [ -n "$HARD_RUNTIME" ] &&
     printf '%s\n' "--runtime" "$(resolve_runtime_flag "$engine" "$HARD_RUNTIME")"
 
-  # DIRECTORY masks (/sys/*) hide HOST hardware that a Tier 1 container reads
-  # through the shared kernel. A Tier 3 microVM has its own guest kernel and only
-  # virtual devices (krun's synthetic DMI, a virtio NIC/PCI bus), so those paths
-  # expose nothing about the host there and the masks are dropped.
+  # These masks apply on EVERY tier, microVM included. A microVM's own /proc and
+  # /sys are synthetic and describe the guest, which is why it is tempting to skip
+  # the masks there — but the guest is not the only copy it can reach. crun's krun
+  # handler hands the guest the CONTAINER rootfs over virtio-fs
+  # (krun_add_virtiofs2(ctx, tag, "/")), and podman mounted the host's procfs and
+  # sysfs into that rootfs before handing it over. So the exported rootfs carries
+  # the container's /proc and /sys, and those are host data:
   #
-  # FILE masks (/proc/*) are NOT dropped on Tier 3. crun's krun handler hands the
-  # guest the CONTAINER rootfs over virtio-fs — krun_add_virtiofs2(ctx, tag, "/")
-  # — and the container's own /proc travels inside it, sitting under the guest's
-  # procfs as a second mount. Root in the box can unmount the guest's /proc and
-  # read the container's, where /proc/cmdline is still the HOST kernel's boot
-  # line (LUKS volume UUID, ostree deployment hash, host OS) and /proc/config.gz
-  # is the HOST kernel's build config. Those are exactly what this profile exists
-  # to hide, so a microVM box needs the file masks as much as a container box.
-  local tier3=0
-  [ -n "$HARD_RUNTIME" ] && [ "$(runtime_tier "$HARD_RUNTIME" 2>/dev/null)" = 3 ] && tier3=1
-
+  #   /proc/cmdline               host boot line: LUKS volume UUID, ostree hash
+  #   /proc/config.gz             host kernel build config
+  #   /sys/class/dmi/id/*         host board vendor and product name
+  #   /sys/block                  host disk devices (dm-0, nvme0n1, ...)
+  #
+  # Masking them costs the guest nothing — its own /proc and /sys are separate and
+  # untouched — and closes the exported copy. Reaching that copy needs root inside
+  # the box (mounts inherited into an unprivileged user namespace are locked
+  # against exposing what is beneath them), which a default box grants via sudo.
   local p
   if [ "$engine" = "docker" ]; then
-    # Docker can't apply file masks at all (runc rejects /proc bind mounts), so a
-    # Tier 3 box there has nothing left to emit once the dir masks are dropped.
-    [ "$tier3" = 1 ] && return 0
     for p in "${HARD_MASKS[@]:-}"; do [ -n "$p" ] && printf '%s\n' "--tmpfs" "$p"; done
     # File masks intentionally omitted on Docker (runc rejects /proc binds);
     # build_run_args surfaces the one-time warning.
   else
     local joined=""
-    local -a dirmasks=()
-    [ "$tier3" = 0 ] && dirmasks=("${HARD_MASKS[@]:-}")
-    for p in "${dirmasks[@]:-}" "${HARD_FMASKS[@]:-}"; do
+    for p in "${HARD_MASKS[@]:-}" "${HARD_FMASKS[@]:-}"; do
       [ -n "$p" ] && joined="${joined:+$joined:}$p"
     done
     [ -n "$joined" ] && printf '%s\n' "--security-opt" "mask=$joined"
