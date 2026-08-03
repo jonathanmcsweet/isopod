@@ -122,12 +122,12 @@ krun).
 
 When a Tier 3 runtime is active and you pass no `--memory`, isopod sizes the
 guest with a default (2g; override with `--memory` or `ISOPOD_MICROVM_MEMORY`),
-since a microVM boots a fixed-size guest. Under a microVM isopod drops the `/sys`
-directory masks — the guest's device tree is synthetic, so masking it protects
-nothing — but keeps the `/proc` file masks. Those still matter: crun's krun
-handler exports the **container's** rootfs to the guest over virtio-fs, and the
-container's `/proc` rides along under the guest's own procfs, still holding the
-host kernel's `cmdline` and `config.gz`. See
+since a microVM boots a fixed-size guest. isopod keeps the fingerprint masks under
+a microVM rather than skipping them: crun's krun handler exports the **container's**
+rootfs to the guest over virtio-fs, and podman mounted the host's procfs and sysfs
+into that rootfs — so the container's `/proc` and `/sys` reach the guest through
+the export, still holding the host's boot line, kernel config, board DMI, and disk
+list. The guest's own `/proc` and `/sys` are separate and unaffected. See
 [Fingerprint hardening](../README.md#fingerprint-hardening).
 
 ### Tuning the guest (krun annotations)
