@@ -267,16 +267,17 @@ image_exists() { # image_exists <tag>
   "$ENGINE" image exists "$1" 2>/dev/null || "$ENGINE" image inspect "$1" >/dev/null 2>&1
 }
 
-image_tag_for() { # image_tag_for <base-image> [dev-tools 0|1]
+image_tag_for() { # image_tag_for <base-image> [dev-tools 0|1] [nested 0|1]
   [ -f "$ISOPOD_DOCKERFILE" ] || die "missing Dockerfile: $ISOPOD_DOCKERFILE"
   [ -f "$ISOPOD_ENTRYPOINT" ] || die "missing entrypoint: $ISOPOD_ENTRYPOINT"
   [ -f "$ISOPOD_SYSCTL_CONF" ] || die "missing sysctl baseline: $ISOPOD_SYSCTL_CONF"
-  local dev="${2:-0}" hash
-  # The dev-tools flag is part of the cache key: the lean and --dev images are
-  # built from the same Dockerfile but differ, so they must not share a tag.
+  local dev="${2:-0}" nested="${3:-0}" hash
+  # The dev-tools and nested flags are part of the cache key: the lean, --dev and
+  # --nested-containers images are built from the same Dockerfile but differ, so
+  # they must not share a tag.
   hash=$({
     cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT" "$ISOPOD_SYSCTL_CONF"
-    printf '%s\0%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION" "$dev"
+    printf '%s\0%s\0%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION" "$dev" "$nested"
   } | sha_hex)
   printf 'localhost/isopod-base:%s' "$hash"
 }
@@ -290,14 +291,14 @@ engine_build_extra() {
   printf '%s\n' $ISOPOD_BUILD_ARGS
 }
 
-build_image() { # build_image <base-image> [dev-tools 0|1] -> echoes tag
-  local base="$1" dev="${2:-0}" tag
-  tag=$(image_tag_for "$base" "$dev")
+build_image() { # build_image <base-image> [dev-tools 0|1] [nested 0|1] -> echoes tag
+  local base="$1" dev="${2:-0}" nested="${3:-0}" tag
+  tag=$(image_tag_for "$base" "$dev" "$nested")
   if image_exists "$tag"; then
     printf '%s' "$tag"
     return 0
   fi
-  info "Building sandbox base image from $base (one-time$([ "$dev" = 1 ] && printf ', with --dev toolchain'))..." >&2
+  info "Building sandbox base image from $base (one-time$([ "$dev" = 1 ] && printf ', with --dev toolchain')$([ "$nested" = 1 ] && printf ', with nested podman'))..." >&2
   local -a extra_build=()
   mapfile -t extra_build < <(engine_build_extra)
   # Minimal build context: only the files the Dockerfile COPYs in. Apple
@@ -316,6 +317,7 @@ build_image() { # build_image <base-image> [dev-tools 0|1] -> echoes tag
   if ! "$ENGINE" build "${extra_build[@]}" \
     --build-arg "ISOPOD_BASE=$base" --build-arg "ISOPOD_USER=$CONTAINER_USER" \
     --build-arg "ISOPOD_SSHD_PORT=$BOX_SSHD_PORT" --build-arg "ISOPOD_DEV_TOOLS=$dev" \
+    --build-arg "ISOPOD_NESTED=$nested" \
     -t "$tag" -f "$dockerfile" "$ctx" >&2; then
     rm -rf "$ctx"
     die "image build failed (see output above)"

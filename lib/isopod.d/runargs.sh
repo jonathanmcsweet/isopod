@@ -21,6 +21,47 @@ parse_expose_specs() { # parse_expose_specs <spec...>
   done
 }
 
+# Validate a --disk spec ('SIZE' or 'SIZE:MOUNTPOINT') into the globals DISK_SIZE,
+# DISK_MOUNT and the normalized DISK_SPEC ("SIZE:MOUNTPOINT", what create records
+# in meta and passes to the box). Dies on a bad spec. Fills in the caller's
+# process (not a subshell) so `die` aborts. An empty spec clears the globals.
+DISK_SIZE=""
+DISK_MOUNT=""
+# DISK_SPEC is consumed by cmd_create (another module), which shellcheck lints
+# separately and so cannot see.
+# shellcheck disable=SC2034
+DISK_SPEC=""
+parse_disk_spec() { # parse_disk_spec <spec>
+  DISK_SIZE="" DISK_MOUNT="" DISK_SPEC=""
+  local spec="${1:-}"
+  [ -z "$spec" ] && return 0
+  case "$spec" in
+    *:*)
+      DISK_SIZE="${spec%%:*}"
+      DISK_MOUNT="${spec#*:}"
+      ;;
+    *)
+      DISK_SIZE="$spec"
+      DISK_MOUNT="$BOX_DISK_DEFAULT_MOUNT"
+      ;;
+  esac
+  valid_memory "$DISK_SIZE" ||
+    die "invalid --disk size '$DISK_SIZE' (use an engine size like 20g or 512m)"
+  # The mountpoint reaches the box as an environment value the entrypoint expands,
+  # so keep it to a plain absolute path — no shell metacharacters, no whitespace.
+  [[ "$DISK_MOUNT" =~ ^/[a-zA-Z0-9._/-]*$ ]] ||
+    die "invalid --disk mountpoint '$DISK_MOUNT' (an absolute path: letters, digits, . _ - /)"
+  # '/' first: it also matches the trailing-slash pattern, and deserves its own
+  # message. Mounting the volume over the box's root would break the box.
+  case "$DISK_MOUNT" in
+    /) die "invalid --disk mountpoint '/' (pick a subdirectory, e.g. $BOX_DISK_DEFAULT_MOUNT)" ;;
+    */) die "invalid --disk mountpoint '$DISK_MOUNT' (no trailing slash)" ;;
+    *..*) die "invalid --disk mountpoint '$DISK_MOUNT' (no '..' segments)" ;;
+  esac
+  # shellcheck disable=SC2034  # read by cmd_create (create.sh), linted separately
+  DISK_SPEC="$DISK_SIZE:$DISK_MOUNT"
+}
+
 # Assemble the `$ENGINE run` argument list for a box into the global RUN_ARGS
 # array (bash can't return arrays). Shared by create and reconfigure so the two
 # can't drift. Hardening masks are read fresh from the profile each time.
@@ -78,6 +119,18 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   [ -n "$box_secrets" ] || box_secrets="$(meta_get "$name" secrets 2>/dev/null || true)"
   [ -n "$box_secrets" ] &&
     RUN_ARGS+=(--tmpfs "/run/secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700")
+  # Data volume (--disk, "SIZE:MOUNTPOINT"). No engine mount flag is involved:
+  # the entrypoint creates a sparse image in the box's own layer, formats it
+  # ext4 and loop-mounts it, so no host path is exposed. On create the spec is
+  # in BOX_DISK; on reconfigure (unset) read the persisted meta.
+  local box_disk="${BOX_DISK:-}"
+  [ -n "$box_disk" ] || box_disk="$(meta_get "$name" disk 2>/dev/null || true)"
+  [ -n "$box_disk" ] && RUN_ARGS+=(-e "ISOPOD_DISK=$box_disk")
+  # Nested containers (--nested-containers): the entrypoint hands /dev/fuse and
+  # /dev/net/tun to the box user so rootless podman inside the box can use them.
+  local box_nested="${BOX_NESTED:-}"
+  [ -n "$box_nested" ] || box_nested="$(meta_get "$name" nested 2>/dev/null || true)"
+  [ "$box_nested" = 1 ] && RUN_ARGS+=(-e "ISOPOD_NESTED=1")
   [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
   [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
   # Anti-fingerprinting hardening from the hardening profile.
