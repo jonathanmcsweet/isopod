@@ -210,15 +210,23 @@ active_runtime() {
 # Tier of a runtime from the share/runtimes table: 2 (syscall sandbox) or 3
 # (microVM). Returns 1 (no output) when the runtime is unlisted or the table is
 # missing, so callers treat it as "tier unknown".
-runtime_tier() { # runtime_tier <name>
+runtime_tier() { # runtime_tier <name-or-path>
   local want="$1" f="$ISOPOD_SHARE/runtimes" name tier
   [ -n "$want" ] && [ -f "$f" ] || return 1
+  # A runtime can reach here as an absolute PATH, not just a table name: from
+  # `runtime /usr/bin/krun` in a hardening profile, from ISOPOD_RUNTIME or
+  # --runtime, or round-tripped through a box's meta on reconfigure (which
+  # re-exports whatever active_runtime last echoed). The table is keyed by name,
+  # so match the basename too. Without this the tier is simply unknown, and every
+  # Tier 3 behaviour degrades SILENTLY — the microVM memory default, the guest
+  # sysctl hardening, and the mask-microvm host device-tree mask all skip.
+  local base="${want##*/}"
   while read -r name tier _; do
     case "$name" in '' | '#'*) continue ;; esac
-    [ "$name" = "$want" ] && {
+    if [ "$name" = "$want" ] || [ "$name" = "$base" ]; then
       printf '%s' "$tier"
       return 0
-    }
+    fi
   done <"$f"
   return 1
 }

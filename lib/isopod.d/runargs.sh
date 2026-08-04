@@ -171,21 +171,40 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   case "$(active_egress)" in
     lan-deny)
       # Pin DNS to a public resolver so the box cannot query the host's
-      # internal/forwarding resolver for reconnaissance.
-      RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --dns "$ISOPOD_EGRESS_DNS"
+      # internal/forwarding resolver for reconnaissance. --dns-search=. drops the
+      # host's search domain, which podman would otherwise copy in: it names your
+      # network (e.g. "search lan") and is never needed to resolve a public name.
+      RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --dns "$ISOPOD_EGRESS_DNS" --dns-search=.
         --cap-drop NET_RAW --cap-drop NET_ADMIN)
       ;;
     allow-list)
       # Force the box through the host-side filtering proxy on the bridge
       # gateway. The host firewall drops every other box-initiated flow, so
-      # unsetting these env vars just removes the box's only route out. No --dns:
-      # the box gets no resolver (the proxy resolves allow-listed names), which
-      # also closes DNS-tunnel exfil.
+      # unsetting these env vars just removes the box's only route out.
+      #
+      # --dns=none: this box resolves NOTHING itself. Proxied clients send the
+      # hostname to the proxy (CONNECT host:443) and the proxy resolves it, which
+      # is how the allow-list can match on names at all. Without this, podman
+      # copies the host's resolv.conf in, disclosing your resolvers and search
+      # domain and leaving a DNS path that bypasses the proxy entirely (queries to
+      # a forwarding resolver are an exfil channel no hostname allow-list sees).
+      # podman drops the file completely rather than emptying it, so the
+      # entrypoint writes an explanatory one — see ISOPOD_DNS_VIA_PROXY there.
+      # No --dns-search here: there is no resolv.conf for a search line to go in.
       local _proxy="http://$ISOPOD_EGRESS_GATEWAY:$ISOPOD_EGRESS_PROXY_PORT"
-      RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --cap-drop NET_RAW --cap-drop NET_ADMIN
+      RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --dns=none --cap-drop NET_RAW --cap-drop NET_ADMIN
+        -e "ISOPOD_DNS_VIA_PROXY=1"
         -e "http_proxy=$_proxy" -e "https_proxy=$_proxy"
         -e "HTTP_PROXY=$_proxy" -e "HTTPS_PROXY=$_proxy"
         -e "no_proxy=localhost,127.0.0.1,::1" -e "NO_PROXY=localhost,127.0.0.1,::1")
+      ;;
+    *)
+      # Egress off. The box keeps working resolvers — it has an open network and
+      # needs them — but still drop the search domain, which is disclosure with no
+      # function. Its resolver ADDRESSES stay visible, and hiding them here would
+      # be cosmetic: an open box can read them from its own route table anyway.
+      # Enforcing egress, not masking resolv.conf, is what closes that.
+      RUN_ARGS+=(--dns-search=.)
       ;;
   esac
   # Box IPv6 egress is dropped host-side by the nft rulesets (scoped to the egress

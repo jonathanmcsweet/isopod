@@ -221,7 +221,7 @@ A **Tier 2 runtime** (gVisor `runsc`) already presents a synthetic `/proc`/`/sys
 
 Two more, which depend on your egress mode rather than the runtime:
 
-- **Your DNS resolvers** — `/etc/resolv.conf` in the box is podman's copy of the host's. `egress lan-deny` replaces it by pinning `--dns` to a public resolver; with egress **off** the box reads your real nameservers and search domain.
+- **Your DNS resolvers** — podman copies the host's `/etc/resolv.conf` into a box by default. isopod removes the **search domain** in every mode (it names your network and is never needed to resolve a public name), and handles the nameservers per egress mode: `allow-list` gives the box **no resolver at all** (the proxy resolves names, so the box never needed one — and a resolver would be a DNS path around the allow-list), `lan-deny` pins a public resolver, and with egress **off** your real nameservers stay visible. That last case is deliberate rather than an oversight: an open box can read them from its own route table anyway, so hiding the file would be cosmetic — enforcing egress is what closes it.
 - **Your LAN position** — with egress **off** the box gets an address on your LAN, so `/etc/hosts` discloses your subnet. Under `lan-deny` or `allow-list` the box sits on isopod's own fixed `10.88.7.0/24` bridge, which says nothing about your network.
 
 Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a Tier 3 microVM runtime (or a full VM); isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
