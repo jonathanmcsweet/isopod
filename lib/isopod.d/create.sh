@@ -216,7 +216,11 @@ cmd_create() {
   # sandbox layers sshd/git onto (same role as --image, you just hand over a
   # Dockerfile). Done before the rollback is armed so a build error leaves no box.
   if [ -n "$dockerfile_opt" ]; then
-    base=$(build_user_image "$dockerfile_opt") || die "could not build --dockerfile image"
+    # `|| exit 1`, not `|| die`: build_user_image runs in a command substitution,
+    # so its own die() exits only that subshell and its message is the specific
+    # one (it names the Dockerfile). A second die here would print a vaguer
+    # message after it and read as two separate failures.
+    base=$(build_user_image "$dockerfile_opt") || exit 1
   fi
 
   mkdir -p "$(box_dir "$name")"

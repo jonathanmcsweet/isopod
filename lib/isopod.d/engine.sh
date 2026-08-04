@@ -355,7 +355,9 @@ build_user_image() { # build_user_image <dockerfile-path> -> echoes tag
     printf '%s' "$tag"
     return 0
   fi
-  info "Building image from $df (one-time)..." >&2
+  # Name the context: it is the Dockerfile's own directory, not the working
+  # directory, so a COPY resolves against a path the user did not choose.
+  info "Building image from $df (context: $ctx, one-time)..." >&2
   local -a extra_build=()
   mapfile -t extra_build < <(engine_build_extra)
   if ! "$ENGINE" build "${extra_build[@]}" -t "$tag" -f "$df" "$ctx" >&2; then
