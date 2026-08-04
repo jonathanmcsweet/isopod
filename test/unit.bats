@@ -342,7 +342,6 @@ teardown() { isopod_teardown_env; }
   assert_success
   assert_output --partial "/sys/devices:"
 }
-
 @test "mask-microvm closes the device tree on Tier 3 only" {
   # The ordinary masks close the ALIAS views (/sys/bus/pci, /sys/class/nvme,
   # /sys/block); /sys/devices is the real tree behind them and still yields host
