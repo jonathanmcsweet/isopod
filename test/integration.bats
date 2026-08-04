@@ -368,6 +368,44 @@ EOF
   assert_output --partial "--dockerfile not found"
 }
 
+@test "create --dockerfile names the build context it uses" {
+  # The context is the Dockerfile's own directory, not the working directory,
+  # so it is stated up front rather than left for a COPY to reveal.
+  mkdir -p "$TEST_TMP/proj-ctx"
+  printf 'FROM debian:bookworm-slim\nRUN true\n' > "$TEST_TMP/proj-ctx/Dockerfile"
+  run "$ISOPOD_ROOT/isopod" create demo --dockerfile "$TEST_TMP/proj-ctx/Dockerfile"
+  assert_success
+  assert_output --partial "context: $TEST_TMP/proj-ctx"
+}
+
+@test "create --dockerfile reports a failed user build once, not twice" {
+  printf 'FROM debian:bookworm-slim\nRUN false\n' > "$TEST_TMP/Dockerfile"
+  # Fail every engine build; the user Dockerfile is the first one issued.
+  cat > "$STUB_DIR/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "podman $*" >> "$STUB_LOG"
+case "$1" in
+  info)  cat <<'INFO'
+host:
+  ociRuntimes:
+    crun: [/usr/bin/crun]
+INFO
+         exit 0 ;;
+  image) exit 1 ;;
+  build) exit 1 ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/podman"
+  run "$ISOPOD_ROOT/isopod" create demo --dockerfile "$TEST_TMP/Dockerfile"
+  assert_failure
+  # build_user_image's message names the Dockerfile; the caller must not add a
+  # second, vaguer one after it (it runs in a command substitution, so its die
+  # exits only that subshell).
+  assert_output --partial "build of $TEST_TMP/Dockerfile failed"
+  refute_output --partial "could not build --dockerfile image"
+}
+
 # ---- config / reconfigure ----------------------------------------------------
 @test "create writes a per-box config.yaml shaped like a Compose service" {
   # --container (Tier 1) so the fingerprint masks render into the reference; a

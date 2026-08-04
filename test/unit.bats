@@ -311,6 +311,37 @@ teardown() { isopod_teardown_env; }
   refute_output --partial "/proc/cmdline"
 }
 
+@test "runtime_tier resolves a runtime given as an absolute path" {
+  # A runtime reaches the tier lookup as a path from `runtime /usr/bin/krun`,
+  # from ISOPOD_RUNTIME/--runtime, or round-tripped through a box's meta on
+  # reconfigure. Matching only the table name meant no tier — and every Tier 3
+  # measure (microVM memory default, guest sysctls, mask-microvm) skipped
+  # silently.
+  [ "$(runtime_tier krun)" = 3 ]
+  [ "$(runtime_tier /usr/bin/krun)" = 3 ]
+  [ "$(runtime_tier /opt/kata/bin/kata-runtime)" = 3 ]
+  [ "$(runtime_tier runsc)" = 2 ]
+}
+
+@test "runtime_tier knows crun-krun, the binary krun is registered to" {
+  [ "$(runtime_tier crun-krun)" = 3 ]
+  [ "$(runtime_tier /usr/bin/crun-krun)" = 3 ]
+}
+
+@test "runtime_tier still reports nothing for an unknown runtime" {
+  run runtime_tier bogus
+  assert_failure
+  run runtime_tier /usr/bin/bogus
+  assert_failure
+}
+
+@test "a path-configured microVM still gets its Tier 3 masks" {
+  # The end-to-end consequence of the lookup above: configure krun by path and
+  # the box must still be treated as a microVM.
+  ISOPOD_RUNTIME=/usr/bin/crun-krun run hardening_run_args podman
+  assert_success
+  assert_output --partial "/sys/devices:"
+}
 @test "mask-microvm closes the device tree on Tier 3 only" {
   # The ordinary masks close the ALIAS views (/sys/bus/pci, /sys/class/nvme,
   # /sys/block); /sys/devices is the real tree behind them and still yields host
@@ -514,6 +545,59 @@ teardown() { isopod_teardown_env; }
   [[ "$joined" != *"--network isopod0"* ]]
   [[ "$joined" != *"--cap-drop NET_RAW"* ]]
 }
+# ---- resolver disclosure (/etc/resolv.conf) -----------------------------------
+# podman copies the HOST's resolv.conf into a box by default, disclosing its
+# nameserver addresses and search domain. What to do about it differs by egress
+# mode, because who resolves names differs.
+
+@test "allow-list gives the box no resolver at all" {
+  # Proxied clients hand the hostname to the proxy, which resolves it — so the
+  # box needs no resolver, and having one is both a disclosure and a DNS path
+  # that bypasses the hostname allow-list entirely.
+  ENGINE=podman
+  ISOPOD_EGRESS=allow-list build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--dns=none"* ]]
+  # the entrypoint needs to know, so it can explain where resolution happens
+  [[ "$joined" == *"ISOPOD_DNS_VIA_PROXY=1"* ]]
+  # no search line can exist when there is no resolv.conf
+  [[ "$joined" != *"--dns-search"* ]]
+}
+
+@test "lan-deny keeps a pinned resolver but drops the search domain" {
+  ENGINE=podman
+  ISOPOD_EGRESS=lan-deny build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--dns $ISOPOD_EGRESS_DNS"* ]]
+  [[ "$joined" == *"--dns-search=."* ]]
+  [[ "$joined" != *"--dns=none"* ]]
+}
+
+@test "egress off keeps working resolvers but still drops the search domain" {
+  # An open box needs its resolvers and can read them from its own route table
+  # anyway, so hiding the addresses would be cosmetic. The search domain names
+  # the user's network and is never needed to resolve a public name.
+  ENGINE=podman
+  ISOPOD_EGRESS=off build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--dns-search=."* ]]
+  [[ "$joined" != *"--dns=none"* ]]
+  [[ "$joined" != *"ISOPOD_DNS_VIA_PROXY"* ]]
+}
+
+@test "the entrypoint explains name resolution only for an allow-list box" {
+  # The one real UX cost of --dns=none is a misleading "Could not resolve host".
+  # The explanation goes in resolv.conf itself, where someone debugging that
+  # error looks first — comments only, so glibc still fails fast.
+  run grep -c 'ISOPOD_DNS_VIA_PROXY' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  run grep -c 'isopod egress allow' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  # it must not clobber a resolv.conf podman did provide
+  run grep -c '\[ ! -s /etc/resolv.conf \]' "$ISOPOD_ENTRYPOINT"
+  assert_output "1"
+}
+
 @test "build_run_args disables in-box IPv6 when egress is active" {
   [ -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ] || skip "host kernel has no IPv6 — sysctl is skipped by design"
   ENGINE=podman
@@ -583,8 +667,11 @@ teardown() { isopod_teardown_env; }
   [[ "$joined" == *"https_proxy=http://10.88.7.1:8118"* ]]
   [[ "$joined" == *"--cap-drop NET_RAW"* ]]
   [[ "$joined" == *"--cap-drop NET_ADMIN"* ]]
-  # No pinned resolver in allow-list mode — the proxy resolves names.
-  [[ "$joined" != *"--dns"* ]]
+  # No pinned resolver ADDRESS in allow-list mode — the proxy resolves names.
+  # `--dns=none` is the opposite of pinning one: it removes the box's resolver
+  # entirely (and with it the host's, which podman would otherwise copy in).
+  [[ "$joined" != *"--dns $ISOPOD_EGRESS_DNS"* ]]
+  [[ "$joined" == *"--dns=none"* ]]
 }
 @test "egress_filter_regexes anchors bare domains and wildcards" {
   ISOPOD_EGRESS_ALLOWLIST="$TEST_TMP/allow.conf"
