@@ -203,67 +203,55 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
     *) iso_egress_fail "could not determine the default gateway from /proc/net/route" ;;
   esac
 
-  sed "s/@GATEWAY@/$iso_gw/g" /etc/isopod/egress-guest.nft >/run/isopod-egress.nft ||
+  # The box's own resolvers, exempted on port 53 by the ruleset (see
+  # egress-guest.nft). Read straight from resolv.conf so whatever the engine hands
+  # the guest keeps working — a VPN resolver on a CGNAT or link-local address
+  # included, which is the case the pinned-public-resolver design got wrong.
+  #
+  # Each address is re-validated here before it reaches the ruleset. resolv.conf is
+  # engine-generated, not user input, but this text is about to become firewall
+  # rules: anything that is not a bare IPv4 or IPv6 literal is dropped rather than
+  # substituted, so a malformed line can never inject a rule.
+  iso_ns_rules=$(awk '
+    $1 != "nameserver" || $2 == "" { next }
+    {
+      ip = $2
+      if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+        split(ip, o, ".")
+        for (i = 1; i <= 4; i++) if (o[i] + 0 > 255) next
+        printf "    ip daddr %s udp dport 53 accept\n", ip
+        printf "    ip daddr %s tcp dport 53 accept\n", ip
+        next
+      }
+      if (ip ~ /^[0-9a-fA-F:]+$/ && ip ~ /:/) {
+        printf "    ip6 daddr %s udp dport 53 accept\n", ip
+        printf "    ip6 daddr %s tcp dport 53 accept\n", ip
+      }
+    }' /etc/resolv.conf 2>/dev/null)
+
+  # No usable resolver at all: fall back to the configured public one, which is
+  # better than nothing but will not work on a network that forces local DNS.
+  if [ -z "$iso_ns_rules" ] && [ -n "${ISOPOD_GUEST_EGRESS_DNS:-}" ]; then
+    printf 'nameserver %s\n' "$ISOPOD_GUEST_EGRESS_DNS" >/etc/resolv.conf 2>/dev/null ||
+      iso_egress_fail "could not pin the resolver to $ISOPOD_GUEST_EGRESS_DNS"
+    echo "isopod: guest egress: no resolver in /etc/resolv.conf — pinned $ISOPOD_GUEST_EGRESS_DNS." >&2
+    echo "isopod:   If your network forces local DNS (a VPN in lockdown mode does), this box" >&2
+    echo "isopod:   will not resolve names; recreate it with --guest-egress off." >&2
+  fi
+
+  awk -v gw="$iso_gw" -v rules="$iso_ns_rules" '
+    /@RESOLVERS@/ { if (rules != "") print rules; next }
+    { gsub(/@GATEWAY@/, gw); print }
+  ' /etc/isopod/egress-guest.nft >/run/isopod-egress.nft ||
     iso_egress_fail "could not render the ruleset"
   nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err ||
     iso_egress_fail "nft rejected the ruleset: $(cat /run/isopod-egress.err 2>/dev/null)"
   # Confirm it is actually in the kernel rather than trusting nft's exit status.
   nft list table inet isopod_egress >/dev/null 2>&1 ||
     iso_egress_fail "the ruleset did not load into the kernel"
+  [ -n "$iso_ns_rules" ] &&
+    echo "isopod: guest egress: DNS allowed to$(awk '/ip6? daddr/ && !seen[$3]++ { printf " %s", $3 }' /run/isopod-egress.nft) (port 53 only)" >&2
 
-  # Keep the inherited resolvers that still work under the rules just applied, and
-  # drop only the ones those rules would block.
-  #
-  # An earlier version replaced this file outright with a single public resolver,
-  # on the assumption that every resolver passt hands the guest sits in a blocked
-  # range. That assumption is wrong twice. The gateway is explicitly accepted, so a
-  # resolver ON the gateway — the common home-router case — keeps working and must
-  # be kept. And a public resolver is not reachable everywhere: a network that
-  # forces local DNS refuses 1.1.1.1 outright, which left the box unable to resolve
-  # anything while the nft counters sat at zero, so the rules took the blame for a
-  # self-inflicted outage.
-  #
-  # The classification below mirrors egress-guest.nft exactly: the gateway and
-  # loopback are accepted there, every listed private range is dropped, so a
-  # resolver in one of those ranges is dead weight in resolv.conf and only costs a
-  # timeout per query. What survives is a resolver the box can actually reach.
-  iso_ns_keep=$(awk -v gw="$iso_gw" '
-    $1 != "nameserver" || $2 == "" { next }
-    {
-      ip = $2
-      if (ip == gw) { print ip; next }        # accepted by name in the ruleset
-      if (ip ~ /:/) next                      # IPv6: ULA/link-local are dropped
-      if (ip !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next
-      split(ip, o, ".")
-      if (o[1] == 127) { print ip; next }     # oif "lo" accept
-      if (o[1] == 10) next
-      if (o[1] == 172 && o[2] >= 16 && o[2] <= 31) next
-      if (o[1] == 192 && o[2] == 168) next
-      if (o[1] == 100 && o[2] >= 64 && o[2] <= 127) next
-      if (o[1] == 169 && o[2] == 254) next
-      if (o[1] == 192 && o[2] == 0 && o[3] == 0) next
-      if (o[1] == 198 && (o[2] == 18 || o[2] == 19)) next
-      print ip
-    }' /etc/resolv.conf 2>/dev/null)
-
-  if [ -n "$iso_ns_keep" ]; then
-    : >/run/isopod-resolv.conf || iso_egress_fail "could not stage a new resolv.conf"
-    for iso_ns in $iso_ns_keep; do
-      printf 'nameserver %s\n' "$iso_ns" >>/run/isopod-resolv.conf
-    done
-    cat /run/isopod-resolv.conf >/etc/resolv.conf 2>/dev/null ||
-      iso_egress_fail "could not rewrite /etc/resolv.conf"
-    echo "isopod: guest egress: keeping reachable resolver(s):$(printf ' %s' $iso_ns_keep)" >&2
-  elif [ -n "${ISOPOD_GUEST_EGRESS_DNS:-}" ]; then
-    # Nothing inherited survives, so a public resolver is the only option left.
-    # Say so plainly: on a network that forces local DNS this box will not resolve
-    # names at all, and that is a configuration choice the user has to make.
-    printf 'nameserver %s\n' "$ISOPOD_GUEST_EGRESS_DNS" >/etc/resolv.conf 2>/dev/null ||
-      iso_egress_fail "could not pin the resolver to $ISOPOD_GUEST_EGRESS_DNS"
-    echo "isopod: guest egress: no inherited resolver survives the rules — falling back to" >&2
-    echo "isopod:   $ISOPOD_GUEST_EGRESS_DNS. If your network forces local DNS, this box will not" >&2
-    echo "isopod:   resolve names; recreate it with --guest-egress off." >&2
-  fi
   echo "isopod: guest egress isolation active (private ranges blocked; gateway $iso_gw allowed)" >&2
 fi
 

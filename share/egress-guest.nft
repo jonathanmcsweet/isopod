@@ -20,8 +20,9 @@
 # root can remove it. The box user has no sudo and no CAP_NET_ADMIN by default,
 # which is what makes it hold against the workload it is containing.
 #
-# @GATEWAY@ is substituted by the entrypoint from /proc/net/route before loading.
-# Not a render_tmpl template — this file is consumed by nft inside the box, never
+# @GATEWAY@ and @RESOLVERS@ are substituted by the entrypoint before loading —
+# the gateway from /proc/net/route, the resolvers from /etc/resolv.conf. Not a
+# render_tmpl template: this file is consumed by nft inside the box, never
 # evaluated as a shell heredoc on the host.
 
 table inet isopod_egress {
@@ -36,10 +37,23 @@ table inet isopod_egress {
     # The host control path. See the note above: this is also the LAN router.
     ip daddr @GATEWAY@ accept
 
+    # The box's own resolvers, port 53 only.
+    #
+    # An earlier design pinned a public resolver instead and blocked these
+    # outright, reasoning that an internal resolver is a reconnaissance channel no
+    # address filter sees. That reasoning still holds, but it assumed a public
+    # resolver is always reachable, and it is not: on a host behind a VPN in
+    # lockdown mode every packet outside the tunnel is dropped, so 1.1.1.1 never
+    # answers. Worse, a VPN's own resolver commonly sits in 100.64.0.0/10 or
+    # 169.254.0.0/16 — the very ranges below — so the rules blocked the only DNS
+    # the box could ever have used, and it resolved nothing at all.
+    #
+    # Narrow exemption instead: these exact addresses, UDP/TCP 53, nothing else.
+    # The box can resolve names, including internal ones, and still cannot open a
+    # connection to anything else in private space.
+@RESOLVERS@
     # Private, shared, link-local and carrier-grade-NAT space. 169.254.0.0/16
-    # covers the cloud metadata address (169.254.169.254) and passt's own DNS
-    # responder — the box resolves through a public resolver instead, pinned by
-    # the entrypoint, so it never asks your internal resolver anything.
+    # also covers the cloud metadata address (169.254.169.254).
     ip daddr {
       10.0.0.0/8,
       172.16.0.0/12,

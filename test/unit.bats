@@ -2405,78 +2405,95 @@ EOF
   assert_failure
 }
 
-# ---- box entrypoint: which resolvers survive guest egress --------------------
+# ---- box entrypoint: DNS under guest egress -----------------------------------
 # Regression tests for a real outage. The entrypoint used to replace resolv.conf
-# outright with a pinned public resolver, on the assumption that every resolver
-# passt hands the guest sits in a range the rules block. Both halves were wrong:
-# a resolver ON the gateway is explicitly accepted, and a public resolver is not
-# reachable on a network that forces local DNS — which left a box unable to
-# resolve anything while the nft drop counters sat at zero.
+# with a pinned public resolver, on the reasoning that an internal resolver is a
+# reconnaissance channel. That assumed a public resolver is always reachable. On a
+# host behind a VPN in lockdown mode it is not — DNS to any external resolver is
+# blocked (1.1.1.1:443 reachable, 1.1.1.1:53 not) — and the VPN's own resolver sits
+# in 100.64.0.0/10 or 169.254.0.0/16, the ranges the rules block. The box was left
+# resolving nothing while the nft drop counters sat at zero.
 #
-# The classification is extracted from the entrypoint and run for real, rather
-# than reimplemented here, so the test cannot drift from what boxes execute.
-_ns_keep() { # _ns_keep <gateway> <resolv.conf body>
+# The rules are generated from resolv.conf by an awk program in the entrypoint,
+# extracted and run here rather than reimplemented, so the tests cannot drift from
+# what boxes execute.
+_ns_rules() { # _ns_rules <resolv.conf body>
   local prog
-  prog=$(sed -n "/iso_ns_keep=\$(awk -v gw=/,/}' \/etc\/resolv.conf/p" "$ISOPOD_ENTRYPOINT" |
-    sed "1s/.*awk -v gw=\"\$iso_gw\" '//; \$s/}'.*/}/")
-  printf '%s\n' "$2" | awk -v gw="$1" "$prog"
+  prog=$(sed -n "/iso_ns_rules=\$(awk '/,/}' \/etc\/resolv.conf/p" "$ISOPOD_ENTRYPOINT" |
+    sed "1s/.*awk '//; \$s/}'.*/}/")
+  printf '%s\n' "$1" | awk "$prog"
 }
 
-# The exact configuration that broke: two blocked resolvers and the gateway.
-@test "entrypoint keeps a resolver on the gateway and drops blocked ones" {
-  run _ns_keep 192.168.1.1 'nameserver 169.254.1.1
+# The exact configuration that broke: a VPN resolver on a link-local address, a
+# second on CGNAT, and a gateway that serves no DNS at all.
+@test "entrypoint exempts every inherited resolver on port 53" {
+  run _ns_rules 'search lan
+nameserver 169.254.1.1
 nameserver 100.64.0.12
 nameserver 192.168.1.1'
-  assert_output "192.168.1.1"
+  assert_output "    ip daddr 169.254.1.1 udp dport 53 accept
+    ip daddr 169.254.1.1 tcp dport 53 accept
+    ip daddr 100.64.0.12 udp dport 53 accept
+    ip daddr 100.64.0.12 tcp dport 53 accept
+    ip daddr 192.168.1.1 udp dport 53 accept
+    ip daddr 192.168.1.1 tcp dport 53 accept"
 }
 
-@test "entrypoint keeps public resolvers" {
-  run _ns_keep 10.88.7.1 'nameserver 8.8.8.8
-nameserver 1.1.1.1'
-  assert_output "8.8.8.8
-1.1.1.1"
+@test "entrypoint exempts IPv6 resolvers with ip6 rules" {
+  run _ns_rules 'nameserver fe80::1'
+  assert_output "    ip6 daddr fe80::1 udp dport 53 accept
+    ip6 daddr fe80::1 tcp dport 53 accept"
 }
 
-@test "entrypoint keeps loopback, which the ruleset accepts via oif lo" {
-  run _ns_keep 192.168.1.1 'nameserver 127.0.0.53'
-  assert_output "127.0.0.53"
+# The exemption is port 53 and nothing else — the box must still be unable to open
+# an ordinary connection to a resolver's host.
+@test "the resolver exemption is limited to port 53" {
+  run _ns_rules 'nameserver 10.0.0.53'
+  assert_output --partial "udp dport 53 accept"
+  assert_output --partial "tcp dport 53 accept"
+  # No rule may accept the resolver's address without a port match, or the box
+  # would regain general access to a host in blocked space.
+  local line
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    case "$line" in *"dport 53 accept") ;; *) return 1 ;; esac
+  done <<<"$output"
 }
 
-# Nothing survives -> the caller falls back to the pinned public resolver and
-# says so, rather than silently leaving the box unable to resolve.
-@test "entrypoint keeps nothing when every resolver is in a blocked range" {
-  run _ns_keep 192.168.1.1 'nameserver 10.0.0.53
-nameserver 172.16.0.53
-nameserver 192.168.9.53
-nameserver 100.64.0.12
-nameserver 169.254.1.1
-nameserver 198.18.0.1'
+# This text becomes firewall rules, so anything that is not a bare IP literal must
+# be dropped rather than substituted — a malformed line cannot inject a rule.
+@test "entrypoint refuses to turn a malformed resolver into a rule" {
+  run _ns_rules 'nameserver 999.1.1.1
+nameserver 1.2.3.4.5
+nameserver bogus;accept
+nameserver ../../etc
+nameserver 8.8.8.8'
+  assert_output "    ip daddr 8.8.8.8 udp dport 53 accept
+    ip daddr 8.8.8.8 tcp dport 53 accept"
+}
+
+@test "entrypoint generates no rules when resolv.conf has no nameserver" {
+  run _ns_rules 'search lan
+options ndots:1'
   assert_output ""
 }
 
-@test "entrypoint drops IPv6 resolvers, which the ruleset blocks" {
-  run _ns_keep 192.168.1.1 'nameserver fe80::1
-nameserver fc00::53
-nameserver 8.8.8.8'
-  assert_output "8.8.8.8"
+# Ordering is the whole point: an exemption after the range drop would never match.
+@test "the ruleset exempts resolvers before the private-range drop" {
+  local ns_line drop_line
+  # Anchored: the placeholder sits alone on its line, while the header comment
+  # above also names it.
+  ns_line=$(grep -n '^@RESOLVERS@$' "$ISOPOD_GUEST_EGRESS_NFT" | cut -d: -f1)
+  drop_line=$(grep -n 'counter drop' "$ISOPOD_GUEST_EGRESS_NFT" | head -1 | cut -d: -f1)
+  [ -n "$ns_line" ] && [ -n "$drop_line" ] && [ "$ns_line" -lt "$drop_line" ]
 }
 
-@test "entrypoint preserves resolver order and ignores non-nameserver lines" {
-  run _ns_keep 192.168.1.1 'search lan
-options ndots:1
-nameserver 9.9.9.9
-nameserver 10.1.2.3
-nameserver 1.0.0.1'
-  assert_output "9.9.9.9
-1.0.0.1"
-}
-
-# The fallback must still exist: a box with no reachable inherited resolver has
-# to be given something, and the operator has to be told it may not work.
-@test "the entrypoint warns when it falls back to the pinned public resolver" {
-  run grep -c 'no inherited resolver survives the rules' "$ISOPOD_ENTRYPOINT"
+# The fallback still exists for a box with no resolver at all, and must say that it
+# will not help on a network that forces local DNS.
+@test "the entrypoint warns when it pins the public resolver as a last resort" {
+  run grep -c 'no resolver in /etc/resolv.conf' "$ISOPOD_ENTRYPOINT"
   assert_output "1"
-  run grep -c 'guest-egress off' "$ISOPOD_ENTRYPOINT"
+  run grep -q 'lockdown mode' "$ISOPOD_ENTRYPOINT"
   assert_success
 }
 

@@ -75,8 +75,12 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         In-box network isolation (microVM boxes). ON by default:
                         with krun+passt the guest is handed the HOST's own LAN
                         identity, so without it the box is a machine on your
-                        network. Blocks private/LAN/CGNAT/link-local destinations
-                        and pins a public resolver; public internet is unaffected.
+                        network. Blocks private/LAN/CGNAT/link-local destinations;
+                        public internet is unaffected. The box's own resolvers stay
+                        reachable on port 53 only, so DNS keeps working even when
+                        they sit in a blocked range (a VPN's resolver usually does)
+                        — the box can resolve names, including internal ones, but
+                        cannot otherwise reach anything in private space.
                         Skipped when host-side egress is active (that is stronger
                         and its proxy lives on a private address). Defence in
                         depth: it runs in the guest, so guest root could remove
