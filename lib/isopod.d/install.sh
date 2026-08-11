@@ -135,6 +135,17 @@ cmd_install() {
        --dockerfile."
         ;;
     esac
+    # The in-guest layer is a separate mechanism and was missing from this hint, so
+    # a box whose nft rules or pinned resolver were breaking apt reported nothing
+    # but the exit code. Name it, and name the check that settles it: the drop
+    # counters distinguish "the rules blocked it" from "DNS cannot resolve".
+    if [ "$(meta_get "$name" guest_egress 2>/dev/null || true)" = on ]; then
+      warn "this box has in-guest egress isolation on (--guest-egress), which blocks private
+       and LAN destinations and can leave it without a usable resolver. Check which it is:
+         isopod root-shell $name -- 'nft list ruleset; cat /etc/resolv.conf'
+       Non-zero drop counters mean the rules blocked the mirror; zero counters with a
+       failing lookup mean DNS. Turn it off with: isopod reconfigure $name --guest-egress off"
+    fi
     die "package install failed in '$name' (exit $rc)"
   fi
 

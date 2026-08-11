@@ -1529,3 +1529,32 @@ EOF
   assert_success
   assert_output --partial "git-filter-repo (remap backend)"
 }
+
+# A failed install used to report only an exit code when the in-guest ruleset was
+# the cause, because the hint checked host egress meta and nothing else.
+@test "a failed install names guest egress as a possible cause" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  # Let the box look healthy and report apt-get, but fail the install itself —
+  # the two are told apart by the script each `exec` is handed.
+  cat >"$STUB_DIR/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "podman $*" >> "$STUB_LOG"
+case "$1" in
+  inspect) echo running; exit 0 ;;
+  exec)
+    for a in "$@"; do last="$a"; done
+    case "$last" in
+      *xargs*)        exit 100 ;;              # the package install
+      *"command -v"*) printf 'apt-get'; exit 0 ;;  # package-manager probe
+    esac
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/podman"
+  run "$ISOPOD_ROOT/isopod" install demo cowsay
+  assert_failure
+  assert_output --partial "in-guest egress isolation"
+  assert_output --partial "nft list ruleset"
+  assert_output --partial "--guest-egress off"
+}

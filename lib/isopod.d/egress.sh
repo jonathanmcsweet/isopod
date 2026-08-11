@@ -1055,10 +1055,18 @@ box_egress_posture() { # box_egress_posture <name>
   mode="$(meta_get "$1" egress 2>/dev/null || true)"
   degraded="$(meta_get "$1" egress_degraded 2>/dev/null || printf 0)"
   guest="$(meta_get "$1" guest_egress 2>/dev/null || true)"
+  # The in-guest layer is reported alongside the host verdict, never instead of it.
+  # Reporting only the host side hid an active in-box ruleset behind the 'OPEN'
+  # message, so a box whose DNS and outbound traffic were being filtered read as
+  # having no isolation at all — which is exactly backwards when something in the
+  # box stops working and the ruleset is the first thing worth suspecting.
+  local guest_note=''
+  [ "$guest" = on ] &&
+    guest_note=' + guest lan-deny (in-box nft; defence in depth, not a hard boundary)'
   if [ "$degraded" = 1 ]; then
-    printf 'OPEN — host enforcement was requested but could not be applied (see: isopod doctor)'
+    printf 'OPEN — host enforcement was requested but could not be applied (see: isopod doctor)%s' "$guest_note"
   elif [ -n "$mode" ]; then
-    printf '%s (host-enforced)' "$mode"
+    printf '%s (host-enforced)%s' "$mode" "$guest_note"
   elif [ "$guest" = on ]; then
     printf 'guest lan-deny (in-box nft; defence in depth, not a hard boundary)'
   else

@@ -2404,3 +2404,103 @@ EOF
   run filter_repo_usable
   assert_failure
 }
+
+# ---- box entrypoint: which resolvers survive guest egress --------------------
+# Regression tests for a real outage. The entrypoint used to replace resolv.conf
+# outright with a pinned public resolver, on the assumption that every resolver
+# passt hands the guest sits in a range the rules block. Both halves were wrong:
+# a resolver ON the gateway is explicitly accepted, and a public resolver is not
+# reachable on a network that forces local DNS — which left a box unable to
+# resolve anything while the nft drop counters sat at zero.
+#
+# The classification is extracted from the entrypoint and run for real, rather
+# than reimplemented here, so the test cannot drift from what boxes execute.
+_ns_keep() { # _ns_keep <gateway> <resolv.conf body>
+  local prog
+  prog=$(sed -n "/iso_ns_keep=\$(awk -v gw=/,/}' \/etc\/resolv.conf/p" "$ISOPOD_ENTRYPOINT" |
+    sed "1s/.*awk -v gw=\"\$iso_gw\" '//; \$s/}'.*/}/")
+  printf '%s\n' "$2" | awk -v gw="$1" "$prog"
+}
+
+# The exact configuration that broke: two blocked resolvers and the gateway.
+@test "entrypoint keeps a resolver on the gateway and drops blocked ones" {
+  run _ns_keep 192.168.1.1 'nameserver 169.254.1.1
+nameserver 100.64.0.12
+nameserver 192.168.1.1'
+  assert_output "192.168.1.1"
+}
+
+@test "entrypoint keeps public resolvers" {
+  run _ns_keep 10.88.7.1 'nameserver 8.8.8.8
+nameserver 1.1.1.1'
+  assert_output "8.8.8.8
+1.1.1.1"
+}
+
+@test "entrypoint keeps loopback, which the ruleset accepts via oif lo" {
+  run _ns_keep 192.168.1.1 'nameserver 127.0.0.53'
+  assert_output "127.0.0.53"
+}
+
+# Nothing survives -> the caller falls back to the pinned public resolver and
+# says so, rather than silently leaving the box unable to resolve.
+@test "entrypoint keeps nothing when every resolver is in a blocked range" {
+  run _ns_keep 192.168.1.1 'nameserver 10.0.0.53
+nameserver 172.16.0.53
+nameserver 192.168.9.53
+nameserver 100.64.0.12
+nameserver 169.254.1.1
+nameserver 198.18.0.1'
+  assert_output ""
+}
+
+@test "entrypoint drops IPv6 resolvers, which the ruleset blocks" {
+  run _ns_keep 192.168.1.1 'nameserver fe80::1
+nameserver fc00::53
+nameserver 8.8.8.8'
+  assert_output "8.8.8.8"
+}
+
+@test "entrypoint preserves resolver order and ignores non-nameserver lines" {
+  run _ns_keep 192.168.1.1 'search lan
+options ndots:1
+nameserver 9.9.9.9
+nameserver 10.1.2.3
+nameserver 1.0.0.1'
+  assert_output "9.9.9.9
+1.0.0.1"
+}
+
+# The fallback must still exist: a box with no reachable inherited resolver has
+# to be given something, and the operator has to be told it may not work.
+@test "the entrypoint warns when it falls back to the pinned public resolver" {
+  run grep -c 'no inherited resolver survives the rules' "$ISOPOD_ENTRYPOINT"
+  assert_output "1"
+  run grep -c 'guest-egress off' "$ISOPOD_ENTRYPOINT"
+  assert_success
+}
+
+# ---- posture reports the in-guest layer alongside the host verdict ------------
+# It used to report the host verdict and stop, so an active in-box ruleset was
+# invisible behind 'OPEN' — the worst case, because the ruleset is the first
+# thing worth suspecting when something in the box stops reaching the network.
+@test "box_egress_posture names guest egress even when host enforcement degraded" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=1' 'guest_egress=on'
+  run box_egress_posture demo
+  assert_output --partial 'OPEN'
+  assert_output --partial 'guest lan-deny'
+}
+
+@test "box_egress_posture names guest egress alongside host enforcement" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=0' 'guest_egress=on'
+  run box_egress_posture demo
+  assert_output --partial 'allow-list (host-enforced)'
+  assert_output --partial 'guest lan-deny'
+}
+
+@test "box_egress_posture stays quiet about guest egress when it is off" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=1' 'guest_egress=off'
+  run box_egress_posture demo
+  assert_output --partial 'OPEN'
+  refute_output --partial 'guest lan-deny'
+}
