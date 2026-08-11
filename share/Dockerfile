@@ -40,6 +40,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       openssh-server sudo git curl wget ca-certificates \
       python3 nano less procps tar gzip unzip xz-utils locales \
+      nftables \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd
 
@@ -92,14 +93,23 @@ RUN if [ "$ISOPOD_NESTED" = "1" ] && [ "$ISOPOD_DEV_TOOLS" != "1" ]; then \
         || usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$ISOPOD_USER"; \
     fi
 
-# Lock down sshd: key-only auth, single user, no root login. Double-quote the
-# AllowUsers line so the build arg expands in the container shell.
+# Lock down sshd: key-only auth, two accounts, no password login anywhere.
+# Double-quote the AllowUsers line so the build arg expands in the container
+# shell.
+#
+# root is reachable ONLY by key (prohibit-password), and only with the
+# administrative key the host generates per box and keeps to itself — the box
+# never holds its private half. That is what lets the box user run with no sudo
+# by default: administration comes in from outside over SSH instead of being
+# escalated to from inside, so a compromised box user has nothing to attack.
+# The root account still has no password set, so prohibit-password is the whole
+# story: no password login, no keyboard-interactive, key or nothing.
 RUN printf '%s\n' \
       "Port $ISOPOD_SSHD_PORT" \
       'PasswordAuthentication no' \
       'KbdInteractiveAuthentication no' \
-      'PermitRootLogin no' \
-      "AllowUsers $ISOPOD_USER" \
+      'PermitRootLogin prohibit-password' \
+      "AllowUsers $ISOPOD_USER root" \
       'X11Forwarding no' \
       'AllowAgentForwarding no' \
       'ClientAliveInterval 60' \
@@ -115,6 +125,10 @@ COPY isopod-entrypoint /usr/local/bin/isopod-entrypoint
 # Default kernel-hardening profile (guest sysctls). The entrypoint applies these
 # only on microVM boxes (their own guest kernel); see share/hardening-sysctl.conf.
 COPY hardening-sysctl.conf /etc/isopod/hardening-sysctl.conf
+# Guest egress ruleset, applied by the entrypoint on microVM boxes when
+# ISOPOD_GUEST_EGRESS=1. nftables above is what loads it; the box user cannot use
+# either without CAP_NET_ADMIN, which it does not have.
+COPY egress-guest.nft /etc/isopod/egress-guest.nft
 RUN printf '%s\n' "$ISOPOD_USER" > /etc/isopod-user \
  && chmod +x /usr/local/bin/isopod-entrypoint
 EXPOSE ${ISOPOD_SSHD_PORT}

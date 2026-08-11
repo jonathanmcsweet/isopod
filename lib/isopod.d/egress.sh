@@ -1042,3 +1042,26 @@ egress_allowlist_show() {
     printf '  (none — add with: isopod egress allow <domain>)\n'
   fi
 }
+
+# One-line description of a box's ACTUAL network posture, for `isopod info`.
+# Deliberately reports what is in force, not what was requested: a box whose
+# egress degraded at create (rootless engine, host firewall not loaded) was
+# previously indistinguishable from an isolated one once the create output
+# scrolled away — which is how a box ends up open while its owner believes
+# otherwise. Names the in-guest layer too, so "blocked" is never ambiguous about
+# which mechanism is doing it.
+box_egress_posture() { # box_egress_posture <name>
+  local mode degraded guest
+  mode="$(meta_get "$1" egress 2>/dev/null || true)"
+  degraded="$(meta_get "$1" egress_degraded 2>/dev/null || printf 0)"
+  guest="$(meta_get "$1" guest_egress 2>/dev/null || true)"
+  if [ "$degraded" = 1 ]; then
+    printf 'OPEN — host enforcement was requested but could not be applied (see: isopod doctor)'
+  elif [ -n "$mode" ]; then
+    printf '%s (host-enforced)' "$mode"
+  elif [ "$guest" = on ]; then
+    printf 'guest lan-deny (in-box nft; defence in depth, not a hard boundary)'
+  else
+    printf 'OPEN — no egress isolation'
+  fi
+}

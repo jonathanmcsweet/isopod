@@ -50,6 +50,13 @@ write_ssh_include() {
       hostkeyalias=""
       # shellcheck disable=SC2034
       [ "$(box_engine "$name")" = container ] && hostkeyalias="  HostKeyAlias $(ctr_name "$name")"
+      # No root entry is emitted here on purpose. The box's root account is
+      # reachable with `isopod root-shell`, but putting it in the managed include
+      # would give every box a ready-made root target for an IDE — and a
+      # root-privileged editor window opened on the workspace runs what the
+      # workspace tells it to (.vscode/tasks.json 'runOn: folderOpen', extension
+      # activation), which on an agent-run box hands the agent root. Print the
+      # block deliberately with `isopod root-shell <name> --print-ssh-config`.
       render_tmpl ssh-entry.txt
     done
   } >"$tmp"
@@ -259,6 +266,58 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
     -o StrictHostKeyChecking=yes \
     -o ForwardAgent=no -o ForwardX11=no \
     "${hkalias[@]}" "${opts[@]}" "$CONTAINER_USER@$host" "${rcmd[@]}"
+}
+
+# Connect to a box as root, using the administrative key the host generated for
+# it at create time. Same transport and host-key pinning as box_ssh — only the
+# login user and identity differ. This is the ONLY way into a box's root account:
+# the private key lives on the host, sshd takes root by key only, and the box
+# user has no sudo by default, so nothing running in the box can reach it.
+#
+# Boxes created before the root key existed have no id_ed25519_root; say so
+# plainly rather than failing as an opaque SSH permission error.
+root_ssh() { # root_ssh <name> [ssh-options...] [-- remote command...]
+  local name="$1"
+  shift
+  local key
+  key="$(box_dir "$name")/id_ed25519_root"
+  [ -f "$key" ] ||
+    die "box '$name' has no administrative root key — it predates 'isopod root-shell'.
+     Rebuild it onto the current image to get one: isopod upgrade $name"
+  local host port
+  IFS=' ' read -r host port < <(box_ssh_addr "$name") ||
+    die "could not resolve SSH address for box '$name'"
+  local -a hkalias=()
+  [ "$(box_engine "$name")" = container ] && hkalias=(-o "HostKeyAlias=$(ctr_name "$name")")
+  local -a opts=() rcmd=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --)
+        shift
+        rcmd=("$@")
+        break
+        ;;
+      -o)
+        opts+=("$1" "$2")
+        shift 2
+        ;;
+      -*)
+        opts+=("$1")
+        shift
+        ;;
+      *)
+        rcmd=("$@")
+        break
+        ;;
+    esac
+  done
+  ssh -p "$port" \
+    -i "$key" \
+    -o IdentitiesOnly=yes \
+    -o UserKnownHostsFile="$(box_dir "$name")/known_hosts" \
+    -o StrictHostKeyChecking=yes \
+    -o ForwardAgent=no -o ForwardX11=no \
+    "${hkalias[@]}" "${opts[@]}" "root@$host" "${rcmd[@]}"
 }
 
 # Stream a tar archive between host and box over SSH. File transfer uses tar

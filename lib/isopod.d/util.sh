@@ -19,6 +19,21 @@ die() {
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Strip terminal control characters from text that came OUT of a box, before the
+# host prints it. A box is assumed compromised, so anything it emits — a git
+# identity, a repo path, a branch name — can carry escape sequences that rewrite
+# the host's terminal: forging a success line, hiding an error, or driving
+# clipboard/window operations on terminals that enable them. Every ANSI, OSC and
+# CSI sequence begins with ESC (0x1b), so dropping the C0 controls and DEL
+# defuses all of them; tab and newline are kept so multi-line listings still
+# format. 8-bit C1 introducers (0x80-0x9f) are deliberately NOT stripped: in a
+# UTF-8 locale those bytes are continuation bytes of ordinary characters, and
+# removing them would corrupt legitimate non-ASCII text for no gain — terminals
+# in UTF-8 mode do not act on them.
+sanitize() { # sanitize <string...> -> the same text with control characters removed
+  printf '%s' "$*" | LC_ALL=C tr -d '\000-\010\013-\037\177'
+}
+
 # Host OS family isopod is running ON — NOT where boxes run. On macOS the
 # container engine runs boxes inside its own Linux VM (podman machine / Docker
 # Desktop), so the host that runs the `isopod` script and the

@@ -83,6 +83,10 @@ cmd_start() {
     inject_secrets "$name"
   fi
   info "started '$name' (ssh $(ctr_name "$name"))"
+  # A box built from an older isopod is missing every fix made to the entrypoint,
+  # Dockerfile and sysctl baseline since. Nothing else surfaces that, so say it on
+  # every start until it is dealt with.
+  warn_if_stale "$name"
 }
 
 cmd_stop() {
@@ -107,6 +111,270 @@ cmd_config() {
 # image (preserving its workspace + installed packages), then recreate from that
 # image with the new flags. Identity (SSH key, host key, color, ssh_config) is
 # preserved. Desired settings come from config.yaml; flags override it.
+# The base image tag the CURRENT isopod would build this box from. Recomputed
+# from the box's own build inputs (base image, --dev, --nested-containers), so it
+# tracks changes to the Dockerfile, entrypoint and sysctl baseline through
+# image_tag_for's content hash.
+box_wanted_base_tag() { # box_wanted_base_tag <name>
+  image_tag_for "$(meta_get "$1" base)" \
+    "$(meta_get "$1" dev 2>/dev/null || printf 0)" \
+    "$(meta_get "$1" nested 2>/dev/null || printf 0)"
+}
+
+# Is the box running something older than what isopod would build today? A box
+# created before provenance was recorded has no base_image line — it predates
+# this check, so it is by definition older and reports stale.
+box_is_stale() { # box_is_stale <name> — rc 0 when out of date
+  local recorded want
+  recorded="$(meta_get "$1" base_image 2>/dev/null || true)"
+  [ -n "$recorded" ] || return 0
+  want="$(box_wanted_base_tag "$1" 2>/dev/null)" || return 1
+  [ "$recorded" != "$want" ]
+}
+
+# One-line staleness nudge, safe to call on any box. Kept quiet when the box is
+# current, because it runs on every start.
+warn_if_stale() { # warn_if_stale <name>
+  box_is_stale "$1" 2>/dev/null || return 0
+  local built
+  built="$(meta_get "$1" built_version 2>/dev/null || true)"
+  warn "box '$1' was built from an older isopod${built:+ ($built; this is $ISOPOD_VERSION)} and does not
+     have fixes made since. Rebuild it onto the current image: isopod upgrade $1"
+}
+
+# Rebuild a box onto the image the current isopod would produce. This exists
+# because nothing else does it: `start` re-runs the same image, and `reconfigure`
+# COMMITS the container layer, which carries the old entrypoint forward and pins
+# the box to a snapshot. So a fix shipped in the entrypoint, the Dockerfile or the
+# sysctl baseline could never reach a box that already existed.
+#
+# Default is a rebase: build the current base image and move $WORKSPACE across to
+# a fresh container. That also picks up base-image security updates, at the cost of
+# OS state outside the workspace (installed packages) — which is why --in-place
+# exists for the case where that state is expensive to recreate.
+cmd_upgrade() {
+  local name="" in_place=0 force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
+    case "$1" in
+      --in-place)
+        in_place=1
+        shift
+        ;;
+      --force | -f | --yes | -y)
+        force=1
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      -*) die "unknown option for upgrade: $1" ;;
+      *)
+        [ -z "$name" ] && name="$1" || die "unexpected argument: $1"
+        shift
+        ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: isopod upgrade <name> [--in-place] [--yes]"
+  open_box "$name"
+  acquire_lock
+
+  [ "$ENGINE" = container ] &&
+    die "upgrade is not supported on the Apple 'container' engine (it has no image commit
+     or loopback publish to reuse). Recreate the box: copy your work out with
+     'isopod export $name ...', then 'isopod rm $name' and 'isopod create $name ...'."
+
+  # Both paths need the box up: the rebase streams the workspace out over SSH, and
+  # the in-place refresh writes files into the running box.
+  local status
+  status=$(box_status "$name" 2>/dev/null || true)
+  [ "$status" = "running" ] || cmd_start "$name"
+  refresh_port "$name"
+
+  if [ "$in_place" -eq 1 ]; then
+    upgrade_in_place "$name"
+    return
+  fi
+  upgrade_rebase "$name" "$force"
+}
+
+# --in-place: replace the isopod-owned files in the running box and reboot it.
+# Fast and keeps every installed package, but it only refreshes what isopod ships
+# — the base image underneath keeps whatever CVEs it had, and the box drifts
+# further from anything reproducible. Deliberately does NOT touch base_image, so
+# the box still reports stale and the nudge to do a real rebase does not go away.
+upgrade_in_place() { # upgrade_in_place <name>
+  local name="$1"
+  info "Refreshing isopod's own files inside '$name' (in place)..."
+  # Root is needed to write under /usr/local/bin and /etc. Prefer the
+  # administrative key; fall back to sudo for a box that predates it.
+  local -a asroot=()
+  if [ -f "$(box_dir "$name")/id_ed25519_root" ]; then
+    asroot=(root_ssh "$name")
+  elif [ "$(meta_get "$name" sudo 2>/dev/null || printf 1)" = 1 ]; then
+    asroot=(box_ssh "$name")
+  else
+    die "'$name' has neither an administrative root key nor sudo, so its files cannot be
+     replaced in place. Use a full rebase instead: isopod upgrade $name"
+  fi
+  local sudo_prefix=""
+  [ "${asroot[0]}" = box_ssh ] && sudo_prefix="sudo "
+
+  "${asroot[@]}" -- "${sudo_prefix}sh -c 'cat >/usr/local/bin/isopod-entrypoint.new && chmod 755 /usr/local/bin/isopod-entrypoint.new && mv /usr/local/bin/isopod-entrypoint.new /usr/local/bin/isopod-entrypoint'" \
+    <"$ISOPOD_ENTRYPOINT" || die "could not replace the entrypoint in '$name'"
+  "${asroot[@]}" -- "${sudo_prefix}sh -c 'mkdir -p /etc/isopod && cat >/etc/isopod/hardening-sysctl.conf'" \
+    <"$ISOPOD_SYSCTL_CONF" || die "could not replace the sysctl baseline in '$name'"
+
+  info "Restarting '$name' so the new entrypoint runs..."
+  cmd_stop "$name" >/dev/null 2>&1 || true
+  cmd_start "$name"
+  # built_version is deliberately NOT bumped. It records which isopod BUILT the
+  # box's image, and an in-place refresh does not rebuild it — writing the current
+  # version here while base_image stays old made warn_if_stale contradict itself
+  # ("built from an older isopod (2.18.0; this is 2.18.0)").
+  info "in-place upgrade of '$name' done."
+  warn "This refreshed only isopod's own files. The base image underneath is unchanged,
+     so '$name' still reports stale — run 'isopod upgrade $name' (no --in-place) when you
+     can afford to lose packages installed inside the box."
+}
+
+# Default path: build the current base image and move the workspace onto a fresh
+# container, keeping the box's identity (dir, keys, published port, meta).
+upgrade_rebase() { # upgrade_rebase <name> <force>
+  local name="$1" force="$2"
+  local base dev nested newtag oldimg port
+  base="$(meta_get "$name" base)"
+  dev="$(meta_get "$name" dev 2>/dev/null || printf 0)"
+  nested="$(meta_get "$name" nested 2>/dev/null || printf 0)"
+  oldimg="$(meta_get "$name" image || true)"
+  port="$(meta_get "$name" port)"
+
+  [ -n "$(meta_get "$name" disk 2>/dev/null || true)" ] &&
+    die "upgrade cannot rebase a box with a --disk data volume — its contents live in the
+     container layer this replaces. Copy the volume out yourself, then 'isopod rm $name'
+     and recreate with the new settings."
+
+  if [ "$force" -ne 1 ]; then
+    printf 'Rebase '\''%s'\'' onto a freshly built image?\n' "$name"
+    printf '  KEPT    : %s, your SSH keys, published port, secrets, colour, settings\n' "$WORKSPACE"
+    printf '  LOST    : packages installed inside the box and any OS state outside %s\n' "$WORKSPACE"
+    printf 'Proceed? [y/N] '
+    local reply
+    read -r reply
+    case "$reply" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
+  fi
+
+  # Reproduce the box's isolation tier and egress posture, exactly as reconfigure
+  # does, so a rebase never silently changes what the box is.
+  local saved_rt
+  saved_rt=$(meta_get "$name" runtime 2>/dev/null || true)
+  case "$saved_rt" in
+    container) export ISOPOD_FORCE_CONTAINER=1 ;;
+    "") resolve_runtime "$ENGINE" 0 ;;
+    *) export ISOPOD_RUNTIME="$saved_rt" ;;
+  esac
+  resolve_egress "$ENGINE"
+  egress_preflight "$ENGINE"
+  runtime_preflight "$ENGINE"
+
+  # Everything that can still legitimately fail happens BEFORE the container is
+  # destroyed. config.yaml is the source of truth for published ports, so
+  # synthesize it for a box that predates it (exactly as reconfigure does) — read
+  # straight from a missing file, config_expose returns nothing and the rebuilt
+  # box would silently lose its port publishings. parse_expose_specs can die, so
+  # it has to run here too, not after the container is gone.
+  [ -f "$(box_config_file "$name")" ] || write_box_config "$name"
+  local -a exposes=()
+  mapfile -t exposes < <(config_expose "$name")
+  parse_expose_specs "${exposes[@]:-}"
+
+  info "Building the current base image..."
+  newtag=$(build_image "$base" "$dev" "$nested")
+
+  # Stream the workspace to a host-side archive FIRST, before anything is
+  # destroyed. If any later step fails this file is the user's work, so it is
+  # never cleaned up on the error path — the message names it instead.
+  local ws
+  ws=$(mktemp "${TMPDIR:-/tmp}/isopod-upgrade-$name-XXXXXX.tar")
+  info "Copying $WORKSPACE out of '$name'..."
+  local -a rc
+  set +e
+  box_tar_out "$name" "$WORKSPACE" 2> >(grep -v 'file changed as we read it' >&2) >"$ws"
+  rc=("${PIPESTATUS[@]}")
+  set -e
+  if [ "${rc[0]}" -gt 1 ]; then
+    rm -f "$ws"
+    die "could not read $WORKSPACE out of '$name' — nothing has been changed."
+  fi
+
+  info "Replacing the container..."
+  local ctr
+  ctr=$(ctr_name "$name")
+  "$ENGINE" rm -f "$ctr" >/dev/null 2>&1 || true
+  # A fresh container generates fresh SSH host keys, so the pin from the old one
+  # is expected to fail. Drop it and re-pin below rather than tripping the
+  # (correct) fail-closed host-key check in scan_host_key.
+  rm -f "$(box_dir "$name")/known_hosts"
+
+  local BOX_SUDO BOX_HARDEN BOX_DISK BOX_NESTED BOX_SECRETS
+  # Preserve the box's OWN sudo policy rather than applying today's default. An
+  # upgrade is a rebuild, not a policy change, and silently removing sudo from a
+  # box someone relies on would be a nasty surprise. A box with no recorded policy
+  # predates the setting, when sudo was on — keep that.
+  BOX_SUDO="$(meta_get "$name" sudo 2>/dev/null || true)"
+  [ -n "$BOX_SUDO" ] || BOX_SUDO=1
+  # These are read by build_run_args (another module), which shellcheck lints
+  # separately and so cannot see — same convention as cmd_create's block.
+  # shellcheck disable=SC2034
+  {
+    BOX_HARDEN="$(meta_get "$name" harden 2>/dev/null || true)"
+    BOX_DISK=""
+    BOX_NESTED="$nested"
+    BOX_SECRETS="$(meta_get "$name" secrets 2>/dev/null || true)"
+  }
+  build_run_args "$name" "$newtag" "127.0.0.1:$port:$BOX_SSHD_PORT" \
+    "$(meta_get "$name" memory || true)" "$(meta_get "$name" cpus || true)" "${EXPOSE_SPECS[@]:-}"
+  if ! "$ENGINE" "${RUN_ARGS[@]}" >/dev/null; then
+    die "could not start the rebuilt container. Your workspace is safe at:
+     $ws"
+  fi
+
+  local hostport
+  hostport=$(resolve_port "$name") || die "could not determine published SSH port (workspace kept at $ws)"
+  meta_set "$name" image "$newtag"
+  meta_set "$name" base_image "$newtag"
+  meta_set "$name" built_version "$ISOPOD_VERSION"
+  meta_set "$name" port "$hostport"
+  meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
+  meta_set "$name" egress "$(active_egress)"
+  write_ssh_include
+  scan_host_key "$name" >/dev/null || true
+  wait_for_ssh "$name" || die "the rebuilt box did not accept SSH. Your workspace is safe at:
+     $ws"
+
+  info "Restoring $WORKSPACE into the rebuilt box..."
+  box_ssh "$name" -- "mkdir -p '$WORKSPACE'" ||
+    die "could not create $WORKSPACE in the rebuilt box (workspace kept at $ws)"
+  box_tar_in "$name" "$WORKSPACE" <"$ws" ||
+    die "could not restore the workspace. It is kept at:
+     $ws"
+  rm -f "$ws"
+
+  inject_secrets "$name"
+  apply_color "$name" "$(meta_get "$name" color || true)" ||
+    warn "could not apply window color (the box is fine without it)"
+  write_box_config "$name"
+  # Drop the box's previous reconfigure snapshot, never the shared base image.
+  case "$oldimg" in
+    localhost/isopod-box-"$name":*) "$ENGINE" rmi "$oldimg" >/dev/null 2>&1 || true ;;
+  esac
+  info "upgraded '$name' to the current image — see: isopod info $name"
+  egress_posture_note "$name"
+}
+
 cmd_reconfigure() {
   local name="" memory="" cpus="" color="" memory_set=0 cpus_set=0 color_set=0 expose_set=0
   local -a exposes=()
@@ -367,6 +635,87 @@ flatpak_access_hint() { # flatpak_access_hint <app-id>
            flatpak override --user --filesystem=\$HOME/.ssh:ro \\
              --filesystem=$CONFIG_DIR:ro $id
          then restart VSCodium and retry."
+}
+
+# Administrative root shell in a box, over SSH with the host-held root key.
+# The counterpart to `isopod shell`: same box, same transport, the account you
+# need for package installs and system changes on a box whose user has no sudo.
+cmd_root_shell() {
+  local name="" print_config=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --print-ssh-config)
+        print_config=1
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*) die "unknown option for root-shell: $1" ;;
+      *)
+        [ -z "$name" ] && name="$1" && shift || break
+        ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: isopod root-shell <name> [-- command...] | --print-ssh-config"
+  local -a rcmd=("$@")
+  open_box "$name"
+
+  if [ "$print_config" -eq 1 ]; then
+    root_ssh_config_snippet "$name"
+    return
+  fi
+
+  acquire_lock
+  local status
+  status=$(box_status "$name" 2>/dev/null || true)
+  [ "$status" = "running" ] || cmd_start "$name"
+  refresh_port "$name"
+  release_lock
+  if [ "${#rcmd[@]}" -gt 0 ]; then
+    root_ssh "$name" -- "${rcmd[*]}"
+    return
+  fi
+  # Land in /root, NOT in the workspace. The workspace is the one directory in the
+  # box an agent fully controls, and a root shell sitting in it is one `make`,
+  # `npm install` or `./configure` away from running agent-authored code as root —
+  # which is exactly the escalation the no-sudo default exists to prevent. Reaching
+  # the workspace from here is deliberate, not the default.
+  warn "This is a root shell. Anything you run from $WORKSPACE — a build, a package
+     script, a Makefile — is code the box's workspace controls, and it will run as root.
+     For a package, prefer: isopod install $name <pkg>"
+  root_ssh "$name" -t -- "cd /root; exec bash"
+}
+
+# The ssh_config block for a box's root account, printed on request so an IDE that
+# drives ssh_config (VSCodium Remote-SSH and friends) can open a root window.
+#
+# NOT written into the managed include automatically, and that is the point: a
+# root-privileged editor window opened on the workspace executes what the workspace
+# says to execute — .vscode/tasks.json with "runOn": "folderOpen" runs on connect,
+# and extensions activate against workspace settings. On a box whose workspace an
+# agent controls, that is a direct path from agent to root. Anyone who wants it can
+# paste this in, having been told.
+root_ssh_config_snippet() { # root_ssh_config_snippet <name>
+  local name="$1"
+  # host/port/hostkeyalias are consumed by the template through render_tmpl,
+  # which shellcheck cannot see into.
+  # shellcheck disable=SC2034
+  local host port hostkeyalias=""
+  [ -f "$(box_dir "$name")/id_ed25519_root" ] ||
+    die "box '$name' has no administrative root key (created with --no-root-key, or it
+     predates the feature). Rebuild it onto the current image: isopod upgrade $name"
+  # shellcheck disable=SC2034
+  IFS=' ' read -r host port < <(box_ssh_addr "$name") ||
+    die "could not resolve the SSH address for box '$name' (is it running?)"
+  # shellcheck disable=SC2034
+  [ "$(box_engine "$name")" = container ] && hostkeyalias="  HostKeyAlias $(ctr_name "$name")"
+  render_tmpl ssh-entry-root.txt
+  printf '\n'
+  warn "Opening $WORKSPACE in a ROOT editor window runs workspace-controlled code as root
+     (.vscode/tasks.json 'runOn: folderOpen', extension activation). On a box running an
+     agent, treat that as handing the agent root. Prefer 'isopod install $name <pkg>'."
 }
 
 cmd_code() {

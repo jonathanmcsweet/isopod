@@ -1,0 +1,59 @@
+# isopod guest egress ruleset — loaded INSIDE a microVM box by the entrypoint.
+#
+# Blocks the box from reaching private address space: your LAN, CGNAT/overlay
+# ranges (Tailscale and friends), link-local, and cloud metadata. Public internet
+# is untouched, so an agent's API calls keep working.
+#
+# WHY THIS IS NEEDED AT ALL: with krun + passt the guest is handed the HOST's own
+# LAN identity — a real address on your subnet and your real router as its default
+# gateway. It is not behind a private NAT. Without these rules the box is simply a
+# machine on your network.
+#
+# WHY THE GATEWAY IS EXEMPT: passt also maps the HOST onto that same gateway
+# address, so inbound SSH from the host arrives from it. At the IP layer the host
+# and the router are the same address and cannot be told apart. Dropping it would
+# cut isopod's own control channel and lock the box, so it is accepted — the one
+# private address the box can still reach. passt's --no-map-gw would separate the
+# two and let this exemption go away; see docs.
+#
+# This is defence in depth, not a hard boundary: it runs in the guest, so guest
+# root can remove it. The box user has no sudo and no CAP_NET_ADMIN by default,
+# which is what makes it hold against the workload it is containing.
+#
+# @GATEWAY@ is substituted by the entrypoint from /proc/net/route before loading.
+# Not a render_tmpl template — this file is consumed by nft inside the box, never
+# evaluated as a shell heredoc on the host.
+
+table inet isopod_egress {
+  chain output {
+    type filter hook output priority filter; policy accept;
+
+    # Loopback and already-approved flows first, so nothing below can strand an
+    # established connection (including the SSH session isopod is talking over).
+    oif "lo" accept
+    ct state established,related accept
+
+    # The host control path. See the note above: this is also the LAN router.
+    ip daddr @GATEWAY@ accept
+
+    # Private, shared, link-local and carrier-grade-NAT space. 169.254.0.0/16
+    # covers the cloud metadata address (169.254.169.254) and passt's own DNS
+    # responder — the box resolves through a public resolver instead, pinned by
+    # the entrypoint, so it never asks your internal resolver anything.
+    ip daddr {
+      10.0.0.0/8,
+      172.16.0.0/12,
+      192.168.0.0/16,
+      100.64.0.0/10,
+      169.254.0.0/16,
+      192.0.0.0/24,
+      198.18.0.0/15
+    } counter drop
+
+    # IPv6 equivalents: unique-local and link-local.
+    ip6 daddr {
+      fc00::/7,
+      fe80::/10
+    } counter drop
+  }
+}

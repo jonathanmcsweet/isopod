@@ -159,7 +159,7 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 - **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless you've created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. To narrow this, [`egress allow-list`](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list) forces the box through a host-side filtering proxy that permits only allow-listed hostnames — it limits, but does not eliminate, exfiltration (a secret can still be sent *into* an allowed host). Reconnaissance in the *other* direction — a rogue agent scanning your **local network**, the host, or cloud metadata — can be blocked with host-enforced [network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny), while keeping published ports and public internet working.
 
-- **Every possible exploit an agent could theoretically take in your container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above, but anything inside the container is fully exposed to it. If you don't need the agent to have root, create the container with **`--no-sudo`** to drop that privilege — you can still add system packages from the host with [`isopod install`](#adding-a-system-package-without-a-rebuild-isopod-install), so lockdown isn't a dead end for dependencies. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
+- **Every possible exploit an agent could theoretically take in your container.** The in-container user has **no `sudo` by default**, and the box additionally runs with `no-new-privileges`, so an agent that gets code execution as the box user cannot escalate to root inside the box. Administration comes from *outside* instead: `isopod root-shell <name>` logs in as root with a key the host generates per box and never places inside it, so there is no password to capture and no setuid path to abuse. Add system packages that way, or from the host with [`isopod install`](#adding-a-system-package-without-a-rebuild-isopod-install). Pass **`--sudo`** to opt back into passwordless in-box sudo for a hands-on box — but understand that anything running as the box user, including an agent, inherits it. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` needs them — see [Fingerprint hardening](#fingerprint-hardening).
 
 - **Unknown exploits.** There is no such thing as perfect security, and isopod can't prevent an exploit no one has discovered yet. It gives you a set of features to incrementally harden your sandbox, not a guarantee.
 
@@ -274,7 +274,7 @@ Each box gets its own window; pass `--reuse-window` to open it in the current on
 
 ## Customizing the container
 
-The base image is defined by a standard Dockerfile, [`share/Dockerfile`](share/Dockerfile) — built identically by `docker build` and `podman build`. On top of whatever base you choose it adds sshd, git, common CLI tooling, the unprivileged in-container user, and passwordless sudo (drop sudo with `--no-sudo`). There are two ways to shape it:
+The base image is defined by a standard Dockerfile, [`share/Dockerfile`](share/Dockerfile) — built identically by `docker build` and `podman build`. On top of whatever base you choose it adds sshd, git, common CLI tooling, the unprivileged in-container user, and an administrative root key (add in-box passwordless sudo with `--sudo`). There are two ways to shape it:
 
 - **`--image <ref>`** swaps the base. Any Debian/Ubuntu-based image works (`--image ubuntu:24.04`), including one you built yourself from a Dockerfile and want to reuse across boxes.
 - **`--dockerfile <path>`** is the project-provisioning path: isopod builds your Dockerfile first, then layers sshd/git on top (i.e. your image becomes the base via `FROM`). This is how you bake in a toolchain (a JDK, Node, etc.) the industry-standard way, rather than a bespoke config format.
@@ -289,7 +289,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends default-jdk mav
 isopod create api --repo https://github.com/me/api --dockerfile ./Dockerfile
 ```
 
-Your Dockerfile must use a Debian/Ubuntu (`apt`) base, since isopod's layer installs sshd with `apt-get`. A trailing `USER` in your Dockerfile doesn't change the box's privilege model — isopod's layer resets to root (sshd must be PID 1 as root) and you log in as the unprivileged in-box user. **To limit privilege inside the box, use `--no-sudo`** (drops the in-box user's passwordless sudo), not the base image's `USER` — isopod's SSH model supersedes it. (isopod's real boundary is host isolation + rootless userns, not in-container rootlessness; see [The isolation model](#the-isolation-model).)
+Your Dockerfile must use a Debian/Ubuntu (`apt`) base, since isopod's layer installs sshd with `apt-get`. A trailing `USER` in your Dockerfile doesn't change the box's privilege model — isopod's layer resets to root (sshd must be PID 1 as root) and you log in as the unprivileged in-box user. **Privilege inside the box is limited by default** (the in-box user has no sudo; use `--sudo` to opt in), and that is set by isopod, not the base image's `USER` — isopod's SSH model supersedes it. (isopod's real boundary is host isolation + rootless userns, not in-container rootlessness; see [The isolation model](#the-isolation-model).)
 
 Because the image is built before the container exists (and `--repo` clones *inside* the box afterward), the Dockerfile is a host-side file you point at — not something read from the cloned repo. For quick one-offs you can still install toolchains interactively with `isopod shell`.
 
@@ -299,8 +299,8 @@ isopod runs box operations (clone, copy-in, export, fetch) over a non-interactiv
 
 Most dependencies don't need root: install language packages (`pip install --user`, `npm`, `cargo`) into your home directory from `isopod shell`. For the system packages that *do* need root — a `-dev` header, a CLI tool like `jq` — how you add them depends on the box's privilege posture:
 
-- **Default (sudo) box:** the in-box user has passwordless sudo, so `isopod shell <name> -- 'sudo apt-get update && sudo apt-get install -y jq'` just works.
-- **`--no-sudo` box:** the in-box user has no root, so the install comes from the host instead:
+- **Default (no-sudo) box:** the in-box user has no root, so the install comes from the host instead — either `isopod install` below, or `isopod root-shell <name> -- 'apt-get update && apt-get install -y jq'`.
+- **`--sudo` box:** the in-box user has passwordless sudo, so `isopod shell <name> -- 'sudo apt-get update && sudo apt-get install -y jq'` works in-box.
 
 ```sh
 isopod install <name> jq ripgrep    # runs the box's package manager as root, from the host

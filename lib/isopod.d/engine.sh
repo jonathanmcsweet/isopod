@@ -271,12 +271,13 @@ image_tag_for() { # image_tag_for <base-image> [dev-tools 0|1] [nested 0|1]
   [ -f "$ISOPOD_DOCKERFILE" ] || die "missing Dockerfile: $ISOPOD_DOCKERFILE"
   [ -f "$ISOPOD_ENTRYPOINT" ] || die "missing entrypoint: $ISOPOD_ENTRYPOINT"
   [ -f "$ISOPOD_SYSCTL_CONF" ] || die "missing sysctl baseline: $ISOPOD_SYSCTL_CONF"
+  [ -f "$ISOPOD_GUEST_EGRESS_NFT" ] || die "missing guest egress ruleset: $ISOPOD_GUEST_EGRESS_NFT"
   local dev="${2:-0}" nested="${3:-0}" hash
   # The dev-tools and nested flags are part of the cache key: the lean, --dev and
   # --nested-containers images are built from the same Dockerfile but differ, so
   # they must not share a tag.
   hash=$({
-    cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT" "$ISOPOD_SYSCTL_CONF"
+    cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT" "$ISOPOD_SYSCTL_CONF" "$ISOPOD_GUEST_EGRESS_NFT"
     printf '%s\0%s\0%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION" "$dev" "$nested"
   } | sha_hex)
   printf 'localhost/isopod-base:%s' "$hash"
@@ -310,6 +311,7 @@ build_image() { # build_image <base-image> [dev-tools 0|1] [nested 0|1] -> echoe
   ctx=$(mktemp -d "${tmpbase%/}/isopod-ctx-XXXXXX")
   cp "$ISOPOD_ENTRYPOINT" "$ctx/isopod-entrypoint"
   cp "$ISOPOD_SYSCTL_CONF" "$ctx/hardening-sysctl.conf"
+  cp "$ISOPOD_GUEST_EGRESS_NFT" "$ctx/egress-guest.nft"
   if [ "$ENGINE" = container ]; then
     cp "$ISOPOD_DOCKERFILE" "$ctx/Dockerfile"
     dockerfile="$ctx/Dockerfile"

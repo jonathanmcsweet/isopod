@@ -65,6 +65,54 @@ parse_disk_spec() { # parse_disk_spec <spec>
 # Assemble the `$ENGINE run` argument list for a box into the global RUN_ARGS
 # array (bash can't return arrays). Shared by create and reconfigure so the two
 # can't drift. Hardening masks are read fresh from the profile each time.
+# Engine flags that would dismantle the sandbox isolation isopod exists to
+# provide: host filesystem exposure (-v/--mount), privilege restoration
+# (--privileged/--cap-add/--security-opt), or namespace sharing with the host
+# (--userns/--pid/--ipc/--uts/--network=host). ISOPOD_RUN_ARGS is an escape hatch
+# for unusual environments and is word-split into the engine command line, so
+# anything able to set it in the user's shell could otherwise silently turn a
+# sandbox into a passthrough — with no sign of it in the box or in `isopod info`.
+# Refuse by default. ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 is the deliberate override,
+# because there are legitimate one-off reasons to need these.
+assert_safe_run_args() { # assert_safe_run_args <arg...>
+  [ "${ISOPOD_ALLOW_UNSAFE_RUN_ARGS:-0}" = 1 ] && return 0
+  local a bare val want_net=0
+  for a in "$@"; do
+    # A flag's value may arrive as `--opt=value` OR as the NEXT token. want_net
+    # carries that state for --net/--network, the only pair here whose safety
+    # depends on the value; every other flag below is refused whatever it is.
+    if [ "$want_net" = 1 ]; then
+      want_net=0
+      case "$a" in host | container:*) die_unsafe_run_arg "--network $a" ;; esac
+      continue
+    fi
+    bare="${a%%=*}"
+    val=""
+    [ "$a" != "$bare" ] && val="${a#*=}"
+    case "$bare" in
+      --net | --network)
+        # isopod sets the box's own network itself, so any OTHER value is a
+        # deliberate choice worth honoring; only the host/other-container
+        # namespaces defeat the sandbox.
+        if [ -z "$val" ]; then
+          want_net=1
+        else
+          case "$val" in host | container:*) die_unsafe_run_arg "$a" ;; esac
+        fi
+        ;;
+      -v | --volume | --mount | --privileged | --userns | --pid | --ipc | --uts | --cap-add | --device | --security-opt | --systemd)
+        die_unsafe_run_arg "$a"
+        ;;
+    esac
+  done
+}
+
+die_unsafe_run_arg() { # die_unsafe_run_arg <arg>
+  die "ISOPOD_RUN_ARGS contains '$1', which would break the sandbox isolation isopod
+     provides (host mounts, restored privileges, or a shared host namespace).
+     If you genuinely need it, set ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 to confirm."
+}
+
 RUN_ARGS=()
 build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [host:ctr expose...]
   local name="$1" image="$2" publish="$3" memory="$4" cpus="$5"
@@ -87,9 +135,15 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # authorized_keys — never a secret, so its presence in the container env /
   # `inspect` is fine. BOX_SUDO (1/0) is set by create only; when unset (e.g.
   # reconfigure) the entrypoint leaves the box's existing sudo policy untouched.
-  local pubfile
+  local pubfile rootpubfile
   pubfile="$(box_dir "$name")/id_ed25519.pub"
   [ -f "$pubfile" ] && RUN_ARGS+=(-e "ISOPOD_AUTHORIZED_KEY=$(cat "$pubfile")")
+  # Administrative root key (see create). Public half only — the private key never
+  # leaves the host, so the box holds nothing that grants root to anything running
+  # inside it. Absent on boxes created before this existed, which simply get no
+  # root login and keep whatever sudo policy they were built with.
+  rootpubfile="$(box_dir "$name")/id_ed25519_root.pub"
+  [ -f "$rootpubfile" ] && RUN_ARGS+=(-e "ISOPOD_ROOT_AUTHORIZED_KEY=$(cat "$rootpubfile")")
   [ -n "${BOX_SUDO:-}" ] && RUN_ARGS+=(-e "ISOPOD_SUDO=$BOX_SUDO")
   # Harden a --no-sudo box: with sudo removed there is no legitimate setuid
   # escalation to preserve, so block privilege gains (setuid binaries, newgrp).
@@ -109,6 +163,21 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   [ -n "$box_harden" ] || box_harden=default
   [ "$box_harden" != off ] && is_microvm_runtime &&
     RUN_ARGS+=(-e "ISOPOD_HARDEN=$box_harden")
+  # Guest egress isolation: nft rules loaded INSIDE the box by the entrypoint,
+  # blocking private/LAN/CGNAT/link-local destinations. microVM boxes only — a
+  # container box's entrypoint has no CAP_NET_ADMIN and could not load them.
+  #
+  # Mutually exclusive with host-side egress, and that is not a limitation, it is
+  # correctness: an allow-list box reaches the world through a proxy on the bridge
+  # gateway (10.88.7.1), which is RFC1918 — the guest rules would drop its only
+  # route out. Host-side enforcement is also strictly stronger (it survives guest
+  # root), so when it is active the in-guest layer has nothing to add.
+  local box_guest_egress="${BOX_GUEST_EGRESS:-}"
+  [ -n "$box_guest_egress" ] || box_guest_egress="$(meta_get "$name" guest_egress 2>/dev/null || true)"
+  [ -n "$box_guest_egress" ] || box_guest_egress=on
+  if [ "$box_guest_egress" = on ] && [ -z "$(active_egress)" ] && is_microvm_runtime; then
+    RUN_ARGS+=(-e "ISOPOD_GUEST_EGRESS=1" -e "ISOPOD_GUEST_EGRESS_DNS=$ISOPOD_EGRESS_DNS")
+  fi
   # Secrets tmpfs: memory-backed, owned by the in-box user, gone when the box
   # stops. inject_secrets streams values in over SSH after boot; nothing about
   # a secret (name or value) is visible to the engine or `inspect`. On create
@@ -224,8 +293,13 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   local spec
   for spec in "$@"; do [ -n "$spec" ] && RUN_ARGS+=(-p "127.0.0.1:$spec"); done
   # ISOPOD_RUN_ARGS: extra args for '$ENGINE run' in unusual environments.
+  # Checked before they are appended — see assert_safe_run_args.
   # shellcheck disable=SC2206
-  [ -n "${ISOPOD_RUN_ARGS:-}" ] && RUN_ARGS+=($ISOPOD_RUN_ARGS)
+  if [ -n "${ISOPOD_RUN_ARGS:-}" ]; then
+    local -a extra_run=($ISOPOD_RUN_ARGS)
+    assert_safe_run_args "${extra_run[@]}"
+    RUN_ARGS+=("${extra_run[@]}")
+  fi
   RUN_ARGS+=("$image")
 }
 
@@ -244,9 +318,15 @@ build_run_args_container() { # build_run_args_container <name> <image> <memory> 
   --network "$ISOPOD_CONTAINER_NET")
   # Bootstrap consumed by the box entrypoint (see share/Dockerfile): the box's
   # PUBLIC key for authorized_keys (never a secret), and the sudo policy (1/0).
-  local pubfile
+  local pubfile rootpubfile
   pubfile="$(box_dir "$name")/id_ed25519.pub"
   [ -f "$pubfile" ] && RUN_ARGS+=(-e "ISOPOD_AUTHORIZED_KEY=$(cat "$pubfile")")
+  # Administrative root key (see create). Public half only — the private key never
+  # leaves the host, so the box holds nothing that grants root to anything running
+  # inside it. Absent on boxes created before this existed, which simply get no
+  # root login and keep whatever sudo policy they were built with.
+  rootpubfile="$(box_dir "$name")/id_ed25519_root.pub"
+  [ -f "$rootpubfile" ] && RUN_ARGS+=(-e "ISOPOD_ROOT_AUTHORIZED_KEY=$(cat "$rootpubfile")")
   [ -n "${BOX_SUDO:-}" ] && RUN_ARGS+=(-e "ISOPOD_SUDO=$BOX_SUDO")
   # Secrets tmpfs (memory-backed, gone when the box stops). container's --tmpfs
   # takes only a path (no size/mode options); the entrypoint owns it at boot.
@@ -266,7 +346,12 @@ build_run_args_container() { # build_run_args_container <name> <image> <memory> 
       ;;
   esac
   # ISOPOD_RUN_ARGS: extra args for the run, for unusual environments.
+  # Checked before they are appended — see assert_safe_run_args.
   # shellcheck disable=SC2206
-  [ -n "${ISOPOD_RUN_ARGS:-}" ] && RUN_ARGS+=($ISOPOD_RUN_ARGS)
+  if [ -n "${ISOPOD_RUN_ARGS:-}" ]; then
+    local -a extra_run=($ISOPOD_RUN_ARGS)
+    assert_safe_run_args "${extra_run[@]}"
+    RUN_ARGS+=("${extra_run[@]}")
+  fi
   RUN_ARGS+=("$image")
 }

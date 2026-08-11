@@ -13,7 +13,7 @@ _isopod() {
   cword="$COMP_CWORD"
   words=("${COMP_WORDS[@]}")
 
-  local cmds="create list info code shell start stop config reconfigure export fetch remap copy-in rm egress secret doctor help version"
+  local cmds="create list info code shell root-shell upgrade start stop config reconfigure export fetch remap copy-in rm egress secret doctor help version"
   local colors="red orange amber green teal blue purple magenta gray grey"
   local apps="codium vscodium cursor windsurf code"
 
@@ -60,7 +60,7 @@ _isopod() {
   if [[ "$cur" == -* ]]; then
     local opts=""
     case "$sub" in
-      create) opts="--repo --branch --copy --color --image --dockerfile --expose --secret --engine --memory --cpus --port --no-sudo --container --dev --disk --nested-containers" ;;
+      create) opts="--repo --branch --copy --color --image --dockerfile --expose --secret --engine --memory --cpus --port --sudo --no-sudo --no-root-key --guest-egress --container --dev --disk --nested-containers" ;;
       reconfigure) opts="--expose --memory --cpus --color" ;;
       code) opts="--app --reuse-window" ;;
       rm) opts="--force" ;;
@@ -73,7 +73,7 @@ _isopod() {
 
   # First positional for most subcommands is an existing box name.
   case "$sub" in
-    info | code | shell | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
+    info | code | shell | root-shell | upgrade | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
       mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
       ;;
     egress)

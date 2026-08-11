@@ -6,6 +6,9 @@ Usage:
   isopod info <name> [--json]         Show connection details for a sandbox
   isopod code <name> [--app APP]      Open the sandbox in a new VSCodium window (or APP)
   isopod shell <name> [-- cmd...]     Open a shell (or run cmd) inside the sandbox
+  isopod root-shell <name> [-- cmd]   Administrative root shell (host-held key)
+                                      --print-ssh-config emits an IDE entry for it
+  isopod upgrade <name> [--in-place]  Rebuild the box onto the current image
   isopod start <name>                 Start a stopped sandbox
   isopod stop <name>                  Stop a running sandbox
   isopod config <name>                Show a box's editable config (config.yaml)
@@ -58,7 +61,26 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         a server on the box's :3000 reachable at localhost:3001.
   --memory <size>       Memory limit, e.g. 4g
   --cpus <n>            CPU limit, e.g. 2
-  --no-sudo             Do not give the in-box user passwordless sudo
+  --sudo                Give the in-box user passwordless sudo. OFF by default:
+                        anything running as the box user would inherit it,
+                        including an agent. Administer a box without it using
+                        'isopod root-shell <name>', which logs in as root with a
+                        key only the host holds. (--no-sudo is still accepted and
+                        is now a no-op, since that is the default.)
+  --no-root-key         Do not generate the administrative root key either. The
+                        box then has NO root path at all: no 'isopod root-shell'
+                        and no 'isopod install'. Maximum lockdown — bake every
+                        system package in with --dockerfile.
+  --guest-egress <on|off>
+                        In-box network isolation (microVM boxes). ON by default:
+                        with krun+passt the guest is handed the HOST's own LAN
+                        identity, so without it the box is a machine on your
+                        network. Blocks private/LAN/CGNAT/link-local destinations
+                        and pins a public resolver; public internet is unaffected.
+                        Skipped when host-side egress is active (that is stronger
+                        and its proxy lives on a private address). Defence in
+                        depth: it runs in the guest, so guest root could remove
+                        it — the box user has no sudo or CAP_NET_ADMIN by default.
   --harden <level>      Kernel-hardening profile: 'default' (on for every box —
                         reduced-surface guest sysctls on microVM boxes) or 'off'.
                         'strict' is reserved for a future release.

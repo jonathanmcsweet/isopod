@@ -1,0 +1,13 @@
+
+Host $(ctr_name "$name")-root
+  HostName $host
+$hostkeyalias
+  Port $port
+  User root
+  IdentityFile "$(box_dir "$name")/id_ed25519_root"
+  IdentitiesOnly yes
+  UserKnownHostsFile "$(box_dir "$name")/known_hosts"
+  StrictHostKeyChecking yes
+  ForwardAgent no
+  ForwardX11 no
+  LogLevel ERROR
