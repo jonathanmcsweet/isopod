@@ -741,10 +741,24 @@ egress_posture_note() { # egress_posture_note <name>
     lan-deny) info "Network: egress lan-deny ACTIVE — LAN/host/metadata blocked, public internet reachable." ;;
     *)
       if [ "${ISOPOD_EGRESS_DEGRADED:-0}" = 1 ]; then
-        warn "Network: OPEN — egress isolation is ON by default but could NOT be enforced here, so
+        # The in-guest ruleset is a separate mechanism, and it applies precisely
+        # when host enforcement does not — so this branch is exactly where it is
+        # most likely to be running. Announcing an unfiltered LAN while nft is
+        # dropping that traffic is not a harmless overstatement: it sends the user
+        # hunting a hole that is not there, and it hides the layer that IS
+        # filtering when something in the box stops reaching the network.
+        if [ "$(meta_get "$name" guest_egress 2>/dev/null || true)" = on ] && is_microvm_runtime; then
+          warn "Network: no host-enforced boundary here ('$name' runs under a rootless engine), but
+     in-box isolation IS active (--guest-egress): the box cannot reach your LAN, and its own
+     resolvers stay reachable on port 53 so DNS keeps working. This runs INSIDE the box, so
+     guest root could remove it. For a boundary that survives that, use a rootful engine:
+       sudo isopod egress apply"
+        else
+          warn "Network: OPEN — egress isolation is ON by default but could NOT be enforced here, so
      '$name' can reach your LAN and the internet unfiltered. Enable it (needs root, one time):
        sudo isopod egress apply
      then recreate the box (or: isopod reconfigure $name). Silence with ISOPOD_EGRESS=off."
+        fi
       else
         info "Network: OPEN (egress disabled by config)."
       fi

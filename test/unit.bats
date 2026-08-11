@@ -2575,3 +2575,38 @@ _render_nft() { # _render_nft <gateway> <rules block>
   head_part=$(printf '%s\n' "$out" | sed -n '1,/^table inet isopod_egress/p')
   ! printf '%s\n' "$head_part" | grep -qE '^[[:space:]]+(ip|ip6) daddr'
 }
+
+# ---- the create/upgrade posture note -----------------------------------------
+# This note fires exactly when host enforcement failed, which is exactly when the
+# in-guest ruleset is doing the work — so claiming an unfiltered LAN there is a
+# false statement about a box whose nft rules are dropping that traffic.
+@test "posture note does not claim an open LAN when guest egress is active" {
+  mk_meta demo 'guest_egress=on'
+  ISOPOD_EGRESS_DEGRADED=1
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  run egress_posture_note demo
+  refute_output --partial "can reach your LAN and the internet unfiltered"
+  assert_output --partial "in-box isolation IS active"
+  assert_output --partial "guest root could remove it"
+}
+
+@test "posture note still reports an open LAN when nothing is isolating the box" {
+  mk_meta demo 'guest_egress=off'
+  ISOPOD_EGRESS_DEGRADED=1
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  run egress_posture_note demo
+  assert_output --partial "can reach your LAN and the internet unfiltered"
+}
+
+# A container box cannot load the ruleset, so guest_egress=on in its meta must not
+# be reported as protection it does not have.
+@test "posture note reports an open LAN for a container box even with guest egress in meta" {
+  mk_meta demo 'guest_egress=on'
+  ISOPOD_EGRESS_DEGRADED=1
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 1; }
+  run egress_posture_note demo
+  assert_output --partial "can reach your LAN and the internet unfiltered"
+}
