@@ -28,8 +28,35 @@ The open question is whether libkrun tolerates being run inside a mapped user na
 
 ```sh
 grep -E '^containers:' /etc/subuid /etc/subgid   # --userns=auto needs this range
-# if missing:  sudo usermod --add-subuids 200000-2147483647 --add-subgids 200000-2147483647 containers
 ```
+
+If it returns nothing, add the range. podman reads these files directly, so the account
+exists only to satisfy `usermod`:
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin containers 2>/dev/null || true
+sudo usermod --add-subuids 200000-2147483647 --add-subgids 200000-2147483647 containers
+```
+
+On an immutable/ostree Fedora this still works: only `/usr` is read-only, and `/etc` is a
+writable overlay whose changes persist across upgrades.
+
+## Read this before step 3
+
+Steps 3 and 4 assume the box's traffic crosses a host bridge that nftables can filter.
+For **krun + passt that assumption is probably false, independent of `--userns=auto`**.
+
+passt is a userspace network stack. It does not attach the guest to a bridge — it terminates
+the guest's traffic and re-originates it as ordinary socket traffic from the passt process on
+the host. That is why a krun box holds the host's own LAN identity and why the host appears at
+the gateway address: passt is translating, not bridging.
+
+A rule matching `iifname "isopodspike"` in a `forward` chain therefore has nothing to match.
+Expect a zero counter. That is a prediction from architecture, not a measurement — run step 4
+anyway, because a zero there is still the answer to the question as originally posed.
+
+**Step 4b below is the test more likely to pass**, and it changes what step 2 is for: the VMM's
+uid stops being a sanity check and becomes the thing enforcement hangs on.
 
 ## Step 1 — does krun start at all under `--userns=auto`?
 
@@ -91,6 +118,36 @@ hard boundary with an unprivileged VMM, and `egress_can_enforce` should be relax
 accept this configuration. Zero packets → passt is bypassing the bridge and host-side
 filtering cannot work for krun boxes regardless of rootful/rootless.
 
+## Step 4b — the test that sidesteps the bridge entirely
+
+If step 4 gives zero, the traffic is host-local output from the passt process, not forwarded
+through a bridge. That is filterable — just not by interface. `--userns=auto` gives each
+container its own uid range, so the VMM runs as a uid nothing else on the system uses, and
+nftables can match it in the `output` chain.
+
+Take the uid from step 2, then:
+
+```sh
+VMMUID=<the uid step 2 printed>
+sudo nft add table inet isopodspike2
+sudo nft add chain inet isopodspike2 out '{ type filter hook output priority 0; policy accept; }'
+sudo nft add rule inet isopodspike2 out meta skuid "$VMMUID" ip daddr 192.168.0.0/16 counter drop
+
+sudo podman exec usernstest sh -c 'timeout 3 getent hosts 192.168.1.1 || echo BLOCKED-OR-UNREACHABLE'
+sudo nft list table inet isopodspike2 | grep counter
+```
+
+Cleanup: `sudo nft delete table inet isopodspike2`
+
+Non-zero here is the better result than a non-zero step 4 would have been: enforcement lives in
+the host kernel keyed on a uid the box cannot change, so it survives guest root **and** does not
+depend on the runtime using a bridge. It would work for krun boxes specifically, which is the
+configuration this host actually runs.
+
+Under **rootless** podman this cannot work — passt runs as your own uid, indistinguishable from
+every other program you run. The per-container uid is the whole reason `--userns=auto` matters
+here.
+
 ## Cleanup
 
 ```sh
@@ -106,12 +163,18 @@ sudo nft delete table inet isopodspike
 | 1 | krun boots under `--userns=auto`? | |
 | 2 | VMM host uid is unprivileged? | |
 | 3 | bridge interface exists on host? | |
-| 4 | **host nft counter increments?** | |
+| 4 | host nft counter increments (by interface)? | |
+| 4b | **host nft counter increments (by uid)?** | |
 
-If steps 1, 2 and 4 all pass, `egress_can_enforce` should gain a branch for rootful +
-`--userns=auto`, and that becomes the recommended posture for agent boxes — option C stays
-as defence in depth beneath it.
+If steps 1 and 2 pass and **either** 4 or 4b passes, `egress_can_enforce` should gain a branch
+for rootful + `--userns=auto`, and that becomes the recommended posture for agent boxes — the
+in-guest ruleset stays as defence beneath it. A pass on 4b means the rule is keyed on the VMM's
+uid rather than an interface, which is a different shape of enforcement and needs isopod to
+record the box's uid range at create time.
 
-If step 4 fails, host-side filtering is off the table for krun boxes and the realistic
-choices are: keep option C, switch agent boxes to a non-passt runtime, or accept the
-network posture deliberately.
+If 1 or 2 fails, the configuration is not worth having: without an unprivileged VMM you are
+taking rootful's risk without its mitigation.
+
+If both 4 and 4b fail, host-side filtering is off the table for krun boxes and the realistic
+choices are: keep the in-guest ruleset, switch agent boxes to a non-passt runtime, or accept
+the network posture deliberately. Record that here so the question stays closed.
