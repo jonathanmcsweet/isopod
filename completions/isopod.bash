@@ -61,7 +61,7 @@ _isopod() {
     local opts=""
     case "$sub" in
       create) opts="--repo --branch --copy --color --image --dockerfile --expose --secret --engine --memory --cpus --port --sudo --no-sudo --no-root-key --guest-egress --container --dev --disk --nested-containers" ;;
-      reconfigure) opts="--expose --memory --cpus --color" ;;
+      reconfigure) opts="--guest-egress --expose --memory --cpus --color" ;;
       code) opts="--app --reuse-window" ;;
       rm) opts="--force" ;;
       remap) opts="--name --email --old-email --old-name --remap-file --force" ;;

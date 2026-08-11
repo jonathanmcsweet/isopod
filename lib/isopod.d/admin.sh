@@ -348,9 +348,35 @@ cmd_doctor() {
     macos) doctor_virt_macos ;;
     *) doctor_virt_linux ;;
   esac
+  doctor_boxes
   have podman || have docker || {
     printf '\nInstall podman (recommended) or docker.\n'
     ok=0
   }
   [ "$ok" -eq 1 ] && printf '\nAll core prerequisites look good.\n'
+}
+
+# Per-box health: the two conditions that are invisible day to day but change
+# what a box actually is — running an image older than isopod would build now
+# (so missing every fix since), and having asked for egress isolation that could
+# not be applied. Both were previously reported once, at create or start, and
+# then never again; a box you set up months ago is exactly the one you would
+# want told about.
+doctor_boxes() {
+  local d name stale degraded any=0
+  [ -d "$BOXES_DIR" ] || return 0
+  for d in "$BOXES_DIR"/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    stale=0
+    box_is_stale "$name" 2>/dev/null && stale=1
+    degraded="$(meta_get "$name" egress_degraded 2>/dev/null || printf 0)"
+    [ "$stale" = 1 ] || [ "$degraded" = 1 ] || continue
+    [ "$any" = 0 ] && printf '\nBoxes needing attention:\n' && any=1
+    [ "$stale" = 1 ] &&
+      printf '  [warn]    %s: built from an older isopod — rebuild it: isopod upgrade %s\n' "$name" "$name"
+    [ "$degraded" = 1 ] &&
+      printf '  [warn]    %s: egress isolation was requested but is NOT in force (open network)\n' "$name"
+  done
+  return 0
 }

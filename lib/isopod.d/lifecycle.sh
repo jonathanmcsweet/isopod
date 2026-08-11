@@ -9,8 +9,8 @@ cmd_list() {
   detect_engine
   # Two passes so the NAME/SSH columns size to the actual data instead of a fixed
   # width that long box names would overflow.
-  local d name status port color ssh
-  local -a names=() statuses=() sshs=() ports=() colors=()
+  local d name status port color ssh note
+  local -a names=() statuses=() sshs=() ports=() colors=() notes=()
   local nw=4 sw=3 # min widths for the "NAME" and "SSH" headers
   for d in "$BOXES_DIR"/*/; do
     [ -d "$d" ] || continue
@@ -19,17 +19,22 @@ cmd_list() {
     status=$(box_status "$name" 2>/dev/null || printf 'missing')
     port=$(meta_get "$name" port || printf '?')
     color=$(meta_get "$name" color || printf '-')
-    names+=("$name") statuses+=("$status") sshs+=("$ssh") ports+=("$port") colors+=("$color")
+    # Flags worth seeing without running `isopod info` on each box in turn.
+    note=""
+    box_is_stale "$name" 2>/dev/null && note="stale"
+    [ "$(meta_get "$name" egress_degraded 2>/dev/null || printf 0)" = 1 ] &&
+      note="${note:+$note, }egress OPEN"
+    names+=("$name") statuses+=("$status") sshs+=("$ssh") ports+=("$port") colors+=("$color") notes+=("$note")
     [ "${#name}" -gt "$nw" ] && nw=${#name}
     [ "${#ssh}" -gt "$sw" ] && sw=${#ssh}
   done
-  local fmt="%-${nw}s  %-10s  %-${sw}s  %-9s  %s\n"
+  local fmt="%-${nw}s  %-10s  %-${sw}s  %-9s  %-9s  %s\n"
   # shellcheck disable=SC2059
-  printf "$fmt" NAME STATUS SSH PORT COLOR
+  printf "$fmt" NAME STATUS SSH PORT COLOR NOTES
   local i
   for i in "${!names[@]}"; do
     # shellcheck disable=SC2059
-    printf "$fmt" "${names[$i]}" "${statuses[$i]}" "${sshs[$i]}" "${ports[$i]}" "${colors[$i]}"
+    printf "$fmt" "${names[$i]}" "${statuses[$i]}" "${sshs[$i]}" "${ports[$i]}" "${colors[$i]}" "${notes[$i]}"
   done
 }
 
@@ -394,6 +399,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
 
 cmd_reconfigure() {
   local name="" memory="" cpus="" color="" memory_set=0 cpus_set=0 color_set=0 expose_set=0
+  local guest_egress="" guest_egress_set=0
   local -a exposes=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -414,6 +420,10 @@ cmd_reconfigure() {
         ;;
       --expose)
         exposes+=("$2") expose_set=1
+        shift 2
+        ;;
+      --guest-egress)
+        guest_egress="$2" guest_egress_set=1
         shift 2
         ;;
       -h | --help)
@@ -481,6 +491,28 @@ cmd_reconfigure() {
   parse_expose_specs "${d_expose[@]:-}"
   [ -n "$d_memory" ] && { valid_memory "$d_memory" || die "invalid memory '$d_memory' (e.g. 512m, 2g)"; }
   [ -n "$d_cpus" ] && { valid_cpus "$d_cpus" || die "invalid cpus '$d_cpus' (a positive number, e.g. 1 or 1.5)"; }
+
+  # Guest egress can be switched on an existing box, but only onto an image that
+  # can actually enforce it. reconfigure recreates from a COMMIT of the current
+  # container layer, so a box built before the feature has neither the nft binary
+  # nor the ruleset — turning it on there would hit the entrypoint's fail-closed
+  # path and leave the box with no sshd. Refuse and point at the rebuild instead.
+  local BOX_GUEST_EGRESS=""
+  if [ "$guest_egress_set" = 1 ]; then
+    case "$guest_egress" in
+      on | off) ;;
+      *) die "invalid --guest-egress '$guest_egress' (use: on | off)" ;;
+    esac
+    if [ "$guest_egress" = on ] && box_is_stale "$name" 2>/dev/null; then
+      die "'$name' was built from an older isopod, so its image has no egress ruleset to load —
+     turning guest egress on would leave it unable to start sshd. Rebuild it first:
+       isopod upgrade $name"
+    fi
+    # Read by build_run_args (another module), which shellcheck lints separately.
+    # shellcheck disable=SC2034
+    BOX_GUEST_EGRESS="$guest_egress"
+    meta_set "$name" guest_egress "$guest_egress"
+  fi
 
   # resolve color to a hex (keep the current one if unset)
   local hex

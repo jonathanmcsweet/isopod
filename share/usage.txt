@@ -125,6 +125,9 @@ Reconfiguring a box (change run settings without starting over):
   and installed packages), then recreates the container with the new settings.
 
 Options for reconfigure (or edit config.yaml; each accepts '--opt value' and '--opt=value'):
+  --guest-egress <on|off>  Switch in-box network isolation on an existing box.
+                        Turning it ON requires an image that ships the ruleset —
+                        run 'isopod upgrade <name>' first if the box is stale.
   --expose <spec>       Replace the box's forwarded ports (repeatable; same form
                         as create's --expose)
   --memory <size>       New memory limit, e.g. 8g (blank clears it)
