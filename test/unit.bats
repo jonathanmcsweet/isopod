@@ -2521,3 +2521,57 @@ options ndots:1'
   assert_output --partial 'OPEN'
   refute_output --partial 'guest lan-deny'
 }
+
+# ---- the rendered guest ruleset ----------------------------------------------
+# The generated rules landed in the header comment once, above `table ... {`,
+# because the substitution matched the placeholder unanchored and the comment
+# names it. nft rejects rules at top level, so every box failed closed and came up
+# without sshd. The render is exercised whole here: an earlier check looked only
+# below the `table` line, which is precisely where the bug was not.
+_render_nft() { # _render_nft <gateway> <rules block>
+  local prog
+  prog=$(sed -n "/awk -v gw=\"\$iso_gw\" -v rules=/,/' \/etc\/isopod\/egress-guest.nft/p" "$ISOPOD_ENTRYPOINT" |
+    sed "1s/.*rules=\"\$iso_ns_rules\" '//; \$s/' \/etc\/isopod.*//")
+  awk -v gw="$1" -v rules="$2" "$prog" "$ISOPOD_GUEST_EGRESS_NFT"
+}
+
+@test "rendered ruleset places resolver rules inside the table, not the header" {
+  local out table_line rule_line
+  out=$(_render_nft 192.168.1.1 '    ip daddr 9.9.9.9 udp dport 53 accept')
+  table_line=$(printf '%s\n' "$out" | grep -n '^table inet isopod_egress' | cut -d: -f1)
+  rule_line=$(printf '%s\n' "$out" | grep -n 'ip daddr 9\.9\.9\.9' | head -1 | cut -d: -f1)
+  [ -n "$table_line" ] && [ -n "$rule_line" ]
+  [ "$rule_line" -gt "$table_line" ]
+}
+
+@test "rendered ruleset emits each resolver rule exactly once" {
+  run _render_nft 192.168.1.1 '    ip daddr 9.9.9.9 udp dport 53 accept'
+  [ "$(printf '%s\n' "$output" | grep -c 'ip daddr 9\.9\.9\.9 udp dport 53 accept')" = 1 ]
+}
+
+@test "rendered ruleset substitutes the gateway and consumes the placeholder line" {
+  local out
+  out=$(_render_nft 10.88.7.1 '    ip daddr 9.9.9.9 udp dport 53 accept')
+  printf '%s\n' "$out" | grep -q 'ip daddr 10\.88\.7\.1 accept'
+  ! printf '%s\n' "$out" | grep -q '^@RESOLVERS@$'
+  ! printf '%s\n' "$out" | grep -q 'daddr @GATEWAY@'
+}
+
+# A box with no usable resolver still has to get a loadable ruleset.
+@test "rendered ruleset is intact when there are no resolver rules" {
+  local out
+  out=$(_render_nft 192.168.1.1 '')
+  ! printf '%s\n' "$out" | grep -q '^@RESOLVERS@$'
+  printf '%s\n' "$out" | grep -q '^table inet isopod_egress {'
+  printf '%s\n' "$out" | grep -q 'counter drop'
+  # balanced braces — a truncated ruleset would be rejected by nft
+  [ "$(printf '%s\n' "$out" | grep -c '{')" = "$(printf '%s\n' "$out" | grep -c '}')" ]
+}
+
+# Nothing outside the table body may be a rule: that is the exact shape of the bug.
+@test "no rule text appears before the table declaration" {
+  local out head_part
+  out=$(_render_nft 192.168.1.1 '    ip daddr 9.9.9.9 udp dport 53 accept')
+  head_part=$(printf '%s\n' "$out" | sed -n '1,/^table inet isopod_egress/p')
+  ! printf '%s\n' "$head_part" | grep -qE '^[[:space:]]+(ip|ip6) daddr'
+}

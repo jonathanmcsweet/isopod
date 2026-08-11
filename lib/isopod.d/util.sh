@@ -131,6 +131,18 @@ on_exit() {
   if [ -n "$CREATE_ROLLBACK_NAME" ]; then
     warn "create failed — rolling back partial sandbox '$CREATE_ROLLBACK_NAME'"
     if [ -n "${ENGINE:-}" ]; then
+      # Print the box's own output BEFORE destroying it. The failure above may well
+      # have said "check: $ENGINE logs <ctr>" — advice the next line makes
+      # impossible, which is how a box that failed closed for a stated reason
+      # (a rejected ruleset, a missing file) became a create that failed for no
+      # visible reason at all. Box-controlled text, so it is sanitized on the way
+      # out; failures here are ignored because rollback must still happen.
+      local ctrlog
+      ctrlog="$("$ENGINE" logs "$(ctr_name "$CREATE_ROLLBACK_NAME")" 2>&1 | tail -20)" || ctrlog=""
+      if [ -n "$ctrlog" ]; then
+        printf 'Last output from the box before rollback:\n' >&2
+        printf '%s\n' "$(sanitize "$ctrlog")" | sed 's/^/    /' >&2
+      fi
       "$ENGINE" rm -f "$(ctr_name "$CREATE_ROLLBACK_NAME")" >/dev/null 2>&1 || true
     fi
     rm -rf "$(box_dir "$CREATE_ROLLBACK_NAME")"

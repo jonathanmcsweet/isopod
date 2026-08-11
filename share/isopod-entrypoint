@@ -239,8 +239,12 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
     echo "isopod:   will not resolve names; recreate it with --guest-egress off." >&2
   fi
 
+  # Anchored to the placeholder alone on its own line. An unanchored match also
+  # hits the header comment that names the placeholder, which put the generated
+  # rules above `table ... {` — invalid nft, so the box failed closed and never
+  # started sshd.
   awk -v gw="$iso_gw" -v rules="$iso_ns_rules" '
-    /@RESOLVERS@/ { if (rules != "") print rules; next }
+    /^@RESOLVERS@$/ { if (rules != "") print rules; next }
     { gsub(/@GATEWAY@/, gw); print }
   ' /etc/isopod/egress-guest.nft >/run/isopod-egress.nft ||
     iso_egress_fail "could not render the ruleset"

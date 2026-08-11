@@ -384,13 +384,13 @@ cmd_create() {
   # The box entrypoint has already applied the sudo policy and authorized key
   # from the run env (see build_run_args / share/Dockerfile), so the box is
   # reachable over SSH without any host-side `exec`.
-  local ctr
-  ctr=$(ctr_name "$name")
-
   ensure_ssh_include
   write_ssh_include
   info "Pinning the box's SSH host key..."
-  scan_host_key "$name" || die "sshd in the container never came up (check: $ENGINE logs $ctr)"
+  # The rollback prints the box's last output before removing it, so point at that
+  # rather than at a log the rollback is about to delete.
+  scan_host_key "$name" ||
+    die "sshd in the container never came up — the box's own output is shown below."
   wait_for_ssh "$name" || die "could not authenticate to the box over SSH"
 
   # populate the workspace (over SSH, so it works under any runtime)
