@@ -287,7 +287,27 @@ remap_to_mailmap() {
 # commits whose existing identity matches --old-email (optionally --old-name)
 # are touched; commit messages and author/committer DATES are preserved. The
 # rewrite is scoped to the box's refs, so the host's own branches are untouched.
-# Prefers `git filter-repo`; falls back to the built-in `git filter-branch`.
+# Prefers `git filter-repo`; falls back to a python3 fast-export rewrite.
+
+# Can `git filter-repo` actually run here? Its presence on PATH is not proof: it
+# is a Python program that imports the git_filter_repo module, and a split
+# install — pip and the distro package disagreeing about which interpreter owns
+# the module — leaves the command present with the import broken. Every run then
+# dies with ModuleNotFoundError. Probe it the same way _runtime_healthy probes a
+# half-installed kata, so a broken install falls through to the python3 path
+# below (which needs no extra tooling) instead of failing the rewrite outright.
+# --version loads the module without touching the repo; -h is the fallback for
+# versions predating it. Dispatching through git (rather than calling the binary)
+# also finds an install that lives in git's exec path rather than on PATH. The
+# repo argument is optional so `isopod doctor`, which runs from wherever the user
+# happens to be, can ask the same question.
+filter_repo_usable() { # filter_repo_usable [repo-toplevel]
+  local -a g=(git)
+  [ -n "${1:-}" ] && g=(git -C "$1")
+  "${g[@]}" filter-repo --version >/dev/null 2>&1 ||
+    "${g[@]}" filter-repo -h >/dev/null 2>&1
+}
+
 cmd_remap() {
   local name="" target="" new_name="" new_email="" old_email="" old_name="" remap_file="" force=0
   while [ $# -gt 0 ]; do
@@ -458,7 +478,7 @@ cmd_remap() {
   done
   info "Backed up original refs under refs/remap-backup/ (delete when satisfied)."
 
-  if have git-filter-repo || git -C "$top" filter-repo -h >/dev/null 2>&1; then
+  if filter_repo_usable "$top"; then
     # Preferred path: filter-repo applies the mailmap directly.
     # --refs scopes the rewrite (implies --partial: other refs/origin are kept).
     if ! git -C "$top" filter-repo --force --partial --mailmap "$mm" --refs "${boxrefs[@]}"; then

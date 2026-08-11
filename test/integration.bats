@@ -1490,3 +1490,42 @@ seed_secret() { # seed_secret <name> <value>
   assert_success
   refute_output --partial "Boxes needing attention"
 }
+
+# ---- remap backend selection -------------------------------------------------
+# A git-filter-repo on PATH is not proof it can run: it imports the
+# git_filter_repo module, and a split install leaves the command present with the
+# import broken. isopod ships a python3 rewrite that needs no extra tooling, so a
+# broken install must fall through to it rather than fail the remap.
+_stub_broken_filter_repo() {
+  cat >"$STUB_DIR/git-filter-repo" <<'EOF'
+#!/usr/bin/env bash
+echo "ModuleNotFoundError: No module named 'git_filter_repo'" >&2
+exit 1
+EOF
+  chmod +x "$STUB_DIR/git-filter-repo"
+}
+
+@test "remap falls back to python3 when git-filter-repo is installed but broken" {
+  _seed_remapped_host "$TEST_TMP/host"
+  _stub_broken_filter_repo
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --old-email dev@mybox.local --force
+  assert_success
+  refute_output --partial "git filter-repo failed"
+  run git -C "$TEST_TMP/host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "Me <me@home>"
+}
+
+@test "doctor does not report a broken git-filter-repo as the remap backend" {
+  _stub_broken_filter_repo
+  run "$ISOPOD_ROOT/isopod" doctor
+  assert_success
+  assert_output --partial "python3 (remap fallback backend)"
+  refute_output --partial "git-filter-repo (remap backend)"
+}
+
+@test "doctor reports git-filter-repo when it actually runs" {
+  make_stub git-filter-repo 0
+  run "$ISOPOD_ROOT/isopod" doctor
+  assert_success
+  assert_output --partial "git-filter-repo (remap backend)"
+}

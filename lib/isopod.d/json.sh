@@ -263,7 +263,7 @@ doctor_json() {
   else
     checks+=("$(doctor_check_json warn git "git (fetch, remap)" "install git for isopod fetch/remap")")
   fi
-  if have git-filter-repo; then
+  if filter_repo_usable; then
     checks+=("$(doctor_check_json ok remap "remap backend" "git-filter-repo")")
   elif have python3; then
     checks+=("$(doctor_check_json ok remap "remap backend" "python3 fallback")")

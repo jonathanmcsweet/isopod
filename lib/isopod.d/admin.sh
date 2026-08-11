@@ -219,7 +219,10 @@ cmd_doctor() {
   if have git; then printf '  [ok]      git (needed by fetch, remap)\n'; else
     printf '  [warn]    git not found — isopod fetch/remap need it\n'
   fi
-  if have git-filter-repo; then
+  # Probed, not just looked up: a git-filter-repo whose Python module is missing
+  # is present on PATH and still cannot run, and reporting it as the backend
+  # would send the user chasing the wrong problem when remap fails.
+  if filter_repo_usable; then
     printf '  [ok]      git-filter-repo (remap backend)\n'
   elif have python3; then
     printf '  [ok]      python3 (remap fallback backend)\n'

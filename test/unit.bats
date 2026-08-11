@@ -2361,3 +2361,46 @@ setup_run_args_box() { # setup_run_args_box <name> <meta-line...>
   build_run_args demo localhost/img 127.0.0.1::2222 '' ''
   [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
 }
+
+# ---- filter_repo_usable: a broken git-filter-repo must not be selected --------
+# `git-filter-repo` is a Python program that imports the git_filter_repo module.
+# A split install — pip and the distro package disagreeing about which
+# interpreter owns the module — leaves the command on PATH and the import broken,
+# so every invocation dies with ModuleNotFoundError. Presence is not usability.
+
+# A git-filter-repo exactly as a broken install behaves: found, then fails.
+_stub_broken_filter_repo() {
+  cat >"$STUB_DIR/git-filter-repo" <<'EOF'
+#!/usr/bin/env bash
+echo "ModuleNotFoundError: No module named 'git_filter_repo'" >&2
+exit 1
+EOF
+  chmod +x "$STUB_DIR/git-filter-repo"
+}
+
+@test "filter_repo_usable rejects a git-filter-repo whose module is missing" {
+  _stub_broken_filter_repo
+  run filter_repo_usable "$TEST_TMP"
+  assert_failure
+}
+
+@test "filter_repo_usable accepts a git-filter-repo that runs" {
+  make_stub git-filter-repo 0
+  run filter_repo_usable "$TEST_TMP"
+  assert_success
+}
+
+@test "filter_repo_usable is false when git-filter-repo is not installed" {
+  run filter_repo_usable "$TEST_TMP"
+  assert_failure
+}
+
+# doctor calls it with no repo argument, from wherever the user happens to be.
+@test "filter_repo_usable works without a repo argument" {
+  make_stub git-filter-repo 0
+  run filter_repo_usable
+  assert_success
+  _stub_broken_filter_repo
+  run filter_repo_usable
+  assert_failure
+}
