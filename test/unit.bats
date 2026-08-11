@@ -2038,3 +2038,326 @@ EOF
   run bash -c "printf %s $q"
   assert_output "a'b*.log"
 }
+
+# ---- assert_safe_run_args (F-6) ----------------------------------------------
+# ISOPOD_RUN_ARGS is word-split straight into the engine command line, so anything
+# that can set it in the user's shell could turn a sandbox into a passthrough with
+# no trace in the box or in `isopod info`. These assert the deny list holds for
+# BOTH spelling forms — `--opt=value` and `--opt value` — because the space form
+# needs lookahead state and is the form that silently slipped through first.
+
+@test "assert_safe_run_args allows ordinary resource and publish flags" {
+  run assert_safe_run_args --memory 4g --cpus 2 -p 127.0.0.1::2222 --dns 1.1.1.1
+  assert_success
+}
+
+@test "assert_safe_run_args allows an empty argument list" {
+  run assert_safe_run_args
+  assert_success
+}
+
+@test "assert_safe_run_args refuses host filesystem exposure" {
+  run assert_safe_run_args -v /:/host
+  assert_failure
+  run assert_safe_run_args --volume=/etc:/etc
+  assert_failure
+  run assert_safe_run_args --mount type=bind,src=/,dst=/host
+  assert_failure
+}
+
+@test "assert_safe_run_args refuses restored privileges" {
+  run assert_safe_run_args --privileged
+  assert_failure
+  run assert_safe_run_args --cap-add SYS_ADMIN
+  assert_failure
+  run assert_safe_run_args --security-opt seccomp=unconfined
+  assert_failure
+  run assert_safe_run_args --device /dev/kvm
+  assert_failure
+  run assert_safe_run_args --systemd always
+  assert_failure
+}
+
+@test "assert_safe_run_args refuses shared host namespaces" {
+  run assert_safe_run_args --userns=host
+  assert_failure
+  run assert_safe_run_args --pid host
+  assert_failure
+  run assert_safe_run_args --ipc=host
+  assert_failure
+  run assert_safe_run_args --uts host
+  assert_failure
+}
+
+# --net/--network is the one pair whose safety depends on the VALUE, so it needs
+# lookahead: the space form was accepted while the = form was refused.
+@test "assert_safe_run_args refuses --network host in both spellings" {
+  run assert_safe_run_args --network=host
+  assert_failure
+  run assert_safe_run_args --network host
+  assert_failure
+  run assert_safe_run_args --net=host
+  assert_failure
+  run assert_safe_run_args --net host
+  assert_failure
+}
+
+@test "assert_safe_run_args refuses joining another container's netns" {
+  run assert_safe_run_args --network container:victim
+  assert_failure
+  run assert_safe_run_args --net=container:victim
+  assert_failure
+}
+
+# isopod picks the box's own network, so any OTHER value is a deliberate choice.
+@test "assert_safe_run_args allows a named network" {
+  run assert_safe_run_args --network isopod0
+  assert_success
+  run assert_safe_run_args --network=isopod0
+  assert_success
+}
+
+# The scanner is positional: 'host' is only dangerous as a --net/--network value.
+@test "assert_safe_run_args does not refuse a bare 'host' token elsewhere" {
+  run assert_safe_run_args --dns host
+  assert_success
+}
+
+@test "assert_safe_run_args scans every position, not just the first" {
+  run assert_safe_run_args --memory 4g --cpus 2 -v /:/host
+  assert_failure
+}
+
+@test "ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 is the deliberate override" {
+  ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 run assert_safe_run_args --privileged -v /:/host
+  assert_success
+}
+
+@test "the refusal names the offending flag and the override" {
+  run assert_safe_run_args --privileged
+  assert_failure
+  assert_output --partial "--privileged"
+  assert_output --partial "ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1"
+}
+
+# ---- sanitize (F-5) ----------------------------------------------------------
+# Box-controlled strings reach the host terminal (branch names, repo lists). The
+# job is to strip terminal control sequences WITHOUT mangling legitimate text.
+
+@test "sanitize strips escape sequences and DEL" {
+  run sanitize "$(printf 'a\033[31mred\177b')"
+  assert_output "a[31mredb"
+}
+
+@test "sanitize strips carriage returns (line-overwrite spoofing)" {
+  run sanitize "$(printf 'real\rfake')"
+  assert_output "realfake"
+}
+
+# 0x80-0x9F are UTF-8 continuation bytes, NOT C1 controls, in a UTF-8 locale.
+# Stripping them would corrupt every non-ASCII branch name.
+@test "sanitize leaves UTF-8 text intact" {
+  run sanitize 'héllo — ✓ 日本語'
+  assert_output 'héllo — ✓ 日本語'
+}
+
+@test "sanitize leaves ordinary text untouched" {
+  run sanitize 'feature/add-thing_2'
+  assert_output 'feature/add-thing_2'
+}
+
+# ---- valid_ident_email / valid_ident_name (F-5) ------------------------------
+# The box supplies old_email to `isopod remap`, which builds a git filter. A
+# newline or angle bracket there is a mailmap/argument injection.
+
+@test "valid_ident_email accepts an ordinary address" {
+  run valid_ident_email 'me@example.com'
+  assert_success
+}
+
+@test "valid_ident_email rejects empty, space, and no-@ values" {
+  run valid_ident_email ''
+  assert_failure
+  run valid_ident_email 'a b@example.com'
+  assert_failure
+  run valid_ident_email 'notanaddress'
+  assert_failure
+}
+
+@test "valid_ident_email rejects newline and angle brackets" {
+  run valid_ident_email "$(printf 'a@b.com\nx@y.com')"
+  assert_failure
+  run valid_ident_email "$(printf 'a@b.com\rx')"
+  assert_failure
+  run valid_ident_email 'a<b>@c.com'
+  assert_failure
+}
+
+@test "valid_ident_name allows spaces but not newlines or brackets" {
+  run valid_ident_name 'Real Name'
+  assert_success
+  run valid_ident_name ''
+  assert_success
+  run valid_ident_name 'Bad <injected@x>'
+  assert_failure
+  run valid_ident_name "$(printf 'a\nb')"
+  assert_failure
+}
+
+# ---- box_is_stale / box_egress_posture (F-2, F-3) ----------------------------
+# A minimal box on disk: just the meta file these readers consult.
+mk_meta() { # mk_meta <name> <meta-line...>
+  mkdir -p "$BOXES_DIR/$1"
+  printf '%s\n' "${@:2}" >"$BOXES_DIR/$1/meta"
+}
+
+@test "box_is_stale reports current when the recorded image is what isopod builds today" {
+  mk_meta demo 'base=docker.io/library/debian:bookworm-slim' 'dev=0' 'nested=0'
+  local want
+  want="$(box_wanted_base_tag demo)"
+  mk_meta demo 'base=docker.io/library/debian:bookworm-slim' 'dev=0' 'nested=0' "base_image=$want"
+  run box_is_stale demo
+  assert_failure # rc 1 == up to date
+}
+
+@test "box_is_stale reports stale when the recorded image differs" {
+  mk_meta demo 'base=docker.io/library/debian:bookworm-slim' 'dev=0' 'nested=0' \
+    'base_image=localhost/isopod-base:deadbeefdeadbeef'
+  run box_is_stale demo
+  assert_success
+}
+
+# A box created before provenance was recorded has no base_image line. It
+# predates every fix since, so absent must mean stale — never "assume current".
+@test "box_is_stale treats a box with no recorded image as stale" {
+  mk_meta demo 'base=docker.io/library/debian:bookworm-slim'
+  run box_is_stale demo
+  assert_success
+}
+
+# Staleness is only meaningful if the wanted tag tracks the build inputs: the
+# lean, --dev and --nested images come from one Dockerfile but are not the same.
+@test "box_wanted_base_tag separates the lean, dev and nested images" {
+  mk_meta lean 'base=debian:bookworm-slim' 'dev=0' 'nested=0'
+  mk_meta devbox 'base=debian:bookworm-slim' 'dev=1' 'nested=0'
+  mk_meta nestbox 'base=debian:bookworm-slim' 'dev=0' 'nested=1'
+  [ "$(box_wanted_base_tag lean)" != "$(box_wanted_base_tag devbox)" ]
+  [ "$(box_wanted_base_tag lean)" != "$(box_wanted_base_tag nestbox)" ]
+  [ "$(box_wanted_base_tag devbox)" != "$(box_wanted_base_tag nestbox)" ]
+}
+
+# The posture line reports what is IN FORCE, not what was asked for — a box whose
+# egress degraded at create was previously indistinguishable from an isolated one
+# once the create output scrolled away.
+@test "box_egress_posture reports OPEN when host enforcement degraded" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=1' 'guest_egress=on'
+  run box_egress_posture demo
+  assert_output --partial 'OPEN'
+  assert_output --partial 'could not be applied'
+}
+
+@test "box_egress_posture names the host-enforced mode when it is in force" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=0'
+  run box_egress_posture demo
+  assert_output 'allow-list (host-enforced)'
+}
+
+@test "box_egress_posture names the in-guest layer and its limits" {
+  mk_meta demo 'guest_egress=on'
+  run box_egress_posture demo
+  assert_output --partial 'guest lan-deny'
+  assert_output --partial 'not a hard boundary'
+}
+
+@test "box_egress_posture says OPEN when nothing isolates the box" {
+  mk_meta demo 'guest_egress=off'
+  run box_egress_posture demo
+  assert_output 'OPEN — no egress isolation'
+}
+
+# ---- build_run_args: root key, sudo hardening, guest egress ------------------
+# These assemble the engine command line, so they decide what a box actually IS.
+# Driven directly (rather than through `create`) so each input can be varied on
+# its own — including the combinations only `reconfigure` produces, where the
+# create-time variables are unset and the persisted meta is the only source.
+setup_run_args_box() { # setup_run_args_box <name> <meta-line...>
+  mk_meta "$@"
+  ENGINE=podman
+  # Pin the two ambient facts these tests vary deliberately.
+  is_microvm_runtime() { return 0; }
+  active_egress() { printf ''; }
+}
+
+@test "build_run_args passes only the PUBLIC half of the administrative root key" {
+  setup_run_args_box demo 'harden=off' 'sudo=0'
+  printf 'PRIVATE-ROOT-KEY-MATERIAL\n' >"$BOXES_DIR/demo/id_ed25519_root"
+  printf 'ssh-ed25519 AAAArootpub isopod-demo-root\n' >"$BOXES_DIR/demo/id_ed25519_root.pub"
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_ROOT_AUTHORIZED_KEY=ssh-ed25519 AAAArootpub"* ]]
+  [[ " ${RUN_ARGS[*]} " != *"PRIVATE-ROOT-KEY-MATERIAL"* ]]
+}
+
+@test "build_run_args omits the root key env when the box has none (--no-root-key)" {
+  setup_run_args_box demo 'harden=off' 'sudo=0'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_ROOT_AUTHORIZED_KEY* ]]
+}
+
+# On reconfigure BOX_SUDO is unset, so the persisted meta is the only source. An
+# ABSENT key means a box built before the flag existed: it must keep behaving as
+# it did, because no-new-privileges would break the sudo it already has.
+@test "no-new-privileges follows the persisted sudo meta when BOX_SUDO is unset" {
+  setup_run_args_box demo 'harden=off' 'sudo=0'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"no-new-privileges"* ]]
+
+  setup_run_args_box demo 'harden=off' 'sudo=1'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *"no-new-privileges"* ]]
+
+  setup_run_args_box demo 'harden=off'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *"no-new-privileges"* ]]
+}
+
+@test "guest egress is switched on for a microVM box that asked for it" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=on'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_GUEST_EGRESS=1"* ]]
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_GUEST_EGRESS_DNS="* ]]
+}
+
+@test "guest egress stays off when the box asked for off" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=off'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# A container box shares the host kernel and its entrypoint has no CAP_NET_ADMIN,
+# so it could not load the ruleset — asking would only hit the fail-closed path.
+@test "guest egress is never asked of a non-microVM box" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=on'
+  is_microvm_runtime() { return 1; }
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# Host-side egress routes the box through a proxy on an RFC1918 bridge address —
+# exactly what the guest ruleset drops. It is also stronger (it survives guest
+# root), so the in-guest layer must yield to it rather than cut the box off.
+@test "guest egress yields to host-side egress enforcement" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=on'
+  active_egress() { printf 'allow-list'; }
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# Regression guard. A box created before this feature has neither the nft binary
+# nor /etc/isopod/egress-guest.nft, so enforcement hits the entrypoint's
+# fail-closed path and the box comes back with no sshd — unreachable, from a
+# `reconfigure` that changed nothing else. Absent meta must therefore mean OFF.
+@test "a box predating guest egress is never asked to enforce it" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' # no guest_egress line at all
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}

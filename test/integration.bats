@@ -595,17 +595,29 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   assert_output --partial "already exists"
 }
 
-@test "create with --no-sudo tells the box entrypoint to drop sudo" {
+@test "create defaults to NO in-box sudo" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called "run .*ISOPOD_SUDO=0"
+  assert_stub_not_called "ISOPOD_SUDO=1"
+}
+
+# --no-sudo is retained as an accepted no-op so scripts written against the old
+# default keep working; it must still produce a no-sudo box, not an error.
+@test "create --no-sudo is accepted and is a no-op against the new default" {
   run "$ISOPOD_ROOT/isopod" create demo --no-sudo --color teal
   assert_success
   assert_stub_called "run .*ISOPOD_SUDO=0"
   assert_stub_not_called "ISOPOD_SUDO=1"
 }
 
-@test "create defaults to giving passwordless sudo" {
-  run "$ISOPOD_ROOT/isopod" create demo --color teal
+@test "create --sudo opts back in to passwordless sudo" {
+  run "$ISOPOD_ROOT/isopod" create demo --sudo --color teal
   assert_success
   assert_stub_called "run .*ISOPOD_SUDO=1"
+  assert_stub_not_called "ISOPOD_SUDO=0"
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "sudo=1"
 }
 
 @test "create passes the box public key to the entrypoint (no exec inject)" {
@@ -785,17 +797,19 @@ EOF
   [ "$tag1" != "$tag2" ] # context change busts the cache tag (no stale reuse)
 }
 
-# ---- no-new-privileges for --no-sudo boxes (§4.7) ----------------------------
-@test "create --no-sudo hardens the box with no-new-privileges" {
-  run "$ISOPOD_ROOT/isopod" create demo --no-sudo --color teal
+# ---- no-new-privileges for no-sudo boxes (§4.7) ------------------------------
+@test "a default box hardens with no-new-privileges" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
   assert_success
   assert_stub_called 'podman run .*--security-opt no-new-privileges'
   run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
   assert_output --partial "sudo=0"
 }
 
-@test "a default (sudo) box does not get no-new-privileges" {
-  run "$ISOPOD_ROOT/isopod" create demo --color teal
+# The flag exists to preserve setuid escalation, so it must be dropped exactly
+# when sudo is granted — otherwise `sudo` itself (setuid) cannot run.
+@test "a --sudo box does not get no-new-privileges" {
+  run "$ISOPOD_ROOT/isopod" create demo --sudo --color teal
   assert_success
   assert_stub_not_called 'no-new-privileges'
   run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
@@ -1186,4 +1200,293 @@ seed_secret() { # seed_secret <name> <value>
   assert_output --partial '"subnet": "10.88.7.0/24"'
   assert_output --partial '"dns": "1.1.1.1"'
   assert_output --partial '"proxy":'
+}
+
+# ---- administrative root key (F-4) -------------------------------------------
+# The box user has no sudo by default, so root is reached over SSH with a key
+# that lives only on the host. Nothing inside the box can escalate to it: there
+# is no password to capture and no setuid path to abuse.
+
+@test "create generates a second, administrative root keypair" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  [ -f "$ISOPOD_CONFIG_DIR/boxes/demo/id_ed25519_root" ]
+  [ -f "$ISOPOD_CONFIG_DIR/boxes/demo/id_ed25519_root.pub" ]
+  assert_stub_called "ssh-keygen .*-C isopod-demo-root"
+  # only the PUBLIC half reaches the box
+  assert_stub_called "run .*ISOPOD_ROOT_AUTHORIZED_KEY=ssh-ed25519"
+  assert_stub_not_called "run .*PRIVKEY"
+}
+
+# The managed ssh_config include must NOT gain a root entry: a root editor window
+# opened on the workspace runs workspace-controlled code as root (tasks.json
+# "runOn": folderOpen, extension activation) — a direct agent-to-root path.
+@test "the managed ssh_config include gets no root entry" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  run cat "$ISOPOD_CONFIG_DIR/ssh_config"
+  assert_output --partial "Host isopod-demo"
+  refute_output --partial "isopod-demo-root"
+  refute_output --partial "User root"
+}
+
+@test "create --no-root-key leaves the box with no root path at all" {
+  run "$ISOPOD_ROOT/isopod" create demo --no-root-key --color teal
+  assert_success
+  assert_output --partial "NO root access path"
+  [ ! -f "$ISOPOD_CONFIG_DIR/boxes/demo/id_ed25519_root" ]
+  assert_stub_not_called "ISOPOD_ROOT_AUTHORIZED_KEY"
+}
+
+@test "root-shell runs a command as root over the host-held key" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  : >"$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" root-shell demo -- id
+  assert_success
+  assert_stub_called "ssh .*id_ed25519_root .*root@127\.0\.0\.1 id"
+}
+
+@test "root-shell fails on a box created with --no-root-key" {
+  "$ISOPOD_ROOT/isopod" create demo --no-root-key --color teal
+  run "$ISOPOD_ROOT/isopod" root-shell demo -- id
+  assert_failure
+  assert_output --partial "no administrative root key"
+}
+
+@test "root-shell --print-ssh-config emits a root entry and warns about it" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" root-shell demo --print-ssh-config
+  assert_success
+  assert_output --partial "Host isopod-demo-root"
+  assert_output --partial "User root"
+  assert_output --partial "id_ed25519_root"
+  assert_output --partial "runs workspace-controlled code as root"
+}
+
+@test "root-shell --print-ssh-config refuses a box with no root key" {
+  "$ISOPOD_ROOT/isopod" create demo --no-root-key --color teal
+  run "$ISOPOD_ROOT/isopod" root-shell demo --print-ssh-config
+  assert_failure
+  assert_output --partial "no administrative root key"
+}
+
+# An interactive root shell lands in /root, never the workspace: the workspace is
+# the one directory an agent fully controls, and a root shell sitting in it is one
+# `make` or `npm install` away from running agent-authored code as root.
+@test "an interactive root-shell lands in /root, not the workspace" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  : >"$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" root-shell demo
+  assert_success
+  assert_stub_called "ssh .*root@127\.0\.0\.1 cd /root; exec bash"
+  assert_output --partial "This is a root shell"
+}
+
+# ---- guest egress isolation (F-3) --------------------------------------------
+@test "a microVM box gets the in-guest egress ruleset by default" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called "run .*ISOPOD_GUEST_EGRESS=1"
+  assert_stub_called "run .*ISOPOD_GUEST_EGRESS_DNS="
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "guest_egress=on"
+}
+
+@test "create --guest-egress off records it and passes no ruleset env" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --guest-egress off --color teal
+  assert_success
+  assert_stub_not_called "ISOPOD_GUEST_EGRESS"
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "guest_egress=off"
+}
+
+@test "create rejects an invalid --guest-egress value" {
+  run "$ISOPOD_ROOT/isopod" create demo --guest-egress maybe --color teal
+  assert_failure
+  assert_output --partial "invalid --guest-egress"
+}
+
+# The ruleset is a build input, so editing it must invalidate the image tag —
+# otherwise a box would keep an old ruleset under a tag that claims to be current.
+@test "the guest egress ruleset is staged into the build context" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_called "build-ctx egress-guest.nft"
+}
+
+# ---- upgrade: in-place (F-2) -------------------------------------------------
+@test "upgrade --in-place replaces all three isopod-owned files over the root key" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  : >"$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" upgrade demo --in-place
+  assert_success
+  assert_stub_called "ssh .*id_ed25519_root .*/usr/local/bin/isopod-entrypoint"
+  assert_stub_called "ssh .*id_ed25519_root .*/etc/isopod/hardening-sysctl.conf"
+  assert_stub_called "ssh .*id_ed25519_root .*/etc/isopod/egress-guest.nft"
+}
+
+# Said BEFORE the box is stopped: a restart kills every process inside it, and
+# when one is a long-running agent session the symptom reads as a network fault.
+@test "upgrade --in-place warns that the restart terminates everything running" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" upgrade demo --in-place
+  assert_success
+  assert_output --partial "TERMINATES everything running inside it"
+}
+
+# built_version records which isopod BUILT the image. An in-place refresh does not
+# rebuild it, so bumping it made the staleness warning contradict itself
+# ("built from an older isopod (3.1.0; this is 3.1.0)").
+@test "upgrade --in-place leaves the box stale and does not bump built_version" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  sed_i 's/^built_version=.*/built_version=1.0.0/' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  sed_i 's|^base_image=.*|base_image=localhost/isopod-base:0000000000000000|' \
+    "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" upgrade demo --in-place
+  assert_success
+  assert_output --partial "still reports stale"
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "built_version=1.0.0"
+  assert_output --partial "base_image=localhost/isopod-base:0000000000000000"
+}
+
+# Run flags are fixed when a container is created, so an in-place refresh cannot
+# apply them. Saying so is the difference between a known limit and a silent one.
+@test "upgrade --in-place says which changes it cannot apply" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" upgrade demo --in-place
+  assert_success
+  assert_output --partial "--guest-egress"
+  assert_output --partial "no-new-privileges"
+}
+
+@test "upgrade --in-place refuses a box with neither a root key nor sudo" {
+  "$ISOPOD_ROOT/isopod" create demo --no-root-key --color teal
+  run "$ISOPOD_ROOT/isopod" upgrade demo --in-place
+  assert_failure
+  assert_output --partial "neither an administrative root key nor sudo"
+}
+
+# ---- upgrade: rebase ---------------------------------------------------------
+@test "upgrade rebases onto a freshly built image and keeps the box identity" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  local port
+  port=$(grep '^port=' "$ISOPOD_CONFIG_DIR/boxes/demo/meta")
+  : >"$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" upgrade demo --yes
+  assert_success
+  assert_stub_called "podman build "
+  assert_stub_called "podman rm -f isopod-demo"
+  assert_stub_called "podman run -d --name isopod-demo"
+  # identity survives: same key, same published port
+  [ -f "$ISOPOD_CONFIG_DIR/boxes/demo/id_ed25519" ]
+  run grep '^port=' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output "$port"
+}
+
+# The workspace is streamed to a host-side archive BEFORE anything is destroyed.
+@test "upgrade copies the workspace out before replacing the container" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  : >"$STUB_LOG"
+  run "$ISOPOD_ROOT/isopod" upgrade demo --yes
+  assert_success
+  local tarline rmline
+  tarline=$(grep -n 'tar -C /home/dev/workspace' "$STUB_LOG" | head -1 | cut -d: -f1)
+  rmline=$(grep -n 'podman rm -f isopod-demo' "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$tarline" ] && [ -n "$rmline" ] && [ "$tarline" -lt "$rmline" ]
+}
+
+# A --disk volume lives in the container layer a rebase replaces, so there is no
+# safe way to carry it across — refuse rather than silently discard it.
+@test "upgrade refuses to rebase a box with a --disk data volume" {
+  ISOPOD_RUNTIME=krun "$ISOPOD_ROOT/isopod" create demo --color teal --disk 20g
+  run "$ISOPOD_ROOT/isopod" upgrade demo --yes
+  assert_failure
+  assert_output --partial "--disk data volume"
+}
+
+@test "upgrade errors on a nonexistent box" {
+  run "$ISOPOD_ROOT/isopod" upgrade ghost --yes
+  assert_failure
+  assert_output --partial "no such sandbox"
+}
+
+# ---- reconfigure --guest-egress ----------------------------------------------
+@test "reconfigure --guest-egress off turns the ruleset off on an existing box" {
+  ISOPOD_RUNTIME=krun "$ISOPOD_ROOT/isopod" create demo --color teal
+  : >"$STUB_LOG"
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" reconfigure demo --guest-egress off
+  assert_success
+  assert_stub_not_called "run .*ISOPOD_GUEST_EGRESS"
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "guest_egress=off"
+}
+
+@test "reconfigure --guest-egress on turns it back on" {
+  ISOPOD_RUNTIME=krun "$ISOPOD_ROOT/isopod" create demo --guest-egress off --color teal
+  : >"$STUB_LOG"
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" reconfigure demo --guest-egress on
+  assert_success
+  assert_stub_called "run .*ISOPOD_GUEST_EGRESS=1"
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "guest_egress=on"
+}
+
+# reconfigure recreates the box from a COMMIT of the current layer, which on a
+# stale box has neither nft nor the ruleset. Enabling there would hit the
+# entrypoint's fail-closed path and leave the box unreachable.
+@test "reconfigure --guest-egress on is refused on a stale box" {
+  ISOPOD_RUNTIME=krun "$ISOPOD_ROOT/isopod" create demo --guest-egress off --color teal
+  sed_i 's|^base_image=.*|base_image=localhost/isopod-base:0000000000000000|' \
+    "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" reconfigure demo --guest-egress on
+  assert_failure
+  assert_output --partial "isopod upgrade demo"
+}
+
+@test "reconfigure rejects an invalid --guest-egress value" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" reconfigure demo --guest-egress maybe
+  assert_failure
+  assert_output --partial "invalid --guest-egress"
+}
+
+# ---- staleness and posture surfaced in list / doctor -------------------------
+@test "list flags a stale box in the NOTES column" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" list
+  assert_success
+  assert_output --partial "NOTES"
+  refute_output --partial "stale"
+  sed_i 's|^base_image=.*|base_image=localhost/isopod-base:0000000000000000|' \
+    "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" list
+  assert_success
+  assert_output --partial "stale"
+}
+
+@test "list flags a box whose egress isolation is not in force" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  run "$ISOPOD_ROOT/isopod" list
+  assert_success
+  assert_output --partial "egress OPEN"
+}
+
+# Both conditions used to be reported once, at create, and then never again — a
+# box set up months ago is exactly the one you would want told about.
+@test "doctor lists boxes needing attention" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  sed_i 's|^base_image=.*|base_image=localhost/isopod-base:0000000000000000|' \
+    "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" doctor
+  assert_success
+  assert_output --partial "Boxes needing attention"
+  assert_output --partial "demo: built from an older isopod"
+  assert_output --partial "isopod upgrade demo"
+}
+
+@test "doctor says nothing about boxes that are current and enforced" {
+  run "$ISOPOD_ROOT/isopod" doctor
+  assert_success
+  refute_output --partial "Boxes needing attention"
 }
