@@ -227,6 +227,12 @@ upgrade_in_place() { # upgrade_in_place <name>
     <"$ISOPOD_ENTRYPOINT" || die "could not replace the entrypoint in '$name'"
   "${asroot[@]}" -- "${sudo_prefix}sh -c 'mkdir -p /etc/isopod && cat >/etc/isopod/hardening-sysctl.conf'" \
     <"$ISOPOD_SYSCTL_CONF" || die "could not replace the sysctl baseline in '$name'"
+  # Ship the egress ruleset too, so the files the new entrypoint reads are all
+  # present and consistent. It does NOT make guest egress usable here: the nft
+  # binary lives in the image, which only a full rebase replaces (see the warning
+  # below), and enforcement stays off for this box either way.
+  "${asroot[@]}" -- "${sudo_prefix}sh -c 'mkdir -p /etc/isopod && cat >/etc/isopod/egress-guest.nft'" \
+    <"$ISOPOD_GUEST_EGRESS_NFT" || die "could not replace the egress ruleset in '$name'"
 
   info "Restarting '$name' so the new entrypoint runs..."
   cmd_stop "$name" >/dev/null 2>&1 || true
@@ -236,9 +242,14 @@ upgrade_in_place() { # upgrade_in_place <name>
   # version here while base_image stays old made warn_if_stale contradict itself
   # ("built from an older isopod (2.18.0; this is 2.18.0)").
   info "in-place upgrade of '$name' done."
-  warn "This refreshed only isopod's own files. The base image underneath is unchanged,
-     so '$name' still reports stale — run 'isopod upgrade $name' (no --in-place) when you
-     can afford to lose packages installed inside the box."
+  warn "This refreshed only isopod's own FILES. Two things it cannot do:
+       - the base image is unchanged, so its packages keep whatever CVEs they had
+       - anything applied through engine run flags is NOT applied, because a
+         container's flags are fixed when it is created: network isolation
+         (--guest-egress), the administrative root key, and no-new-privileges
+     '$name' therefore still reports stale, and correctly so. Run 'isopod upgrade $name'
+     (no --in-place) to get all of it, when you can afford to lose packages installed
+     inside the box."
 }
 
 # Default path: build the current base image and move the workspace onto a fresh

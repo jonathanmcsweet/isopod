@@ -172,9 +172,17 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # gateway (10.88.7.1), which is RFC1918 — the guest rules would drop its only
   # route out. Host-side enforcement is also strictly stronger (it survives guest
   # root), so when it is active the in-guest layer has nothing to add.
+  # An ABSENT meta key means a box built before this feature: its image has neither
+  # the nft binary nor /etc/isopod/egress-guest.nft, so asking it to enforce would
+  # hit the entrypoint's fail-closed path and leave the box with no sshd — that is,
+  # unreachable, from a `reconfigure` that changed nothing else. Pre-feature boxes
+  # therefore default to OFF, matching how the sudo flag treats them. cmd_create
+  # always sets BOX_GUEST_EGRESS explicitly, so this fallback only ever applies to
+  # boxes that predate the feature. `isopod upgrade` (a full rebase) rebuilds the
+  # image and is the supported way to get enforcement onto such a box.
   local box_guest_egress="${BOX_GUEST_EGRESS:-}"
   [ -n "$box_guest_egress" ] || box_guest_egress="$(meta_get "$name" guest_egress 2>/dev/null || true)"
-  [ -n "$box_guest_egress" ] || box_guest_egress=on
+  [ -n "$box_guest_egress" ] || box_guest_egress=off
   if [ "$box_guest_egress" = on ] && [ -z "$(active_egress)" ] && is_microvm_runtime; then
     RUN_ARGS+=(-e "ISOPOD_GUEST_EGRESS=1" -e "ISOPOD_GUEST_EGRESS_DNS=$ISOPOD_EGRESS_DNS")
   fi
