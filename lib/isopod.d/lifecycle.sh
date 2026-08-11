@@ -234,6 +234,12 @@ upgrade_in_place() { # upgrade_in_place <name>
   "${asroot[@]}" -- "${sudo_prefix}sh -c 'mkdir -p /etc/isopod && cat >/etc/isopod/egress-guest.nft'" \
     <"$ISOPOD_GUEST_EGRESS_NFT" || die "could not replace the egress ruleset in '$name'"
 
+  # Say this BEFORE stopping. A restart kills every process in the box, and when
+  # one of them is a long-running agent session the symptom reads as a network
+  # fault rather than a restart: the box comes back, SSH reconnects, but whatever
+  # you were talking to is gone and never answers.
+  warn "Restarting '$name' now — this TERMINATES everything running inside it,
+     including any agent or editor session. Reconnect after it comes back up."
   info "Restarting '$name' so the new entrypoint runs..."
   cmd_stop "$name" >/dev/null 2>&1 || true
   cmd_start "$name"
