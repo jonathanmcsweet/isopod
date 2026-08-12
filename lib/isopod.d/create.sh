@@ -9,7 +9,7 @@ cmd_create() {
   local memory="" cpus="" sudo_opt=0 no_root_key=0 engine_opt="" dockerfile_opt="" image_opt=0
   local container_opt=0 dev_tools=0 harden_opt="" runtime_opt=""
   local disk_opt="" nested=0 guest_egress_opt=""
-  local -a lan_allow_opts=()
+  local -a lan_allow_opts=() host_port_opts=()
   local -a repos=() copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
@@ -113,6 +113,10 @@ cmd_create() {
         ;;
       --lan-allow)
         lan_allow_opts+=("$2")
+        shift 2
+        ;;
+      --host-port)
+        host_port_opts+=("$2")
         shift 2
         ;;
       -h | --help)
@@ -327,6 +331,23 @@ cmd_create() {
   done
   [ -n "$BOX_GUEST_EGRESS_ALLOW" ] && [ "$BOX_GUEST_EGRESS" = off ] &&
     warn "--lan-allow has no effect with --guest-egress off (nothing is being filtered)"
+  # Host services this box can reach at its own loopback (--host-port,
+  # repeatable). Validated here so a bad spec fails before the box is built, and
+  # checked for box-port collisions because one tunnel carries them all.
+  local BOX_HOST_PORTS="" _hp _hp_rc _hp_boxp
+  local -a _hp_seen=()
+  for _hp in ${host_port_opts+"${host_port_opts[@]}"}; do
+    _hp_rc=0
+    _hp_boxp="$(host_port_parse "$_hp")" || _hp_rc=$?
+    [ "$_hp_rc" = 0 ] || die "$(host_port_invalid_msg "$_hp" "$_hp_rc")"
+    _hp_boxp="${_hp_boxp%% *}"
+    for _s in ${_hp_seen+"${_hp_seen[@]}"}; do
+      [ "$_s" = "$_hp_boxp" ] &&
+        die "--host-port $_hp reuses box port $_hp_boxp; one box port can carry one forward"
+    done
+    _hp_seen+=("$_hp_boxp")
+    BOX_HOST_PORTS="$BOX_HOST_PORTS${BOX_HOST_PORTS:+,}$_hp"
+  done
   # Data volume + nested-container wiring for build_run_args (which turns these
   # into the entrypoint's boot env) and the meta below.
   local BOX_DISK="$DISK_SPEC"
@@ -377,6 +398,7 @@ cmd_create() {
     printf 'guest_egress=%s\n' "$BOX_GUEST_EGRESS"
     [ -n "$BOX_GUEST_EGRESS_ALLOW" ] &&
       printf 'guest_egress_allow=%s\n' "$BOX_GUEST_EGRESS_ALLOW"
+    [ -n "$BOX_HOST_PORTS" ] && printf 'host_ports=%s\n' "$BOX_HOST_PORTS"
     # Record the effective runtime so reconfigure reproduces the box's isolation
     # tier rather than re-defaulting. "container" == plain Tier 1 (no runtime).
     printf 'runtime=%s\n' "$(active_runtime 2>/dev/null | grep . || printf container)"
@@ -444,6 +466,11 @@ cmd_create() {
   # populated). Disarm rollback so the remaining cosmetic step can't undo it.
   # shellcheck disable=SC2034  # read by on_exit (util.sh)
   CREATE_ROLLBACK_NAME=""
+
+  # Open the --host-port forwards now that sshd is up and authenticated. After the
+  # rollback is disarmed on purpose: a forward that cannot open (a port already
+  # taken in the box) is worth a warning, not the loss of a working box.
+  [ -n "$BOX_HOST_PORTS" ] && host_port_sync "$name"
 
   info "Applying window color $hex (this box only)..."
   apply_color "$name" "$hex" || warn "could not apply window color (the sandbox is fine without it)"

@@ -21,6 +21,7 @@ Usage:
   isopod rm <name> [--force]          Delete a sandbox (container + keys + snapshots)
   isopod gc [--dry-run] [--force]     Remove isopod images no box still references
   isopod egress [status|apply|allow …]  Manage the network egress firewall/proxy
+  isopod host-port <add|rm|ls> <box>    Reach a host service from inside a box
   isopod secret [set|ls|rm] <NAME>    Manage secrets injected into boxes
   isopod doctor                       Check host prerequisites
   isopod help                         Show this help
@@ -95,6 +96,14 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         brackets with a port, e.g. '[fd00::1]:5432'. Add or remove
                         them later with 'isopod egress lan-allow <box> [--rm]',
                         which applies to a running box right away.
+  --host-port <spec>    Make a service on YOUR HOST reachable inside the box
+                        (repeatable) — the opposite direction to --expose. A bare
+                        'PORT' gives the box the host's 127.0.0.1:PORT at the same
+                        port, so nothing in the box needs reconfiguring;
+                        'BOXPORT:HOSTPORT' and 'BOXPORT:TARGET:PORT' also work,
+                        with the target resolved and connected FROM your host (so
+                        an internal name behind your VPN works too). Box port must
+                        be >= 1024. Manage later with 'isopod host-port'.
   --harden <level>      Kernel-hardening profile: 'default' (on for every box —
                         reduced-surface guest sysctls on microVM boxes) or 'off'.
                         'strict' is reserved for a future release.

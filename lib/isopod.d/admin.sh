@@ -28,6 +28,9 @@ cmd_rm() {
     case "$ans" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
   fi
   acquire_lock # serialize the box-dir removal + ssh_config rewrite
+  # The tunnel is a host-side process; removing the box dir below would orphan it
+  # along with the pidfile that identifies it.
+  host_port_stop "$name"
   "$ENGINE" rm -f "$(ctr_name "$name")" >/dev/null 2>&1 || true
   # Drop this box's snapshot images too (reconfigure leaves localhost/isopod-box-<name>:*),
   # so they don't accumulate. Exact-prefix match (awk index, not a regex) so box

@@ -13,7 +13,7 @@ _isopod() {
   cword="$COMP_CWORD"
   words=("${COMP_WORDS[@]}")
 
-  local cmds="create list info code shell root-shell upgrade start stop config reconfigure export fetch remap copy-in rm egress secret doctor help version"
+  local cmds="create list info code shell root-shell upgrade start stop config reconfigure export fetch remap copy-in rm egress host-port secret doctor help version"
   local colors="red orange amber green teal blue purple magenta gray grey"
   local apps="codium vscodium cursor windsurf code"
 
@@ -78,6 +78,13 @@ _isopod() {
       ;;
     egress)
       mapfile -t COMPREPLY < <(compgen -W "status apply observe persist unpersist allow log denied rules lan-allow lan-denied" -- "$cur")
+      ;;
+    host-port | hostport)
+      if [ "$cword" -eq 2 ]; then
+        mapfile -t COMPREPLY < <(compgen -W "add rm ls" -- "$cur")
+      else
+        mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
+      fi
       ;;
     secret)
       if [ "$cword" -eq 2 ]; then

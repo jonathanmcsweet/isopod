@@ -61,6 +61,16 @@ cmd_info() {
   local secretnames
   secretnames=$(meta_get "$name" secrets || true)
   [ -n "$secretnames" ] || secretnames="(none — see create --secret)"
+  # Host services this box can reach at its own loopback, and whether the tunnel
+  # carrying them is up right now — a stored forward with a dead tunnel looks
+  # identical from inside the box to one that was never added.
+  local hostports
+  hostports=$(meta_get "$name" host_ports || true)
+  if [ -n "$hostports" ]; then
+    hostports="$hostports    ($(host_port_running "$name" && printf 'active' || printf 'NOT forwarding — isopod start %s' "$name"))"
+  else
+    hostports="(none — see host-port add)"
+  fi
   render_tmpl info.txt
 }
 
@@ -87,6 +97,9 @@ cmd_start() {
     wait_for_ssh "$name" || die "box started but SSH never came up — secrets were NOT injected (check: isopod info $name)"
     inject_secrets "$name"
   fi
+  # Reopen the host-service forwards. The tunnel is a host-side ssh process, so
+  # stopping the box always kills it; nothing else would bring it back.
+  host_port_sync "$name"
   info "started '$name' (ssh $(ctr_name "$name"))"
   # A box built from an older isopod is missing every fix made to the entrypoint,
   # Dockerfile and sysctl baseline since. Nothing else surfaces that, so say it on
@@ -98,6 +111,9 @@ cmd_stop() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: isopod stop <name>"
   open_box "$name"
+  # Before the engine stop, so the tunnel is torn down deliberately rather than
+  # left to die with the connection and leave a stale pidfile behind.
+  host_port_stop "$name"
   "$ENGINE" stop "$(ctr_name "$name")" >/dev/null
   info "stopped '$name'"
 }
@@ -386,6 +402,8 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   rm -f "$ws"
 
   inject_secrets "$name"
+  # The container is new, so the old tunnel died with the one it replaced.
+  host_port_sync "$name"
   apply_color "$name" "$(meta_get "$name" color || true)" ||
     warn "could not apply window color (the box is fine without it)"
   write_box_config "$name"
@@ -574,6 +592,8 @@ cmd_reconfigure() {
       warn "box recreated but SSH didn't authenticate yet (check: isopod info $name)"
     fi
   fi
+  # The container is new, so the old tunnel died with the one it replaced.
+  host_port_sync "$name"
   apply_color "$name" "$hex" || warn "could not apply window color (the box is fine without it)"
   write_box_config "$name"
 

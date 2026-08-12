@@ -4,6 +4,7 @@ engine    : $(meta_get "$name" engine || true)
 status    : $("$ENGINE" inspect -f '{{.State.Status}}' "$(ctr_name "$name")" 2>/dev/null || printf 'missing')
 ssh       : ssh $(ctr_name "$name")    (127.0.0.1:$(meta_get "$name" port || true), loopback only)
 forwards  : $forwards
+host-ports: $hostports
 secrets   : $secretnames
 egress    : $(box_egress_posture "$name")
 workspace : $WORKSPACE

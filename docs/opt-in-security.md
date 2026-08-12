@@ -388,6 +388,35 @@ off, which opens your whole LAN. For a service reachable only from the host —
 something on the host's own `127.0.0.1` — an exemption cannot help, because the
 box's loopback is its own.
 
+### Reaching a service on your host (`host-port`)
+
+An exemption cannot help with a service on the host's own `127.0.0.1` — the box's
+loopback is its own. For that, forward the port instead:
+
+```sh
+isopod host-port add devbox 5432              # host's Postgres at the box's 127.0.0.1:5432
+isopod host-port add devbox 11434             # a local Ollama
+isopod host-port add devbox 8080:gitlab.corp.internal:443
+isopod host-port ls devbox
+isopod host-port rm devbox 5432
+```
+
+`isopod create --host-port <spec>` sets them up front. A bare port uses the same
+number on both sides, so nothing inside the box needs reconfiguring — a tool
+already pointed at `localhost:5432` just works.
+
+This is SSH remote forwarding over the connection isopod already holds, which is
+why it needs no firewall change and behaves identically on every engine and OS.
+The target is resolved and connected **from your host**, so an internal name only
+your host can see works even when the box has no route to it — a split-tunnel VPN
+included.
+
+Limits worth knowing: the box-side port must be **1024 or above** (sshd opens it
+as the box user, which cannot bind a privileged port — use `8443:443`), it is
+**TCP only**, and one ssh process carries all of a box's forwards, so adding or
+removing one briefly restarts the others. Forwards are reopened by `isopod start`
+and torn down by `isopod stop`.
+
 ## Network egress allow-list (`egress allow-list`)
 
 Where `lan-deny` blocks your local network but leaves the public internet open,

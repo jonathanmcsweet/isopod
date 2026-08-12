@@ -2893,3 +2893,247 @@ ip daddr 1.2.3.4 accept'
   assert_output --partial "predates drop logging"
   assert_output --partial "isopod upgrade demo"
 }
+
+# ---- host_port_parse ---------------------------------------------------------
+# The spec becomes ssh -R arguments, so this decides both what works and what
+# reaches the ssh command line.
+
+@test "host_port_parse expands a bare port to the same port on both sides" {
+  run host_port_parse 5432
+  assert_success
+  assert_output '5432 127.0.0.1 5432'
+}
+
+@test "host_port_parse maps a box port to a different host port" {
+  run host_port_parse 8080:5432
+  assert_success
+  assert_output '8080 127.0.0.1 5432'
+}
+
+@test "host_port_parse accepts an explicit target host" {
+  run host_port_parse 8080:10.20.30.40:443
+  assert_success
+  assert_output '8080 10.20.30.40 443'
+  run host_port_parse 8080:gitlab.corp.internal:443
+  assert_output '8080 gitlab.corp.internal 443'
+}
+
+@test "host_port_parse accepts a bracketed IPv6 target" {
+  run host_port_parse '8080:[fd00::1]:443'
+  assert_success
+  assert_output '8080 fd00::1 443'
+}
+
+# sshd opens the box-side listener as the box user, which cannot bind below 1024.
+# Distinguished from a plain parse error so the message can say why.
+@test "host_port_parse rejects a privileged box port with its own status" {
+  run host_port_parse 443
+  assert_failure 2
+  run host_port_parse 80:80
+  assert_failure 2
+}
+
+@test "host_port_parse rejects malformed specs" {
+  local spec
+  for spec in 0 65536 '' '8080:' ':5432' '8080:host:' '8080:host:0' \
+    '8080:[fd00::1]' '8080:[zzz]:443' abc '8080:abc'; do
+    run host_port_parse "$spec"
+    assert_failure
+  done
+}
+
+# The spec is stored comma-separated and handed to ssh as an argument.
+@test "host_port_parse rejects separators and shell metacharacters in the target" {
+  local spec
+  for spec in '80 80' '8080,9090' '8080:ho st:443' '8080:h;rm -rf:443' \
+    '8080:$(id):443' '8080:a|b:443'; do
+    run host_port_parse "$spec"
+    assert_failure
+  done
+}
+
+@test "host_port_parse accepts the port boundaries" {
+  run host_port_parse 1024
+  assert_success
+  run host_port_parse 65535
+  assert_success
+}
+
+# ---- tunnel process identity -------------------------------------------------
+# A pidfile alone is not proof: pids are recycled, and killing a stranger's
+# process because it inherited our number would be worse than a dead tunnel.
+
+@test "host_port_running rejects a pid that is not our ssh" {
+  mkdir -p "$(box_dir demo)"
+  bash -c 'sleep 30; :' dummy-not-ours &
+  local other=$!
+  printf '%s\n' "$other" >"$(host_port_pidfile demo)"
+  run host_port_running demo
+  assert_failure
+  kill "$other" 2>/dev/null || true
+}
+
+@test "host_port_running accepts a live process carrying the box identity file" {
+  mkdir -p "$(box_dir demo)"
+  # The trailing ': ' stops bash exec-replacing itself with sleep, which would
+  # drop the marker argument from the process's argv and defeat the check.
+  bash -c 'sleep 30; :' dummy "$(box_dir demo)/id_ed25519" &
+  local ours=$!
+  printf '%s\n' "$ours" >"$(host_port_pidfile demo)"
+  run host_port_running demo
+  assert_success
+  kill "$ours" 2>/dev/null || true
+}
+
+@test "host_port_running is false with no pidfile, an empty one, or a dead pid" {
+  mkdir -p "$(box_dir demo)"
+  run host_port_running demo
+  assert_failure
+  : >"$(host_port_pidfile demo)"
+  run host_port_running demo
+  assert_failure
+  printf 'notanumber\n' >"$(host_port_pidfile demo)"
+  run host_port_running demo
+  assert_failure
+}
+
+@test "host_port_stop clears the pidfile" {
+  mkdir -p "$(box_dir demo)"
+  printf '999999\n' >"$(host_port_pidfile demo)"
+  host_port_stop demo
+  [ ! -f "$(host_port_pidfile demo)" ]
+}
+
+# ---- host-port list management ----------------------------------------------
+
+@test "host-port ls reports nothing for a box with no forwards" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run cmd_host_port ls demo
+  assert_success
+  assert_output --partial "no host-port forwards for demo"
+}
+
+@test "host-port add stores a valid spec" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  host_port_sync() { return 0; }
+  run cmd_host_port add demo 5432
+  assert_success
+  run meta_get demo host_ports
+  assert_output '5432'
+}
+
+@test "host-port add refuses a privileged box port with a reason" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run cmd_host_port add demo 443
+  assert_failure
+  assert_output --partial "must be 1024 or above"
+  assert_output --partial "8443:443"
+}
+
+@test "host-port add refuses an invalid spec and stores nothing" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run cmd_host_port add demo 'nonsense'
+  assert_failure
+  assert_output --partial "invalid host-port"
+  run meta_get demo host_ports
+  assert_output ''
+}
+
+# One tunnel carries every forward, so a duplicate box port would fail under
+# ExitOnForwardFailure and take the working forwards down with it.
+@test "host-port add refuses a box port already forwarded" {
+  mk_meta demo 'guest_egress=on' 'host_ports=8080:5432'
+  open_box() { :; }
+  host_port_sync() { return 0; }
+  run cmd_host_port add demo 8080:9999
+  assert_failure
+  assert_output --partial "box port 8080 is already forwarded"
+}
+
+@test "host-port add is a no-op for a spec already present" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  open_box() { :; }
+  run cmd_host_port add demo 5432
+  assert_success
+  assert_output --partial "already forwarded"
+  run meta_get demo host_ports
+  assert_output '5432'
+}
+
+@test "host-port add appends to the existing list" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  open_box() { :; }
+  host_port_sync() { return 0; }
+  run cmd_host_port add demo 11434
+  assert_success
+  run meta_get demo host_ports
+  assert_output '5432,11434'
+}
+
+@test "host-port rm removes one and keeps the rest" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432,11434,8080:9090'
+  open_box() { :; }
+  host_port_sync() { return 0; }
+  run cmd_host_port rm demo 11434
+  assert_success
+  run meta_get demo host_ports
+  assert_output '5432,8080:9090'
+}
+
+@test "host-port rm fails for a spec that is not forwarded" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  open_box() { :; }
+  run cmd_host_port rm demo 9999
+  assert_failure
+  assert_output --partial "is not forwarded"
+}
+
+@test "host-port ls shows the direction of each forward" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432,8080:10.20.30.40:443'
+  open_box() { :; }
+  host_port_running() { return 1; }
+  run cmd_host_port ls demo
+  assert_success
+  assert_output --partial "127.0.0.1:5432"
+  assert_output --partial "10.20.30.40:443"
+  assert_output --partial "not running"
+}
+
+@test "host-port rejects an unknown action" {
+  run cmd_host_port frobnicate demo
+  assert_failure
+  assert_output --partial "unknown host-port action"
+}
+
+# ---- sync behaviour ----------------------------------------------------------
+
+@test "host_port_sync stops the tunnel and stays quiet when there are no specs" {
+  mk_meta demo 'guest_egress=on'
+  mkdir -p "$(box_dir demo)"
+  printf '999999\n' >"$(host_port_pidfile demo)"
+  run host_port_sync demo
+  assert_success
+  [ ! -f "$(host_port_pidfile demo)" ]
+}
+
+# A stored forward on a stopped box is not an error, but silence would leave the
+# user to discover it by failing to connect.
+@test "host_port_sync warns when specs exist but the box is not running" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  box_status() { printf 'exited'; }
+  run host_port_sync demo
+  assert_success
+  assert_output --partial "not running"
+}
+
+@test "host_port_sync is silent about a stopped box when asked to be quiet" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  box_status() { printf 'exited'; }
+  run host_port_sync demo quiet
+  assert_success
+  assert_output ''
+}
