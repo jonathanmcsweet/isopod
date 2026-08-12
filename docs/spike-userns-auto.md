@@ -1,5 +1,29 @@
 # Spike: can `--userns=auto` give a hard egress boundary without rootful containers?
 
+**Status: CLOSED — declined without running (2026-08-12).** Kept as a decision record.
+
+The whole design requires the container engine to run as root, and that is the reason it was
+declined: podman parses complex, partly untrusted input (images, archives, network setup), and
+under rootful any exploitable bug in that code executes as root instead of as the invoking
+user. The feature would have added root exposure to defend against a rarer event (guest root
+inside a box that ships with no sudo, no CAP_NET_ADMIN, and a host-held root key). Two further
+points reduced its value on the deployment that prompted it: the host runs a VPN in lockdown
+mode, which already constrains all egress; and the in-guest ruleset (--guest-egress) is
+field-verified — DNS working, LAN drops observed on the counters.
+
+**The alternative to evaluate instead:** run boxes under a dedicated unprivileged account that
+owns nothing, and key host firewall rules on that account (`meta skuid`) in the output hook —
+loaded once with sudo, engine stays rootless. That gives the two things this spike promised
+(rules outside the box; an escape lands in an empty account) without a root-run engine. Per-box
+granularity is lost, which does not matter for a single-box deployment. Untested; needs its own
+small spike.
+
+**Reopen this if:** boxes are hosted for untrusted third parties; per-box allow-list egress
+becomes a requirement; or the engine gains bridge networking for rootless microVMs (making
+interface-keyed host rules possible without root).
+
+---
+
 **Time:** ~20 minutes. **Run on:** the host, not in a box. **Destructive:** no — creates
 and removes one throwaway box.
 
