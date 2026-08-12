@@ -15,8 +15,8 @@ field-verified — DNS working, LAN drops observed on the counters.
 owns nothing, and key host firewall rules on that account (`meta skuid`) in the output hook —
 loaded once with sudo, engine stays rootless. That gives the two things this spike promised
 (rules outside the box; an escape lands in an empty account) without a root-run engine. Per-box
-granularity is lost, which does not matter for a single-box deployment. Untested; needs its own
-small spike.
+granularity is lost, which does not matter for a single-box deployment. Written up separately
+and not yet run: `docs/spike-sandbox-account.md`.
 
 **Reopen this if:** boxes are hosted for untrusted third parties; per-box allow-list egress
 becomes a requirement; or the engine gains bridge networking for rootless microVMs (making
