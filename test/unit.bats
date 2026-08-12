@@ -3137,3 +3137,34 @@ ip daddr 1.2.3.4 accept'
   assert_success
   assert_output ''
 }
+
+# The tunnel runs detached, so ssh's stderr is the only account of why it failed.
+# A warning that guesses at the cause sends the user after the wrong thing.
+@test "host_port_sync reports what ssh actually said when the tunnel fails" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  mkdir -p "$(box_dir demo)"
+  box_status() { printf 'running'; }
+  host_port_start() {
+    printf 'Warning: remote port forwarding failed for listen port 5432\n' \
+      >"$(host_port_logfile demo)"
+    return 1
+  }
+  run host_port_sync demo
+  assert_failure
+  assert_output --partial "ssh said:"
+  assert_output --partial "remote port forwarding failed for listen port 5432"
+  refute_output --partial "A port already in use inside the box is the usual cause"
+}
+
+@test "host_port_sync says so plainly when ssh left no message" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  mkdir -p "$(box_dir demo)"
+  box_status() { printf 'running'; }
+  host_port_start() {
+    : >"$(host_port_logfile demo)"
+    return 1
+  }
+  run host_port_sync demo
+  assert_failure
+  assert_output --partial "reported nothing"
+}

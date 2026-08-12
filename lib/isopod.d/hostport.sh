@@ -25,6 +25,13 @@ host_port_pidfile() { # host_port_pidfile <name>
   printf '%s/host-port.pid' "$(box_dir "$1")"
 }
 
+# ssh's own stderr. The tunnel runs detached, so this is the ONLY account of why
+# it would not start; discarding it leaves a failure that cannot be diagnosed
+# from the outside, which is worse than the failure itself.
+host_port_logfile() { # host_port_logfile <name>
+  printf '%s/host-port.log' "$(box_dir "$1")"
+}
+
 # Validate one spec into the normalized form this module stores and forwards:
 #   PORT                        box 127.0.0.1:PORT     -> host 127.0.0.1:PORT
 #   BOXPORT:HOSTPORT            box 127.0.0.1:BOXPORT  -> host 127.0.0.1:HOSTPORT
@@ -149,13 +156,24 @@ host_port_start() { # host_port_start <name>
   done < <(host_port_specs "$name")
   [ "${#fwd[@]}" -gt 0 ] || return 0
 
-  read -r host port <<<"$(box_ssh_addr "$name")" || return 1
+  # Pin IFS for the split the way box_ssh does: a caller with IFS=, in scope
+  # would otherwise swallow the port and yield `ssh -p ''`.
+  IFS=' ' read -r host port < <(box_ssh_addr "$name") || return 1
   [ -n "$host" ] && [ -n "$port" ] || return 1
+  # Apple `container` boxes are pinned in known_hosts under their stable name
+  # (the IP changes each start), so verify the key by alias, not by address.
+  local -a hkalias=()
+  [ "$(box_engine "$name")" = container ] && hkalias=(-o "HostKeyAlias=$(ctr_name "$name")")
+
+  local log
+  log="$(host_port_logfile "$name")"
+  : >"$log"
 
   # ExitOnForwardFailure makes a port collision in the box a startup failure
   # rather than a live connection carrying no forwards. ServerAlive* means the
   # process exits when the box goes away instead of lingering forever.
-  # nohup (not setsid) so this detaches on macOS as well as Linux.
+  # nohup (not setsid) so this detaches on macOS as well as Linux. stdin comes
+  # from /dev/null so a backgrounded ssh can never consume the caller's input.
   nohup ssh -N \
     -p "$port" \
     -i "$(box_dir "$name")/id_ed25519" \
@@ -166,7 +184,7 @@ host_port_start() { # host_port_start <name>
     -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
     -o ForwardAgent=no -o ForwardX11=no \
     -o ControlMaster=no -o ControlPath=none \
-    "${fwd[@]}" "$CONTAINER_USER@$host" >/dev/null 2>&1 &
+    "${hkalias[@]}" "${fwd[@]}" "$CONTAINER_USER@$host" </dev/null >>"$log" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" >"$(host_port_pidfile "$name")"
   # ssh authenticates and requests the forwards before it is any use, and with
@@ -201,10 +219,21 @@ host_port_sync() { # host_port_sync <name> [quiet]
   if host_port_start "$name"; then
     return 0
   fi
-  [ -n "$quiet" ] ||
-    warn "could not open the host-port forwards for $name.
-     A port already in use inside the box is the usual cause; check with:
-       isopod host-port ls $name"
+  if [ -z "$quiet" ]; then
+    # Report what ssh actually said. Guessing at the cause here is how a user
+    # ends up chasing the wrong thing.
+    local log reason=""
+    log="$(host_port_logfile "$name")"
+    [ -f "$log" ] && reason="$(grep -v '^$' "$log" 2>/dev/null | tail -3)"
+    if [ -n "$reason" ]; then
+      warn "could not open the host-port forwards for $name. ssh said:
+$(printf '%s\n' "$reason" | sed 's/^/       /')
+     Full log: $log"
+    else
+      warn "could not open the host-port forwards for $name, and ssh reported nothing.
+     Check the box is up (isopod info $name) and the log: $log"
+    fi
+  fi
   return 1
 }
 
