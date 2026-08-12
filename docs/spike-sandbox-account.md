@@ -80,30 +80,33 @@ isopod runs krun boxes with passt, a userspace network stack: it terminates the 
 traffic and re-originates it as ordinary socket traffic from the passt process. So the packets
 should carry that process's uid in the `output` hook. Should — that is what this measures.
 
-Start a box-shaped container under the account:
+The probe runs as the container's own command, not through `podman exec`: the engine cannot
+exec into a microVM guest, which is the same limitation that makes `isopod install` fall back
+to SSH on microVM boxes.
 
-```sh
-sudo -u sandbox XDG_RUNTIME_DIR=/run/user/$SBUID podman run -d --name skuidtest \
-  --runtime krun --annotation krun.use_passt=1 \
-  docker.io/library/debian:bookworm-slim sleep 300
-```
+Every `sudo -u sandbox` runs from a directory the account can enter. It inherits the caller's
+working directory, and a project directory under another user's home fails with
+`cannot chdir ...: Permission denied` before podman starts.
 
 Establish the baseline — pick a private address that actually answers on this network
 (`169.254.1.1:53` on the host this was written for; substitute a resolver of your own):
 
 ```sh
-sudo -u sandbox XDG_RUNTIME_DIR=/run/user/$SBUID podman exec skuidtest \
+cd /tmp
+sudo -u sandbox XDG_RUNTIME_DIR=/run/user/$SBUID podman run --rm \
+  --runtime krun --annotation krun.use_passt=1 docker.io/library/debian:bookworm-slim \
   bash -c 'timeout 3 bash -c "echo > /dev/tcp/169.254.1.1/53" && echo REACHES || echo blocked'
 ```
 
-Expect `REACHES`. Now load the rule and repeat:
+Expect `REACHES`. Now load the rule and repeat the identical command:
 
 ```sh
 sudo nft add table inet isopodskuid
 sudo nft add chain inet isopodskuid out '{ type filter hook output priority 0; policy accept; }'
 sudo nft add rule inet isopodskuid out meta skuid "$SBUID" ip daddr 169.254.1.1 counter drop
 
-sudo -u sandbox XDG_RUNTIME_DIR=/run/user/$SBUID podman exec skuidtest \
+sudo -u sandbox XDG_RUNTIME_DIR=/run/user/$SBUID podman run --rm \
+  --runtime krun --annotation krun.use_passt=1 docker.io/library/debian:bookworm-slim \
   bash -c 'timeout 3 bash -c "echo > /dev/tcp/169.254.1.1/53" && echo REACHES || echo blocked'
 sudo nft list table inet isopodskuid | grep counter
 ```
@@ -151,23 +154,66 @@ sudo userdel -r sandbox
 
 Leaving the account in place is harmless — it owns nothing and cannot be logged into.
 
-## Recording the result
+## Result (2026-08-12, immutable Fedora + rootless podman + krun)
 
 | Step | Question | Result |
 |---|---|---|
-| 1 | rootless podman runs as the account? | |
-| 2 | **nft `meta skuid` matches the box's traffic?** | |
-| 2c | the rule leaves your own traffic alone? | |
-| 3 | published loopback port reachable from your account? | |
+| 1 | rootless podman runs as the account? | **PASS** — `Rootless: true`, container ran |
+| 2 | **nft `meta skuid` matches the box's traffic?** | **PASS** — `blocked`, `counter packets 5 bytes 300` |
+| 2c | the rule leaves your own traffic alone? | **PASS** — the invoking user still reached the address |
+| 3 | published loopback port reachable from your account? | **PASS** — served over `127.0.0.1` to the invoking user |
+
+**Verdict: the mechanism works.** Host-enforced egress is achievable with a rootless engine,
+keyed on a dedicated account. What remains unproven is the isopod side, not the OS side.
+
+Two things cost a round each and are worth knowing in advance:
+
+**`enable-linger` writes its marker but does not necessarily start the user manager**, so
+`/run/user/<uid>` was missing immediately afterwards. `sudo systemctl start user@<uid>.service`
+created it. After a reboot linger starts it automatically; it is only the first run that needs
+the nudge.
+
+**Do not test against `169.254.1.1` (or any passt-internal address).** The first attempt used
+the resolver the box inherits, which from inside a box answers but from the host is refused —
+because that address *is* passt, not a host-network address. The connection never became host
+traffic, so the counter stayed at zero and the run proved nothing. A `drop` rule also produces
+a timeout, never `Connection refused`, so a refusal is always a sign the target is wrong rather
+than the rule working. Use an address known to traverse the host network (`1.1.1.1:443` here).
+
+That same fact explains the guest-egress DNS outage fixed in 3.1.4: boxes resolve through
+passt's forwarder at `169.254.1.1`, and the in-guest ruleset dropped `169.254.0.0/16` — cutting
+the box's own DNS service rather than a LAN host.
 
 ## What each outcome means for isopod
 
-**All pass.** Worth building. isopod would need to route engine invocations through the
-account while keeping host-side state (box keys, `ssh_config` include, known_hosts) in the
-invoking user's home — otherwise everything lands in `/home/sandbox` at mode 700 and
-`isopod code` cannot read the box key. Every `$ENGINE` call site is affected, plus a sudoers
-rule and a `doctor` check for the account and its subuid range. `egress_can_enforce` gains a
-branch that no longer implies a rootful engine.
+**All pass** (this is what happened). What building it involves:
+
+- **Route engine invocations through the account, keep everything else where it is.** Host-side
+  state — box keys, the `ssh_config` include, `known_hosts` — must stay in the invoking user's
+  home. Run isopod wholesale as the account and it all lands in `/home/sandbox` at mode 700,
+  where the user's own SSH and editor cannot read the box key, and `isopod code` breaks. Only
+  the `$ENGINE` invocation needs to change identity; the box's traffic then originates from the
+  account because that is who runs passt.
+- **Set a working directory explicitly for those calls.** `sudo -u` inherits the caller's
+  directory, which is normally a project directory under the user's home that the account
+  cannot enter — every engine call would fail with `cannot chdir ...: Permission denied` before
+  podman starts.
+- **A sudoers rule** allowing the user to run the engine as the account without a password,
+  scoped to the engine binary.
+- **`doctor` checks**: account exists, subuid/subgid ranges present, runtime directory present
+  (linger enabled), firewall rule loaded.
+- **Rule persistence.** `nft add` does not survive a reboot. The rules need an nftables config
+  file or a systemd unit, and `egress_start_check` should verify they are still loaded — the
+  same failure mode the existing host-egress path already guards against.
+- **`egress_can_enforce` gains a branch** that no longer implies a rootful engine.
+
+Scope limit worth deciding up front: this gives **`lan-deny`** cleanly. **`allow-list`** — the
+default-deny mode where a filtering proxy is the box's only route out — needs the box's traffic
+redirected to that proxy, which is a further design on top of this rather than a consequence of
+it.
+
+Platform: Linux only. It depends on subuid ranges, systemd linger, and nftables. The macOS
+paths (Apple `container`, podman machine) are unaffected and keep their existing behaviour.
 
 **Step 1 fails.** The design is not available on this host. Remaining options are the router's
 guest network, a separate machine, or the current posture (VPN lockdown plus the in-guest
