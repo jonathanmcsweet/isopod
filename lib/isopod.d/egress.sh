@@ -1094,11 +1094,26 @@ egress_lan_allow() { # egress_lan_allow <name> [--rm] [spec]
     info "stored. Guest egress is off for this box, so nothing is being filtered."
     return 0
   fi
+  # A box built before this feature has an entrypoint that never reads the list.
+  # The live apply below still works — same table, same chain — so the address
+  # starts working immediately and then disappears at the next restart, with
+  # nothing saying why. Say why now instead.
+  local stale=0
+  box_is_stale "$name" 2>/dev/null && stale=1
   if lan_allow_apply_live "$name" "$new"; then
     info "$([ "$action" = add ] && printf 'allowed' || printf 'removed') $spec for $name (applied now)"
+    if [ "$stale" = 1 ]; then
+      warn "this box predates lan-allow, so the change applies NOW but is lost on the
+     next restart. Make it stick: isopod upgrade $name"
+    fi
   else
     info "$([ "$action" = add ] && printf 'allowed' || printf 'removed') $spec for $name"
-    warn "could not update the running box — restart it to apply: isopod stop $name && isopod start $name"
+    if [ "$stale" = 1 ]; then
+      warn "this box predates lan-allow — its ruleset cannot use the list.
+     Run: isopod upgrade $name"
+    else
+      warn "could not update the running box — restart it to apply: isopod stop $name && isopod start $name"
+    fi
   fi
 }
 
@@ -1116,8 +1131,13 @@ egress_lan_denied() { # egress_lan_denied <name> [count]
   out="$(root_ssh "$name" -- "sh -s -- denied $n" <"$helper" 2>/dev/null || true)"
   if [ -z "$out" ]; then
     printf 'nothing blocked recently for %s\n' "$name"
-    printf '  Either the box has not tried to reach private space, or this kernel\n'
-    printf '  cannot log dropped packets (filtering still works either way).\n'
+    if box_is_stale "$name" 2>/dev/null; then
+      printf '  This box predates drop logging, so it has nothing to report.\n'
+      printf '  Run: isopod upgrade %s\n' "$name"
+    else
+      printf '  Either the box has not tried to reach private space, or this kernel\n'
+      printf '  cannot log dropped packets (filtering still works either way).\n'
+    fi
     return 0
   fi
   printf 'Blocked destinations for %s (most recent last):\n\n' "$name"

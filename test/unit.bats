@@ -2845,3 +2845,51 @@ ip daddr 1.2.3.4 accept'
   run box_egress_posture demo
   refute_output --partial "except"
 }
+
+# A box built before this feature has an entrypoint that ignores the list, but
+# the same table and chain — so a live apply succeeds and then silently reverts
+# at the next restart. The warning is the only thing standing between the user
+# and an exemption that works until it doesn't.
+@test "egress lan-allow warns when a stale box cannot persist the entry" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  box_is_stale() { return 0; }
+  lan_allow_apply_live() { return 0; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  assert_output --partial "applies NOW but is lost on the"
+  assert_output --partial "isopod upgrade demo"
+}
+
+@test "egress lan-allow says nothing about staleness for a current box" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  box_is_stale() { return 1; }
+  lan_allow_apply_live() { return 0; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  refute_output --partial "isopod upgrade"
+}
+
+@test "egress lan-allow points a stopped stale box at upgrade, not restart" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  box_is_stale() { return 0; }
+  lan_allow_apply_live() { return 1; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  assert_output --partial "isopod upgrade demo"
+  refute_output --partial "isopod stop demo"
+}
+
+@test "egress lan-denied explains an empty result on a stale box" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  box_is_stale() { return 0; }
+  box_status() { printf 'running'; }
+  root_ssh() { printf ''; }
+  run egress_lan_denied demo
+  assert_success
+  assert_output --partial "predates drop logging"
+  assert_output --partial "isopod upgrade demo"
+}
