@@ -77,7 +77,7 @@ _isopod() {
       mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
       ;;
     egress)
-      mapfile -t COMPREPLY < <(compgen -W "status apply observe persist unpersist allow log denied rules" -- "$cur")
+      mapfile -t COMPREPLY < <(compgen -W "status apply observe persist unpersist allow log denied rules lan-allow lan-denied" -- "$cur")
       ;;
     secret)
       if [ "$cword" -eq 2 ]; then

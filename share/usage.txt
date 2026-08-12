@@ -81,10 +81,20 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         they sit in a blocked range (a VPN's resolver usually does)
                         — the box can resolve names, including internal ones, but
                         cannot otherwise reach anything in private space.
+                        Need one internal service anyway? Use --lan-allow rather
+                        than turning this off.
                         Skipped when host-side egress is active (that is stronger
                         and its proxy lives on a private address). Defence in
                         depth: it runs in the guest, so guest root could remove
                         it — the box user has no sudo or CAP_NET_ADMIN by default.
+  --lan-allow <addr>    Let this box reach one address in private space anyway —
+                        an internal registry, a git server, a database on the LAN
+                        (repeatable). Names already resolve inside a box, so
+                        allowing the address is usually all that is needed.
+                        'ADDR', 'ADDR/PREFIX' or either with ':PORT'; IPv6 needs
+                        brackets with a port, e.g. '[fd00::1]:5432'. Add or remove
+                        them later with 'isopod egress lan-allow <box> [--rm]',
+                        which applies to a running box right away.
   --harden <level>      Kernel-hardening profile: 'default' (on for every box —
                         reduced-surface guest sysctls on microVM boxes) or 'off'.
                         'strict' is reserved for a future release.
@@ -176,6 +186,9 @@ Network egress isolation (host-enforced; an in-box agent cannot turn it off):
                         (stops data exfiltration to arbitrary destinations).
   Subcommands:  status, apply (load firewall + start proxy), observe (build the
   allow-list from real traffic), allow <domain>, log [-f], denied, rules.
+  Per box:  lan-allow <box> [--rm] <addr>  let one box reach a private address
+            lan-denied <box>               what it tried to reach and was blocked
+            from (candidates to allow). Needs guest egress on.
 
 Secrets (host-stored, injected per box):
   'isopod secret set NAME' stores a value (stdin or hidden prompt — never argv)

@@ -185,6 +185,14 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   [ -n "$box_guest_egress" ] || box_guest_egress=off
   if [ "$box_guest_egress" = on ] && [ -z "$(active_egress)" ] && is_microvm_runtime; then
     RUN_ARGS+=(-e "ISOPOD_GUEST_EGRESS=1" -e "ISOPOD_GUEST_EGRESS_DNS=$ISOPOD_EGRESS_DNS")
+    # Private-space exemptions (isopod egress lan-allow), comma-separated. Stored
+    # per box, so a box keeps them across stop/start and reconfigure. The
+    # entrypoint re-validates every entry before it becomes a rule.
+    local box_lan_allow="${BOX_GUEST_EGRESS_ALLOW:-}"
+    [ -n "$box_lan_allow" ] ||
+      box_lan_allow="$(meta_get "$name" guest_egress_allow 2>/dev/null || true)"
+    [ -n "$box_lan_allow" ] &&
+      RUN_ARGS+=(-e "ISOPOD_GUEST_EGRESS_ALLOW=$box_lan_allow")
   fi
   # Secrets tmpfs: memory-backed, owned by the in-box user, gone when the box
   # stops. inject_secrets streams values in over SSH after boot; nothing about

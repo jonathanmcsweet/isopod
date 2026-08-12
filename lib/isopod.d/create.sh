@@ -9,6 +9,7 @@ cmd_create() {
   local memory="" cpus="" sudo_opt=0 no_root_key=0 engine_opt="" dockerfile_opt="" image_opt=0
   local container_opt=0 dev_tools=0 harden_opt="" runtime_opt=""
   local disk_opt="" nested=0 guest_egress_opt=""
+  local -a lan_allow_opts=()
   local -a repos=() copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
@@ -108,6 +109,10 @@ cmd_create() {
         ;;
       --guest-egress)
         guest_egress_opt="$2"
+        shift 2
+        ;;
+      --lan-allow)
+        lan_allow_opts+=("$2")
         shift 2
         ;;
       -h | --help)
@@ -309,6 +314,19 @@ cmd_create() {
     on | off) ;;
     *) die "invalid --guest-egress '$BOX_GUEST_EGRESS' (use: on | off)" ;;
   esac
+  # Private-space addresses this box may still reach (--lan-allow, repeatable).
+  # Validated here so a typo fails at create time rather than silently producing a
+  # box that cannot reach the service it was created for.
+  local BOX_GUEST_EGRESS_ALLOW="" _la
+  for _la in ${lan_allow_opts+"${lan_allow_opts[@]}"}; do
+    lan_allow_valid "$_la" || die "invalid --lan-allow '$_la'
+     Use an address or range, with an optional single port:
+       10.20.30.40        10.20.0.0/16        10.20.30.40:5432
+       fd00::1            fd00::/8            [fd00::1]:5432"
+    BOX_GUEST_EGRESS_ALLOW="$BOX_GUEST_EGRESS_ALLOW${BOX_GUEST_EGRESS_ALLOW:+,}$_la"
+  done
+  [ -n "$BOX_GUEST_EGRESS_ALLOW" ] && [ "$BOX_GUEST_EGRESS" = off ] &&
+    warn "--lan-allow has no effect with --guest-egress off (nothing is being filtered)"
   # Data volume + nested-container wiring for build_run_args (which turns these
   # into the entrypoint's boot env) and the meta below.
   local BOX_DISK="$DISK_SPEC"
@@ -357,6 +375,8 @@ cmd_create() {
     printf 'sudo=%s\n' "$BOX_SUDO"
     printf 'harden=%s\n' "$BOX_HARDEN"
     printf 'guest_egress=%s\n' "$BOX_GUEST_EGRESS"
+    [ -n "$BOX_GUEST_EGRESS_ALLOW" ] &&
+      printf 'guest_egress_allow=%s\n' "$BOX_GUEST_EGRESS_ALLOW"
     # Record the effective runtime so reconfigure reproduces the box's isolation
     # tier rather than re-defaulting. "container" == plain Tier 1 (no runtime).
     printf 'runtime=%s\n' "$(active_runtime 2>/dev/null | grep . || printf container)"

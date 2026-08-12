@@ -2528,11 +2528,18 @@ options ndots:1'
 # names it. nft rejects rules at top level, so every box failed closed and came up
 # without sshd. The render is exercised whole here: an earlier check looked only
 # below the `table` line, which is precisely where the bug was not.
-_render_nft() { # _render_nft <gateway> <rules block>
+_render_nft() { # _render_nft <gateway> <rules block> [allow block] [logging]
   local prog
-  prog=$(sed -n "/awk -v gw=\"\$iso_gw\" -v rules=/,/' \/etc\/isopod\/egress-guest.nft/p" "$ISOPOD_ENTRYPOINT" |
-    sed "1s/.*rules=\"\$iso_ns_rules\" '//; \$s/' \/etc\/isopod.*//")
-  awk -v gw="$1" -v rules="$2" "$prog" "$ISOPOD_GUEST_EGRESS_NFT"
+  prog=$(sed -n "/-v logging=\"\$1\" -v log4=/,/' \/etc\/isopod\/egress-guest.nft/p" "$ISOPOD_ENTRYPOINT" |
+    sed "1s/.*-v log6=\"\$iso_log6\" '//; \$s/' \/etc\/isopod.*//")
+  [ -n "$prog" ] || {
+    echo "could not extract the render program from the entrypoint" >&2
+    return 1
+  }
+  awk -v gw="$1" -v rules="$2" -v allow="${3:-}" -v logging="${4:-0}" \
+    -v log4='    ip daddr @private4 limit rate 10/minute log prefix "isopod-egress-drop "' \
+    -v log6='    ip6 daddr @private6 limit rate 10/minute log prefix "isopod-egress-drop "' \
+    "$prog" "$ISOPOD_GUEST_EGRESS_NFT"
 }
 
 @test "rendered ruleset places resolver rules inside the table, not the header" {
@@ -2609,4 +2616,232 @@ _render_nft() { # _render_nft <gateway> <rules block>
   is_microvm_runtime() { return 1; }
   run egress_posture_note demo
   assert_output --partial "can reach your LAN and the internet unfiltered"
+}
+
+# ---- lan_allow_valid / lan_allow_rules --------------------------------------
+# The gate on what reaches the box's firewall ruleset. The entrypoint re-checks
+# everything, but this is what decides what gets stored in the first place.
+
+@test "lan_allow_valid accepts an address, a range, and either with a port" {
+  local spec
+  for spec in 10.20.30.40 10.20.0.0/16 10.20.30.40:5432 10.20.0.0/16:5432 \
+    192.168.1.1 100.64.0.0/10; do
+    run lan_allow_valid "$spec"
+    assert_success
+  done
+}
+
+@test "lan_allow_valid accepts IPv6, with brackets when a port is given" {
+  local spec
+  for spec in fd00::1 fd00::/8 'fe80::1' '[fd00::1]:5432' '[fd00::/8]:443'; do
+    run lan_allow_valid "$spec"
+    assert_success
+  done
+}
+
+@test "lan_allow_valid rejects malformed addresses" {
+  local spec
+  for spec in 10.20.30.999 10.20.30 999.1.1.1 10.20.30.40.50 zzz '' 1.1.1 \
+    10.20.30.40/33 'fd00::1/129' 10.20.30.40:0 10.20.30.40:99999; do
+    run lan_allow_valid "$spec"
+    assert_failure
+  done
+}
+
+# A spec becomes firewall rule text, and the list is stored comma-separated, so
+# anything that could split the list or extend the rule has to be refused here.
+@test "lan_allow_valid rejects separators and rule injection" {
+  local spec
+  for spec in '10.0.0.1 accept' '10.0.0.1,10.0.0.2' '1.1.1.1; nft flush ruleset' \
+    '10.0.0.1	accept' 'fd00::1]:53' '[fd00::1]' '10.0.0.1:80:90'; do
+    run lan_allow_valid "$spec"
+    assert_failure
+  done
+}
+
+@test "lan_allow_valid rejects a spec containing a newline" {
+  run lan_allow_valid '10.0.0.1
+ip daddr 1.2.3.4 accept'
+  assert_failure
+}
+
+@test "lan_allow_rules emits a tagged accept per spec" {
+  run lan_allow_rules '10.20.30.40'
+  assert_success
+  assert_output 'ip daddr 10.20.30.40 accept comment "isopod-lan-allow"'
+}
+
+@test "lan_allow_rules emits both protocols for a port-scoped spec" {
+  run lan_allow_rules '10.20.30.40:5432'
+  assert_line 'ip daddr 10.20.30.40 tcp dport 5432 accept comment "isopod-lan-allow"'
+  assert_line 'ip daddr 10.20.30.40 udp dport 5432 accept comment "isopod-lan-allow"'
+}
+
+@test "lan_allow_rules uses ip6 for IPv6 specs" {
+  run lan_allow_rules 'fd00::1,[fd00::2]:443'
+  assert_line 'ip6 daddr fd00::1 accept comment "isopod-lan-allow"'
+  assert_line 'ip6 daddr fd00::2 tcp dport 443 accept comment "isopod-lan-allow"'
+}
+
+@test "lan_allow_rules emits nothing for an empty list" {
+  run lan_allow_rules ''
+  assert_success
+  assert_output ''
+}
+
+# The tag is how `egress lan-allow` finds its own rules in the live chain later.
+# Untagged rules would accumulate on every change instead of being replaced.
+@test "lan_allow_rules tags every rule it emits" {
+  run lan_allow_rules '10.0.0.1,10.0.0.2:80,fd00::1'
+  local n_lines n_tagged
+  n_lines=$(printf '%s\n' "$output" | grep -c .)
+  n_tagged=$(printf '%s\n' "$output" | grep -c 'comment "isopod-lan-allow"')
+  [ "$n_lines" = "$n_tagged" ]
+}
+
+# ---- egress lan-allow (per-box list management) ------------------------------
+
+@test "egress lan-allow lists nothing for a box with no entries" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run egress_lan_allow demo
+  assert_success
+  assert_output --partial "no lan-allow entries for demo"
+}
+
+@test "egress lan-allow stores a valid address" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  lan_allow_apply_live() { return 1; }
+  box_status() { printf 'exited'; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  run meta_get demo guest_egress_allow
+  assert_output '10.20.30.40'
+}
+
+@test "egress lan-allow refuses an invalid address and stores nothing" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run egress_lan_allow demo 10.20.30.999
+  assert_failure
+  assert_output --partial "invalid address"
+  run meta_get demo guest_egress_allow
+  assert_output ''
+}
+
+@test "egress lan-allow appends rather than replacing" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1'
+  open_box() { :; }
+  lan_allow_apply_live() { return 1; }
+  box_status() { printf 'exited'; }
+  run egress_lan_allow demo 10.0.0.2
+  assert_success
+  run meta_get demo guest_egress_allow
+  assert_output '10.0.0.1,10.0.0.2'
+}
+
+@test "egress lan-allow is a no-op when the address is already allowed" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1'
+  open_box() { :; }
+  run egress_lan_allow demo 10.0.0.1
+  assert_success
+  assert_output --partial "already allowed"
+  run meta_get demo guest_egress_allow
+  assert_output '10.0.0.1'
+}
+
+@test "egress lan-allow --rm removes one entry and keeps the rest" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1,10.0.0.2,10.0.0.3'
+  open_box() { :; }
+  lan_allow_apply_live() { return 1; }
+  box_status() { printf 'exited'; }
+  run egress_lan_allow demo --rm 10.0.0.2
+  assert_success
+  run meta_get demo guest_egress_allow
+  assert_output '10.0.0.1,10.0.0.3'
+}
+
+@test "egress lan-allow --rm fails for an entry that is not in the list" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1'
+  open_box() { :; }
+  run egress_lan_allow demo --rm 10.9.9.9
+  assert_failure
+  assert_output --partial "is not in the lan-allow list"
+}
+
+# Stored but inert: guest egress off means no ruleset exists to exempt anything
+# from. Storing it anyway means turning guest egress on later picks it up.
+@test "egress lan-allow warns but still stores when guest egress is off" {
+  mk_meta demo 'guest_egress=off'
+  open_box() { :; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  assert_output --partial "Guest egress is off"
+  run meta_get demo guest_egress_allow
+  assert_output '10.20.30.40'
+}
+
+@test "egress lan-denied refuses a box with guest egress off" {
+  mk_meta demo 'guest_egress=off'
+  open_box() { :; }
+  run egress_lan_denied demo
+  assert_failure
+  assert_output --partial "guest egress is off"
+}
+
+# ---- build_run_args passes the list to the box ------------------------------
+
+@test "build_run_args passes the lan-allow list into the box" {
+  setup_run_args_box demo
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.20.30.40,10.20.0.0/16'
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  build_run_args demo img 127.0.0.1:2222:2222 2g 2
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"ISOPOD_GUEST_EGRESS_ALLOW=10.20.30.40,10.20.0.0/16"* ]]
+}
+
+@test "build_run_args omits the lan-allow var when the box has no entries" {
+  setup_run_args_box demo
+  mk_meta demo 'guest_egress=on'
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  build_run_args demo img 127.0.0.1:2222:2222 2g 2
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"ISOPOD_GUEST_EGRESS_ALLOW"* ]]
+}
+
+# Guest egress off means the entrypoint never loads a ruleset, so passing the
+# list would be misleading — nothing would enforce it.
+@test "build_run_args omits the lan-allow var when guest egress is off" {
+  setup_run_args_box demo
+  mk_meta demo 'guest_egress=off' 'guest_egress_allow=10.20.30.40'
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  build_run_args demo img 127.0.0.1:2222:2222 2g 2
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"ISOPOD_GUEST_EGRESS_ALLOW"* ]]
+}
+
+# An exemption is part of the posture: a verdict that says "lan-deny" while an
+# address is open would misrepresent what the box can reach.
+@test "box_egress_posture names the lan-allow exemptions" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.20.30.40,10.20.0.0/16'
+  run box_egress_posture demo
+  assert_output --partial "guest lan-deny"
+  assert_output --partial "except 10.20.30.40,10.20.0.0/16"
+}
+
+@test "box_egress_posture stays quiet about exemptions when there are none" {
+  mk_meta demo 'guest_egress=on'
+  run box_egress_posture demo
+  refute_output --partial "except"
+}
+
+# Exemptions only mean something when a ruleset is loaded to be exempt from.
+@test "box_egress_posture ignores stored exemptions when guest egress is off" {
+  mk_meta demo 'guest_egress=off' 'guest_egress_allow=10.20.30.40'
+  run box_egress_posture demo
+  refute_output --partial "except"
 }

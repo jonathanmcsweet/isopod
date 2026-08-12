@@ -349,6 +349,45 @@ without root, isopod can't confirm either way and warns rather than blocking.
   at L3 (dropped) — and both are equally locked down, so this leaks nothing about
   the host.
 
+### Reaching one internal service anyway (`egress lan-allow`)
+
+A box that needs an internal registry, a private git server, or a database on the
+LAN does not need guest egress turned off. Allow the one address instead:
+
+```sh
+isopod egress lan-allow devbox 10.20.30.40        # one host
+isopod egress lan-allow devbox 10.20.0.0/16       # a range
+isopod egress lan-allow devbox 10.20.30.40:5432   # one host, one port
+isopod egress lan-allow devbox                    # list what is allowed
+isopod egress lan-allow devbox --rm 10.20.30.40   # remove one
+```
+
+IPv6 works the same way, with brackets when a port is given: `[fd00::1]:5432`.
+Entries are stored per box, so they survive stop/start, and applied to a running
+box immediately — no restart, and no recreate (unlike `--expose`, which has to
+rebuild the container). `isopod create --lan-allow <addr>` sets them up front.
+
+**Names already resolve inside a box**, because the ruleset exempts the box's own
+resolvers on port 53. So allowing the address is usually the only step: existing
+tools keep working with the hostnames they already have, unchanged.
+
+To find out what to allow, ask the box what it was blocked from:
+
+```sh
+isopod egress lan-denied devbox
+```
+
+The ruleset logs dropped packets (rate-limited, so a retry loop writes a few lines
+a minute rather than filling the ring buffer) and this reads them back as
+destination/port pairs. On a kernel with no netfilter log support the box says so
+at boot and filtering continues unaffected — only the diagnostic is lost.
+
+What an exemption costs: the address is open to **everything** in the box, not
+just the tool you had in mind. It is still far narrower than turning guest egress
+off, which opens your whole LAN. For a service reachable only from the host —
+something on the host's own `127.0.0.1` — an exemption cannot help, because the
+box's loopback is its own.
+
 ## Network egress allow-list (`egress allow-list`)
 
 Where `lan-deny` blocks your local network but leaves the public internet open,

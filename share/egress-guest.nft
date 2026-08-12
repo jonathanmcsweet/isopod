@@ -20,12 +20,39 @@
 # root can remove it. The box user has no sudo and no CAP_NET_ADMIN by default,
 # which is what makes it hold against the workload it is containing.
 #
-# @GATEWAY@ and @RESOLVERS@ are substituted by the entrypoint before loading —
-# the gateway from /proc/net/route, the resolvers from /etc/resolv.conf. Not a
-# render_tmpl template: this file is consumed by nft inside the box, never
-# evaluated as a shell heredoc on the host.
+# The entrypoint substitutes these before loading: @GATEWAY@ from /proc/net/route,
+# @RESOLVERS@ from /etc/resolv.conf, @ALLOW@ from the box's lan-allow list, and
+# @LOG4@/@LOG6@ with the logging rules below (or with nothing, if this kernel has
+# no log support). Not a render_tmpl template: this file is consumed by nft inside
+# the box, never evaluated as a shell heredoc on the host.
 
 table inet isopod_egress {
+  # Declared once and referenced twice, by the log rule and the drop rule, so the
+  # two can never fall out of step. Sets must appear before the chain that uses
+  # them: nft reads this file top to bottom.
+  set private4 {
+    type ipv4_addr
+    flags interval
+    elements = {
+      10.0.0.0/8,
+      172.16.0.0/12,
+      192.168.0.0/16,
+      100.64.0.0/10,
+      169.254.0.0/16,
+      192.0.0.0/24,
+      198.18.0.0/15
+    }
+  }
+
+  set private6 {
+    type ipv6_addr
+    flags interval
+    elements = {
+      fc00::/7,
+      fe80::/10
+    }
+  }
+
   chain output {
     type filter hook output priority filter; policy accept;
 
@@ -52,22 +79,29 @@ table inet isopod_egress {
     # The box can resolve names, including internal ones, and still cannot open a
     # connection to anything else in private space.
 @RESOLVERS@
-    # Private, shared, link-local and carrier-grade-NAT space. 169.254.0.0/16
-    # also covers the cloud metadata address (169.254.169.254).
-    ip daddr {
-      10.0.0.0/8,
-      172.16.0.0/12,
-      192.168.0.0/16,
-      100.64.0.0/10,
-      169.254.0.0/16,
-      192.0.0.0/24,
-      198.18.0.0/15
-    } counter drop
+    # Addresses this box is allowed to reach in private space, from
+    # `isopod egress lan-allow`. Empty unless the user added one. This is the
+    # supported way to reach an internal service — an internal registry, a private
+    # git server, a database on the LAN — without turning the whole ruleset off.
+    #
+    # Names already resolve inside the box (see the resolver exemption above), so
+    # allowing the address is usually all that is needed: existing tooling keeps
+    # working with the hostnames it already has.
+@ALLOW@
+    # Log what gets dropped, then drop it, as two rules over one set.
+    #
+    # `limit` stops rule evaluation once the rate is exceeded, so it must not
+    # share a rule with the drop — over the rate, the packet would fall past a
+    # combined rule and be accepted. Kept separate, the log rule carries no
+    # verdict and evaluation always continues to the drop below it.
+    #
+    # The rate cap is what makes this safe to leave on: a box in a retry loop
+    # writes a few lines a minute, not a full ring buffer. `isopod egress
+    # lan-denied <box>` reads them back and names the address to allow.
+@LOG4@
+    ip daddr @private4 counter drop
 
-    # IPv6 equivalents: unique-local and link-local.
-    ip6 daddr {
-      fc00::/7,
-      fe80::/10
-    } counter drop
+@LOG6@
+    ip6 daddr @private6 counter drop
   }
 }

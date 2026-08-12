@@ -239,27 +239,135 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
     echo "isopod:   will not resolve names; recreate it with --guest-egress off." >&2
   fi
 
-  # Anchored to the placeholder alone on its own line. An unanchored match also
-  # hits the header comment that names the placeholder, which put the generated
-  # rules above `table ... {` — invalid nft, so the box failed closed and never
-  # started sshd.
-  awk -v gw="$iso_gw" -v rules="$iso_ns_rules" '
-    /^@RESOLVERS@$/ { if (rules != "") print rules; next }
-    { gsub(/@GATEWAY@/, gw); print }
-  ' /etc/isopod/egress-guest.nft >/run/isopod-egress.nft ||
-    iso_egress_fail "could not render the ruleset"
-  nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err ||
-    iso_egress_fail "nft rejected the ruleset: $(cat /run/isopod-egress.err 2>/dev/null)"
+  # Private-space addresses this box may reach anyway (isopod egress lan-allow),
+  # as a comma-separated list. Accepted forms, per entry:
+  #
+  #   10.20.30.40        10.20.0.0/16        an address or a range
+  #   10.20.30.40:5432   10.20.0.0/16:5432   the same, one TCP/UDP port only
+  #   fd00::1            fd00::/8            IPv6, with [fd00::1]:5432 for a port
+  #
+  # The host validates these before they are stored; they are validated again here
+  # for the same reason the resolvers are — this text becomes firewall rules, so an
+  # entry that is not a bare literal is dropped rather than substituted. A rejected
+  # entry is skipped, not fatal: a typo should cost the user that one exemption,
+  # not leave them with a box that never starts sshd.
+  iso_allow_rules=$(awk -v specs="${ISOPOD_GUEST_EGRESS_ALLOW:-}" '
+    function bad4(a,   o, i, n) {
+      n = split(a, o, ".")
+      if (n != 4) return 1
+      for (i = 1; i <= 4; i++) {
+        if (o[i] !~ /^[0-9][0-9]?[0-9]?$/) return 1
+        if (o[i] + 0 > 255) return 1
+      }
+      return 0
+    }
+    function badpfx(p, max) {
+      if (p !~ /^[0-9][0-9]?[0-9]?$/) return 1
+      return (p + 0 > max)
+    }
+    function badport(p) {
+      if (p !~ /^[0-9][0-9]?[0-9]?[0-9]?[0-9]?$/) return 1
+      return (p + 0 < 1 || p + 0 > 65535)
+    }
+    # Tagged with a comment so `isopod egress lan-allow` can find and replace
+    # exactly these rules later, without touching anything else in the chain.
+    function emit(kw, a, p,   tag) {
+      tag = "comment \"isopod-lan-allow\""
+      if (p == "") { printf "    %s daddr %s accept %s\n", kw, a, tag; return }
+      printf "    %s daddr %s tcp dport %s accept %s\n", kw, a, p, tag
+      printf "    %s daddr %s udp dport %s accept %s\n", kw, a, p, tag
+    }
+    BEGIN {
+      n = split(specs, s, ",")
+      for (i = 1; i <= n; i++) {
+        spec = s[i]
+        gsub(/^[ \t]+/, "", spec); gsub(/[ \t]+$/, "", spec)
+        if (spec == "") continue
+        addr = ""; port = ""; fam = 0
+        if (substr(spec, 1, 1) == "[") {
+          # Bracketed IPv6 with a port: [addr]:port, brackets required so the
+          # port colon cannot be confused with the address separators.
+          c = index(spec, "]")
+          if (c < 3) continue
+          rest = substr(spec, c + 1)
+          if (substr(rest, 1, 1) != ":") continue
+          port = substr(rest, 2)
+          addr = substr(spec, 2, c - 2)
+          fam = 6
+        } else {
+          t = spec
+          if (gsub(/:/, ":", t) >= 2) {
+            # Two or more colons is IPv6; a bare IPv6 cannot carry a port.
+            addr = spec; fam = 6
+          } else if (index(spec, ":") > 0) {
+            c = index(spec, ":")
+            port = substr(spec, c + 1)
+            addr = substr(spec, 1, c - 1)
+            fam = 4
+          } else {
+            addr = spec; fam = 4
+          }
+        }
+        c = index(addr, "/")
+        if (c > 0) { base = substr(addr, 1, c - 1); pfx = substr(addr, c + 1) }
+        else { base = addr; pfx = "" }
+        if (base == "") continue
+        if (port != "" && badport(port)) continue
+        if (fam == 4) {
+          if (bad4(base)) continue
+          if (pfx != "" && badpfx(pfx, 32)) continue
+          emit("ip", addr, port)
+        } else {
+          if (base !~ /^[0-9a-fA-F:]+$/ || index(base, ":") == 0) continue
+          if (pfx != "" && badpfx(pfx, 128)) continue
+          emit("ip6", addr, port)
+        }
+      }
+    }' </dev/null)
+
+  # Placeholders are matched anchored, alone on their own line. An unanchored match
+  # also hits the header comment that names them, which put the generated rules
+  # above `table ... {` — invalid nft, so the box failed closed and never started
+  # sshd.
+  iso_log4='    ip daddr @private4 limit rate 10/minute log prefix "isopod-egress-drop "'
+  iso_log6='    ip6 daddr @private6 limit rate 10/minute log prefix "isopod-egress-drop "'
+  iso_render_nft() { # iso_render_nft <0|1 logging>
+    awk -v gw="$iso_gw" -v rules="$iso_ns_rules" -v allow="$iso_allow_rules" \
+      -v logging="$1" -v log4="$iso_log4" -v log6="$iso_log6" '
+      /^@RESOLVERS@$/ { if (rules != "") print rules; next }
+      /^@ALLOW@$/     { if (allow != "") print allow; next }
+      /^@LOG4@$/      { if (logging == "1") print log4; next }
+      /^@LOG6@$/      { if (logging == "1") print log6; next }
+      { gsub(/@GATEWAY@/, gw); print }
+    ' /etc/isopod/egress-guest.nft >/run/isopod-egress.nft
+  }
+
+  # Load with drop logging, and fall back to the same ruleset without it if this
+  # kernel cannot log (nf_log_syslog missing). Logging is a diagnostic, so it must
+  # never be the reason a box fails closed and comes up with no sshd. A second
+  # failure is a real one and is reported.
+  iso_render_nft 1 || iso_egress_fail "could not render the ruleset"
+  if ! nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_render_nft 0 || iso_egress_fail "could not render the ruleset"
+    nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err ||
+      iso_egress_fail "nft rejected the ruleset: $(cat /run/isopod-egress.err 2>/dev/null)"
+    echo "isopod: guest egress: this kernel cannot log dropped packets, so" >&2
+    echo "isopod:   'isopod egress lan-denied' will show nothing. Filtering is unaffected." >&2
+  fi
   # Confirm it is actually in the kernel rather than trusting nft's exit status.
   nft list table inet isopod_egress >/dev/null 2>&1 ||
     iso_egress_fail "the ruleset did not load into the kernel"
   [ -n "$iso_ns_rules" ] &&
     echo "isopod: guest egress: DNS allowed to$(awk '/ip6? daddr/ && !seen[$3]++ { printf " %s", $3 }' /run/isopod-egress.nft) (port 53 only)" >&2
 
+  [ -n "$iso_allow_rules" ] &&
+    echo "isopod: guest egress: also allowed$(printf '%s\n' "$iso_allow_rules" | awk '!seen[$3]++ { printf " %s", $3 }')" >&2
+
   echo "isopod: guest egress isolation active (private ranges blocked; gateway $iso_gw allowed)" >&2
 fi
 
 unset ISOPOD_AUTHORIZED_KEY ISOPOD_ROOT_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN
 unset ISOPOD_DISK ISOPOD_NESTED ISOPOD_DNS_VIA_PROXY ISOPOD_GUEST_EGRESS ISOPOD_GUEST_EGRESS_DNS
+unset ISOPOD_GUEST_EGRESS_ALLOW
 mkdir -p /run/sshd
 exec /usr/sbin/sshd -D -e
