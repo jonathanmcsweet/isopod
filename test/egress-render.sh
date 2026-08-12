@@ -147,9 +147,75 @@ nft_check() { # nft_check <label> <rendered ruleset>
 $err" ;;
   esac
 }
+# --- guest ruleset (loaded INSIDE a microVM box by the entrypoint) ----------
+# Rendered the same way share/isopod-entrypoint renders it: the gateway from
+# /proc/net/route, and one accept pair per resolver in /etc/resolv.conf. Checked
+# here because nothing else ever parsed it — a version of this file once placed
+# the generated rules above `table ... {`, which nft rejects, and the only symptom
+# was every microVM box failing closed with no sshd.
+guest_tmpl="$ROOT/share/egress-guest.nft"
+guest_ep="$ROOT/share/isopod-entrypoint"
+[ -f "$guest_tmpl" ] || fail "missing guest ruleset template: $guest_tmpl"
+[ -f "$guest_ep" ] || fail "missing entrypoint: $guest_ep"
+
+# Both awk programs are extracted from the entrypoint and run for real, rather
+# than reimplemented here — a copy would have kept passing while the shipped
+# program was broken, which is how the misplaced-rules bug reached a box.
+ns_prog="$(sed -n "/iso_ns_rules=\$(awk '/,/}' \/etc\/resolv.conf/p" "$guest_ep" |
+  sed "1s/.*awk '//; \$s/}'.*/}/")"
+[ -n "$ns_prog" ] || fail "could not extract the resolver-rule program from the entrypoint"
+render_prog="$(sed -n "/awk -v gw=\"\$iso_gw\" -v rules=/,/' \/etc\/isopod\/egress-guest.nft/p" "$guest_ep" |
+  sed "1s/.*rules=\"\$iso_ns_rules\" '//; \$s/' \/etc\/isopod.*//")"
+[ -n "$render_prog" ] || fail "could not extract the ruleset render program from the entrypoint"
+
+# A resolv.conf shaped like the one a box inherits behind a VPN: two resolvers in
+# ranges the ruleset blocks, one on the gateway, and a malformed line that must
+# never become a rule.
+guest_rules="$(printf '%s\n' \
+  'search lan' \
+  'nameserver 169.254.1.1' \
+  'nameserver 100.64.0.12' \
+  'nameserver 192.168.1.1' \
+  'nameserver bogus;accept' | awk "$ns_prog")"
+[ -n "$guest_rules" ] || fail "the entrypoint's resolver program produced no rules"
+printf '%s\n' "$guest_rules" | grep -q 'bogus' &&
+  fail "a malformed nameserver reached the ruleset"
+ok "guest resolver rules generated from resolv.conf (malformed entries dropped)"
+
+guest="$(printf '%s\n' "$guest_rules" |
+  awk -v gw="192.168.1.1" -v rules="$(cat)" "$render_prog" "$guest_tmpl")"
+
+printf '%s\n' "$guest" | grep -q '@GATEWAY@' &&
+  fail "guest ruleset still contains @GATEWAY@ after rendering"
+printf '%s\n' "$guest" | grep -q '^@RESOLVERS@$' &&
+  fail "guest ruleset still contains the @RESOLVERS@ placeholder after rendering"
+ok "guest ruleset renders (gateway and resolver placeholders consumed)"
+
+# Every rule must sit inside the table body. This is the exact shape of the bug
+# above: an unanchored placeholder match put rules in the header comment block.
+guest_head="$(printf '%s\n' "$guest" | sed -n '1,/^table inet isopod_egress/p')"
+printf '%s\n' "$guest_head" | grep -qE '^[[:space:]]+(ip|ip6) daddr' &&
+  fail "guest ruleset emits rule text before the table declaration"
+ok "guest ruleset puts every rule inside the table"
+
+# The resolver exemptions must precede the private-range drop, or they never match.
+gr_line="$(printf '%s\n' "$guest" | grep -n 'ip daddr 169\.254\.1\.1 udp' | head -1 | cut -d: -f1)"
+gd_line="$(printf '%s\n' "$guest" | grep -n 'counter drop' | head -1 | cut -d: -f1)"
+[ -n "$gr_line" ] && [ -n "$gd_line" ] && [ "$gr_line" -lt "$gd_line" ] ||
+  fail "guest ruleset orders the resolver exemptions after the drop (they would never match)"
+ok "guest ruleset exempts resolvers before the private-range drop"
+
+# Rendering with no resolvers at all must still produce a loadable ruleset.
+guest_empty="$(awk -v gw="192.168.1.1" -v rules="" "$render_prog" "$guest_tmpl")"
+[ "$(printf '%s\n' "$guest_empty" | grep -c '{')" = "$(printf '%s\n' "$guest_empty" | grep -c '}')" ] ||
+  fail "guest ruleset has unbalanced braces when rendered with no resolvers"
+ok "guest ruleset is balanced with no resolvers"
+
 if command -v nft >/dev/null 2>&1; then
   nft_check "lan-deny" "$lan_deny"
   nft_check "allow-list" "$allow_list"
+  nft_check "guest (with resolvers)" "$guest"
+  nft_check "guest (no resolvers)" "$guest_empty"
 else
   skip "nft not installed — ruleset parse check skipped (render checks above still ran)"
 fi
