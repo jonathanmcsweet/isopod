@@ -98,8 +98,10 @@ cmd_start() {
     inject_secrets "$name"
   fi
   # Reopen the host-service forwards. The tunnel is a host-side ssh process, so
-  # stopping the box always kills it; nothing else would bring it back.
-  host_port_sync "$name"
+  # stopping the box always kills it; nothing else would bring it back. A forward
+  # that will not open is a warning inside host_port_sync, never fatal — hence the
+  # `|| true`, so `set -e` does not abort a start that otherwise succeeded.
+  host_port_sync "$name" || true
   info "started '$name' (ssh $(ctr_name "$name"))"
   # A box built from an older isopod is missing every fix made to the entrypoint,
   # Dockerfile and sysctl baseline since. Nothing else surfaces that, so say it on
@@ -403,7 +405,8 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
 
   inject_secrets "$name"
   # The container is new, so the old tunnel died with the one it replaced.
-  host_port_sync "$name"
+  # Non-fatal (see cmd_start): a forward that will not open must not abort here.
+  host_port_sync "$name" || true
   apply_color "$name" "$(meta_get "$name" color || true)" ||
     warn "could not apply window color (the box is fine without it)"
   write_box_config "$name"
@@ -593,7 +596,8 @@ cmd_reconfigure() {
     fi
   fi
   # The container is new, so the old tunnel died with the one it replaced.
-  host_port_sync "$name"
+  # Non-fatal (see cmd_start): a forward that will not open must not abort here.
+  host_port_sync "$name" || true
   apply_color "$name" "$hex" || warn "could not apply window color (the box is fine without it)"
   write_box_config "$name"
 

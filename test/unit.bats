@@ -2263,7 +2263,7 @@ mk_meta() { # mk_meta <name> <meta-line...>
 }
 
 @test "box_egress_posture names the in-guest layer and its limits" {
-  mk_meta demo 'guest_egress=on'
+  mk_meta demo 'guest_egress=on' 'runtime=krun'
   run box_egress_posture demo
   assert_output --partial 'guest lan-deny'
   assert_output --partial 'not a hard boundary'
@@ -2502,14 +2502,14 @@ options ndots:1'
 # invisible behind 'OPEN' — the worst case, because the ruleset is the first
 # thing worth suspecting when something in the box stops reaching the network.
 @test "box_egress_posture names guest egress even when host enforcement degraded" {
-  mk_meta demo 'egress=allow-list' 'egress_degraded=1' 'guest_egress=on'
+  mk_meta demo 'egress=allow-list' 'egress_degraded=1' 'guest_egress=on' 'runtime=krun'
   run box_egress_posture demo
   assert_output --partial 'OPEN'
   assert_output --partial 'guest lan-deny'
 }
 
 @test "box_egress_posture names guest egress alongside host enforcement" {
-  mk_meta demo 'egress=allow-list' 'egress_degraded=0' 'guest_egress=on'
+  mk_meta demo 'egress=allow-list' 'egress_degraded=0' 'guest_egress=on' 'runtime=krun'
   run box_egress_posture demo
   assert_output --partial 'allow-list (host-enforced)'
   assert_output --partial 'guest lan-deny'
@@ -2827,7 +2827,7 @@ ip daddr 1.2.3.4 accept'
 # An exemption is part of the posture: a verdict that says "lan-deny" while an
 # address is open would misrepresent what the box can reach.
 @test "box_egress_posture names the lan-allow exemptions" {
-  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.20.30.40,10.20.0.0/16'
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.20.30.40,10.20.0.0/16' 'runtime=krun'
   run box_egress_posture demo
   assert_output --partial "guest lan-deny"
   assert_output --partial "except 10.20.30.40,10.20.0.0/16"
@@ -3167,4 +3167,88 @@ ip daddr 1.2.3.4 accept'
   run host_port_sync demo
   assert_failure
   assert_output --partial "reported nothing"
+}
+
+# ---- valid_ip6 (shared strict IPv6 check) -----------------------------------
+# The address becomes an nft rule; nft rejects a malformed literal and the whole
+# ruleset with it, so "hex and colons" is not enough — it must be a real address.
+
+@test "valid_ip6 accepts well-formed addresses" {
+  local a
+  for a in fd00::1 fe80::1 :: ::1 fd00:: 1:2:3:4:5:6:7:8 \
+    2001:db8::ff00:42:8329 abcd:ef01:2345:6789:abcd:ef01:2345:6789; do
+    run valid_ip6 "$a"
+    assert_success
+  done
+}
+
+@test "valid_ip6 rejects the addresses nft would reject" {
+  local a
+  for a in 1:2:3:4:5:6:7:8:9 12345::1 fd00:::1 gg::1 1::2::3 :1:2:3 1:2:3: \
+    "" 1:2:3:4:5:6:7 1.2.3.4 fd00::1::; do
+    run valid_ip6 "$a"
+    assert_failure
+  done
+}
+
+# The specific brick inputs from the review must not survive lan_allow_valid.
+@test "lan_allow_valid rejects malformed IPv6 that would fail the ruleset closed" {
+  local s
+  for s in 1:2:3:4:5:6:7:8:9 12345::1 "[1:2:3:4:5:6:7:8:9]:443" fd00:::1; do
+    run lan_allow_valid "$s"
+    assert_failure
+  done
+}
+
+@test "lan_allow_valid still accepts the IPv6 forms it should" {
+  local s
+  for s in fd00::1 fd00::/8 "[fd00::1]:5432" "2001:db8::1"; do
+    run lan_allow_valid "$s"
+    assert_success
+  done
+}
+
+# ---- F2: posture must not claim in-box isolation a box never got ------------
+# guest_egress=on is written to meta for every box, but the ruleset only loads on
+# a Tier 3 microVM. A plain container and a gVisor box must not be reported as
+# filtered.
+@test "box_egress_posture reports OPEN for a container box despite guest_egress=on" {
+  mk_meta demo 'guest_egress=on' 'runtime=container'
+  run box_egress_posture demo
+  assert_output --partial "OPEN"
+  refute_output --partial "guest lan-deny"
+}
+
+@test "box_egress_posture does not claim in-box isolation for a gVisor box" {
+  mk_meta demo 'guest_egress=on' 'runtime=runsc'
+  run box_egress_posture demo
+  refute_output --partial "guest lan-deny"
+}
+
+@test "box_egress_posture names in-box isolation for a real microVM box" {
+  mk_meta demo 'guest_egress=on' 'runtime=krun'
+  run box_egress_posture demo
+  assert_output --partial "guest lan-deny"
+}
+
+@test "box_egress_posture hides lan-allow exemptions on a non-microVM box" {
+  mk_meta demo 'guest_egress=on' 'runtime=container' 'guest_egress_allow=10.20.30.40'
+  run box_egress_posture demo
+  refute_output --partial "except 10.20.30.40"
+}
+
+# ---- F1: host_port_sync must never be called bare under set -e ---------------
+# host_port_sync returns non-zero when a forward cannot open — by design, a
+# warning, not a failure. A bare call would let `set -e` abort the command that
+# made it (start/create/upgrade/reconfigure) after the box is already up. Every
+# call site must guard the result (if, ||, &&-with-fallback).
+@test "no host_port_sync call site is unguarded under set -e" {
+  local hits
+  hits="$(grep -rnE '(^|[^|&])[[:space:]]*host_port_sync ' \
+    "$ISOPOD_ROOT"/lib/isopod.d/*.sh |
+    grep -vE '\|\| true|if host_port_sync|host_port_sync\(\)' || true)"
+  if [ -n "$hits" ]; then
+    printf 'unguarded host_port_sync call(s):\n%s\n' "$hits" >&2
+    return 1
+  fi
 }

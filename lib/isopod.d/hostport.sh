@@ -55,9 +55,8 @@ host_port_parse() { # host_port_parse <spec>
           tgtp="${rest##*]:}"
           target="${rest#"["}"
           target="${target%%]:*}"
-          # Inside brackets it must actually be an IPv6 literal.
-          case "$target" in *[!0-9a-fA-F:]*) return 1 ;; esac
-          case "$target" in *:*) ;; *) return 1 ;; esac
+          # Inside brackets it must be a valid IPv6 literal.
+          valid_ip6 "$target" || return 1
           ;;
         *:*)
           target="${rest%:*}"

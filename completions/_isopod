@@ -34,6 +34,7 @@ _isopod() {
     'copy-in:Copy more host folders into the sandbox'
     'rm:Delete a sandbox (container + keys)'
     'egress:Manage the network egress firewall'
+    'host-port:Reach a host service from inside a box'
     'secret:Manage secrets injected into boxes'
     'doctor:Check host prerequisites'
     'help:Show help'
@@ -64,6 +65,8 @@ _isopod() {
             '--no-sudo[no-op; sudo is off by default]' \
             '--no-root-key[no administrative root key either (no root path at all)]' \
             '--guest-egress[in-box network isolation: on|off (default on)]:mode:(on off)' \
+            '*--lan-allow[let the box reach one private address]:addr:' \
+            '*--host-port[reach a host service from the box: PORT or BOXPORT:HOSTPORT]:spec:' \
             '--container[run as a plain container instead of the default microVM]' \
             '--dev[add the dev/test toolchain (nested engines, lint/test tools)]' \
             '--disk[box-local data volume, SIZE or SIZE\:MOUNTPOINT (microVM boxes only)]:disk:' \
@@ -92,10 +95,13 @@ _isopod() {
           _arguments '--path[in-box repo path]:path:' '1:sandbox:_isopod_boxes'
           ;;
         egress)
-          _arguments '1:action:(status apply observe persist unpersist allow log denied rules)'
+          _arguments '1:action:(status apply observe persist unpersist allow log denied rules lan-allow lan-denied)'
           ;;
         secret)
           _arguments '1:action:(set ls rm)'
+          ;;
+        host-port|hostport)
+          _arguments '1:action:(add rm ls)' '2:sandbox:_isopod_boxes'
           ;;
         info|shell|root-shell|upgrade|start|stop|export|copy-in)
           _arguments '1:sandbox:_isopod_boxes'

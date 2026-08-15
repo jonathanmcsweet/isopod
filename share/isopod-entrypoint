@@ -331,8 +331,9 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
   # sshd.
   iso_log4='    ip daddr @private4 limit rate 10/minute log prefix "isopod-egress-drop "'
   iso_log6='    ip6 daddr @private6 limit rate 10/minute log prefix "isopod-egress-drop "'
-  iso_render_nft() { # iso_render_nft <0|1 logging>
-    awk -v gw="$iso_gw" -v rules="$iso_ns_rules" -v allow="$iso_allow_rules" \
+  iso_render_nft() { # iso_render_nft <0|1 logging> <0|1 allow>
+    awk -v gw="$iso_gw" -v rules="$iso_ns_rules" \
+      -v allow="$([ "$2" = 1 ] && printf '%s' "$iso_allow_rules")" \
       -v logging="$1" -v log4="$iso_log4" -v log6="$iso_log6" '
       /^@RESOLVERS@$/ { if (rules != "") print rules; next }
       /^@ALLOW@$/     { if (allow != "") print allow; next }
@@ -342,15 +343,34 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
     ' /etc/isopod/egress-guest.nft >/run/isopod-egress.nft
   }
 
-  # Load with drop logging, and fall back to the same ruleset without it if this
-  # kernel cannot log (nf_log_syslog missing). Logging is a diagnostic, so it must
-  # never be the reason a box fails closed and comes up with no sshd. A second
-  # failure is a real one and is reported.
-  iso_render_nft 1 || iso_egress_fail "could not render the ruleset"
-  if ! nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
-    iso_render_nft 0 || iso_egress_fail "could not render the ruleset"
-    nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err ||
-      iso_egress_fail "nft rejected the ruleset: $(cat /run/isopod-egress.err 2>/dev/null)"
+  # Try, in order of preference:
+  #   1. logging on,  exemptions in   — the normal case
+  #   2. logging off, exemptions in   — this kernel cannot log (nf_log_syslog)
+  #   3. logging off, exemptions out  — a bad lan-allow entry; drop it, keep the box
+  # The base ruleset (gateway + resolvers + private-range drops) is known good, so
+  # only the two optional layers can make nft reject it. Neither must be able to
+  # brick the box: logging is a diagnostic, and a bad exemption should cost the
+  # user that one address, not leave them with a box that never starts sshd (the
+  # host validates specs, so reaching case 3 means a hand-edited meta or a gap).
+  iso_egress_dropped_allow=0
+  iso_egress_nolog=0
+  iso_load_ok=0
+  if iso_render_nft 1 1 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_load_ok=1
+  elif iso_render_nft 0 1 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_load_ok=1 iso_egress_nolog=1
+  elif iso_render_nft 0 0 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_load_ok=1 iso_egress_nolog=1 iso_egress_dropped_allow=1
+  fi
+  [ "$iso_load_ok" = 1 ] ||
+    iso_egress_fail "nft rejected the ruleset: $(cat /run/isopod-egress.err 2>/dev/null)"
+  if [ "$iso_egress_dropped_allow" = 1 ]; then
+    echo "isopod: guest egress: nft rejected the lan-allow exemptions, so the box started" >&2
+    echo "isopod:   WITHOUT them: ${ISOPOD_GUEST_EGRESS_ALLOW:-}" >&2
+    echo "isopod:   Fix the address and re-add it: isopod egress lan-allow <box> ..." >&2
+    iso_allow_rules=""
+  fi
+  if [ "$iso_egress_nolog" = 1 ]; then
     echo "isopod: guest egress: this kernel cannot log dropped packets, so" >&2
     echo "isopod:   'isopod egress lan-denied' will show nothing. Filtering is unaffected." >&2
   fi

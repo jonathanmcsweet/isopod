@@ -469,8 +469,13 @@ cmd_create() {
 
   # Open the --host-port forwards now that sshd is up and authenticated. After the
   # rollback is disarmed on purpose: a forward that cannot open (a port already
-  # taken in the box) is worth a warning, not the loss of a working box.
-  [ -n "$BOX_HOST_PORTS" ] && host_port_sync "$name"
+  # taken in the box) is worth a warning, not the loss of a working box. The `if`
+  # plus `|| true` matters — a bare `[ ... ] && host_port_sync` would let `set -e`
+  # abort create when the tunnel fails, since the function is the command after
+  # the final `&&`; the box would be up but create would exit before its banner.
+  if [ -n "$BOX_HOST_PORTS" ]; then
+    host_port_sync "$name" || true
+  fi
 
   info "Applying window color $hex (this box only)..."
   apply_color "$name" "$hex" || warn "could not apply window color (the sandbox is fine without it)"

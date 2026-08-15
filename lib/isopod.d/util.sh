@@ -19,6 +19,60 @@ die() {
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Strict IPv6 literal check (no zone id, no prefix). Returns 0 for a valid
+# address only. This matters because the address becomes an nft rule: nft rejects
+# a malformed literal and rejects the ENTIRE ruleset with it, so a value that a
+# loose "hex and colons" check waves through does not fail on its own — it takes
+# the whole guest firewall down and, in the box, leaves it with no sshd. The
+# entrypoint's awk and the in-box helper mirror this logic; keep the three in step.
+valid_ip6() { # valid_ip6 <addr>
+  local a="$1" left right dc=0 side rest g n=0
+  case "$a" in
+    "" | *[!0-9A-Fa-f:]* | *:::*) return 1 ;;
+  esac
+  left="$a" right=""
+  # Split on the single permitted "::". A second one is invalid.
+  case "$a" in
+    *::*)
+      dc=1
+      left="${a%%::*}"
+      right="${a#*::}"
+      case "$right" in *::*) return 1 ;; esac
+      ;;
+  esac
+  for side in "$left" "$right"; do
+    [ -z "$side" ] && continue
+    # A leading/trailing colon here would be a stray single colon (the "::" was
+    # already removed), which is malformed.
+    case "$side" in :* | *:) return 1 ;; esac
+    rest="$side"
+    while :; do
+      case "$rest" in
+        *:*)
+          g="${rest%%:*}"
+          rest="${rest#*:}"
+          ;;
+        *)
+          g="$rest"
+          rest=""
+          ;;
+      esac
+      case "$g" in "" | *[!0-9A-Fa-f]*) return 1 ;; esac
+      [ "${#g}" -le 4 ] || return 1
+      n=$((n + 1))
+      [ -z "$rest" ] && break
+    done
+  done
+  # "::" stands in for one or more all-zero groups, so the explicit groups must
+  # leave room (<=7); without it, exactly 8 groups are required.
+  if [ "$dc" = 1 ]; then
+    [ "$n" -le 7 ] || return 1
+  else
+    [ "$n" -eq 8 ] || return 1
+  fi
+  return 0
+}
+
 # Strip terminal control characters from text that came OUT of a box, before the
 # host prints it. A box is assumed compromised, so anything it emits — a git
 # identity, a repo path, a branch name — can carry escape sequences that rewrite

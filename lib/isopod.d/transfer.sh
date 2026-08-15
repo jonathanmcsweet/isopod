@@ -192,12 +192,12 @@ $(printf '%s\n' "$(sanitize "$repolist")" | sed 's/^/    /')"
     [ "$out" = "." ] && out="./isopod-$name.bundle"
     [ -d "$out" ] && out="${out%/}/isopod-$name.bundle"
     [ -e "$out" ] && die "destination already exists: $out (remove it or pick another path)"
-    info "Bundling $repo inside the box..."
+    info "Bundling $(sanitize "$repo") inside the box..."
     # HEAD is included so `git clone <bundle>` checks out the box's current
     # branch instead of failing to resolve a remote HEAD.
     box_ssh "$name" -- git -C "$repo" bundle create - HEAD --branches --tags >"$out" || {
       rm -f "$out"
-      die "git bundle failed in the box (does $repo have any commits?)"
+      die "git bundle failed in the box (does $(sanitize "$repo") have any commits?)"
     }
     info "'$target' is not a git repo — wrote a bundle instead: $out"
     printf '\nUse it from any clone:\n  git -C /path/to/clone fetch %s "refs/heads/*:refs/remotes/%s/*"\nor create a fresh repo from it:\n  git clone %s my-%s\n' "$out" "$name" "$out" "$name"
@@ -455,7 +455,7 @@ cmd_remap() {
       printf '%s <%s> <%s>\n' "$new_name" "$new_email" "$old_email" >"$mm"
     fi
 
-    info "Rewriting commits by <$old_email>${old_name:+ / \"$old_name\"} on:"
+    info "Rewriting commits by <$(sanitize "$old_email")>${old_name:+ / \"$(sanitize "$old_name")\"} on:"
     printf '    %s\n' "${boxrefs[@]}"
     info "            to: \"$new_name\" <$new_email>  (in $top)"
   fi
@@ -513,7 +513,12 @@ cmd_remap() {
   [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
 
   info "Done. Rewritten box branches:"
+  # authorname/authoremail come from box-authored commits, so strip control
+  # characters on the way out — the same filter the branch list at the top of
+  # cmd_fetch uses. A ref whose identity did not match the rewrite still prints
+  # here, carrying whatever escape sequences the box put in the commit.
   git -C "$top" for-each-ref \
-    --format='    %(refname:short)  %(authorname) <%(authoremail:trim)>' "${boxrefs[@]}"
+    --format='    %(refname:short)  %(authorname) <%(authoremail:trim)>' "${boxrefs[@]}" |
+    LC_ALL=C tr -d '\000-\010\013-\037\177'
   printf '\nCheck the result, then drop the backups when happy:\n  git -C %s for-each-ref refs/remap-backup/\n  git -C %s update-ref -d <each backup ref>\n' "$top" "$top"
 }

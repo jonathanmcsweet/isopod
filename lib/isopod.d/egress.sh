@@ -949,11 +949,10 @@ lan_allow_valid() { # lan_allow_valid <spec>
     case "$pfx" in *[!0-9]*) return 1 ;; esac
     [ "${#pfx}" -le 3 ] && [ "$pfx" -le 32 ] || return 1
   else
-    case "$base" in
-      *[!0-9a-fA-F:]*) return 1 ;;
-      *:*) ;;
-      *) return 1 ;;
-    esac
+    # Strict literal check — a loose "hex and colons" test lets a malformed
+    # address (too many groups, a 5-digit group) through, and nft then rejects
+    # the whole ruleset, failing the box closed with no sshd.
+    valid_ip6 "$base" || return 1
     [ -z "$pfx" ] && return 0
     case "$pfx" in *[!0-9]*) return 1 ;; esac
     [ "${#pfx}" -le 3 ] && [ "$pfx" -le 128 ] || return 1
@@ -1111,6 +1110,10 @@ egress_lan_allow() { # egress_lan_allow <name> [--rm] [spec]
     if [ "$stale" = 1 ]; then
       warn "this box predates lan-allow — its ruleset cannot use the list.
      Run: isopod upgrade $name"
+    elif [ "$(box_status "$name" 2>/dev/null || true)" != running ]; then
+      # lan_allow_apply_live returns non-zero for a stopped box too, so tell a
+      # stopped box to start rather than to restart something already down.
+      warn "stored; it takes effect when the box starts: isopod start $name"
     else
       warn "could not update the running box — restart it to apply: isopod stop $name && isopod start $name"
     fi
@@ -1327,30 +1330,40 @@ egress_allowlist_show() {
 # otherwise. Names the in-guest layer too, so "blocked" is never ambiguous about
 # which mechanism is doing it.
 box_egress_posture() { # box_egress_posture <name>
-  local mode degraded guest
+  local mode degraded guest guest_on=0
   mode="$(meta_get "$1" egress 2>/dev/null || true)"
   degraded="$(meta_get "$1" egress_degraded 2>/dev/null || printf 0)"
   guest="$(meta_get "$1" guest_egress 2>/dev/null || true)"
+  # The guest ruleset is loaded by the entrypoint ONLY on a Tier 3 microVM box —
+  # build_run_args gates it on is_microvm_runtime. A plain container and a gVisor
+  # (Tier 2) box both keep guest_egress=on in meta (create records it regardless
+  # of runtime) but never get the ruleset, so the meta flag alone would claim
+  # isolation the box does not have. Gate on the box's RECORDED runtime tier —
+  # authoritative for what this box actually got, and independent of whatever
+  # runtime happens to be active when `isopod info` runs.
+  [ "$guest" = on ] &&
+    [ "$(runtime_tier "$(meta_get "$1" runtime 2>/dev/null || true)" 2>/dev/null)" = 3 ] &&
+    guest_on=1
   # The in-guest layer is reported alongside the host verdict, never instead of it.
   # Reporting only the host side hid an active in-box ruleset behind the 'OPEN'
   # message, so a box whose DNS and outbound traffic were being filtered read as
   # having no isolation at all — which is exactly backwards when something in the
   # box stops working and the ruleset is the first thing worth suspecting.
   local guest_note=''
-  [ "$guest" = on ] &&
+  [ "$guest_on" = 1 ] &&
     guest_note=' + guest lan-deny (in-box nft; defence in depth, not a hard boundary)'
   # Exemptions belong next to the verdict that would otherwise imply the box can
   # reach nothing in private space. Named here so `isopod info` shows what was
   # opened without the user having to remember or go looking.
   local allow allow_note=''
   allow="$(meta_get "$1" guest_egress_allow 2>/dev/null || true)"
-  [ "$guest" = on ] && [ -n "$allow" ] && allow_note=", except $allow"
+  [ "$guest_on" = 1 ] && [ -n "$allow" ] && allow_note=", except $allow"
   guest_note="$guest_note$allow_note"
   if [ "$degraded" = 1 ]; then
     printf 'OPEN — host enforcement was requested but could not be applied (see: isopod doctor)%s' "$guest_note"
   elif [ -n "$mode" ]; then
     printf '%s (host-enforced)%s' "$mode" "$guest_note"
-  elif [ "$guest" = on ]; then
+  elif [ "$guest_on" = 1 ]; then
     printf 'guest lan-deny (in-box nft; defence in depth, not a hard boundary)%s' "$allow_note"
   else
     printf 'OPEN — no egress isolation'

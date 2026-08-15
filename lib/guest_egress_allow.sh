@@ -60,12 +60,30 @@ cmd_sync() {
   # Validate everything BEFORE changing the ruleset, so a bad line cannot leave
   # the box with its exemptions half-applied. Here-docs keep these loops in the
   # current shell, so a rejection exits the script rather than a subshell.
+  #
+  # The shape check is the first gate: it fixes what an accepted line may contain
+  # (an accept verdict, our tag, one address, one optional port). But its address
+  # pattern cannot tell a valid IPv6 literal from a malformed one, and nft rejects
+  # the malformed one — so a line that passes here could still fail `nft insert`,
+  # and drop_tagged has by then already removed the working exemptions. So follow
+  # it with a real parse of the whole set: build a throwaway table holding exactly
+  # these rules and run it through `nft -c`. If the parser rejects any of them,
+  # nothing has touched the live chain yet, and the existing rules stay put.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     valid_rule "$line" || die "refusing to apply an unrecognised rule: $line"
   done <<EOF
 $rules
 EOF
+  if [ -n "$rules" ]; then
+    # A distinct table name and a plain (unhooked) chain, so the check neither
+    # collides with the live isopod_egress table nor needs a hook declaration —
+    # it is only parsing the rule expressions.
+    printf 'table %s isopod_egress_check { chain c {\n%s\n} }\n' "$FAM" "$rules" |
+      nft -c -f - 2>/tmp/isopod-lan-allow.err ||
+      die "nft rejected an exemption; the box's existing rules are unchanged:
+$(cat /tmp/isopod-lan-allow.err 2>/dev/null)"
+  fi
   drop_tagged
   while IFS= read -r line; do
     [ -n "$line" ] || continue
