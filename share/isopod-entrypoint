@@ -346,12 +346,16 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
   # Try, in order of preference:
   #   1. logging on,  exemptions in   — the normal case
   #   2. logging off, exemptions in   — this kernel cannot log (nf_log_syslog)
-  #   3. logging off, exemptions out  — a bad lan-allow entry; drop it, keep the box
+  #   3. logging on,  exemptions out  — a bad lan-allow entry; logging still works
+  #   4. logging off, exemptions out  — both layers failed
   # The base ruleset (gateway + resolvers + private-range drops) is known good, so
   # only the two optional layers can make nft reject it. Neither must be able to
   # brick the box: logging is a diagnostic, and a bad exemption should cost the
   # user that one address, not leave them with a box that never starts sshd (the
-  # host validates specs, so reaching case 3 means a hand-edited meta or a gap).
+  # host validates specs, so a bad entry means a hand-edited meta or a gap).
+  # Rung 3 matters for the diagnosis too: without it, a bad exemption on a
+  # log-capable kernel would land on the last rung and be reported as "this
+  # kernel cannot log" — the wrong cause, and a needless loss of lan-denied.
   iso_egress_dropped_allow=0
   iso_egress_nolog=0
   iso_load_ok=0
@@ -359,6 +363,8 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
     iso_load_ok=1
   elif iso_render_nft 0 1 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
     iso_load_ok=1 iso_egress_nolog=1
+  elif iso_render_nft 1 0 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_load_ok=1 iso_egress_dropped_allow=1
   elif iso_render_nft 0 0 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
     iso_load_ok=1 iso_egress_nolog=1 iso_egress_dropped_allow=1
   fi

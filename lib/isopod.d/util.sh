@@ -19,12 +19,17 @@ die() {
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Strict IPv6 literal check (no zone id, no prefix). Returns 0 for a valid
-# address only. This matters because the address becomes an nft rule: nft rejects
-# a malformed literal and rejects the ENTIRE ruleset with it, so a value that a
-# loose "hex and colons" check waves through does not fail on its own — it takes
-# the whole guest firewall down and, in the box, leaves it with no sshd. The
-# entrypoint's awk and the in-box helper mirror this logic; keep the three in step.
+# Strict IPv6 literal check (no zone id, no prefix; embedded-IPv4 forms like
+# ::ffff:1.2.3.4 are deliberately rejected — use the IPv4 spec instead). Returns
+# 0 for a valid address only. This matters because the address becomes an nft
+# rule: nft rejects a malformed literal and rejects the ENTIRE ruleset with it,
+# so a value that a loose "hex and colons" check waves through does not fail on
+# its own — it takes the whole guest firewall down and, in the box, leaves it
+# with no sshd. This host-side check is the gate; the box does not re-derive it.
+# The entrypoint keeps a looser shape check and DEGRADES if nft still rejects
+# the result (drops the exemptions, boots anyway), and the in-box helper runs
+# the rendered rules through `nft -c` before touching the live chain — the real
+# parser, stronger than any regex.
 valid_ip6() { # valid_ip6 <addr>
   local a="$1" left right dc=0 side rest g n=0
   case "$a" in

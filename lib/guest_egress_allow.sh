@@ -78,11 +78,13 @@ EOF
   if [ -n "$rules" ]; then
     # A distinct table name and a plain (unhooked) chain, so the check neither
     # collides with the live isopod_egress table nor needs a hook declaration —
-    # it is only parsing the rule expressions.
+    # it is only parsing the rule expressions. The error file lives under /run
+    # (root-owned), not /tmp, where the box user could pre-place a symlink at
+    # the predictable name for root to write through.
     printf 'table %s isopod_egress_check { chain c {\n%s\n} }\n' "$FAM" "$rules" |
-      nft -c -f - 2>/tmp/isopod-lan-allow.err ||
+      nft -c -f - 2>/run/isopod-lan-allow.err ||
       die "nft rejected an exemption; the box's existing rules are unchanged:
-$(cat /tmp/isopod-lan-allow.err 2>/dev/null)"
+$(cat /run/isopod-lan-allow.err 2>/dev/null)"
   fi
   drop_tagged
   while IFS= read -r line; do
