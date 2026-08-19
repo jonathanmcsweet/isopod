@@ -280,9 +280,21 @@ ok "guest ruleset is balanced and still drops with no resolvers, no lan-allow, n
 # drops, and the uid placeholder must be consumed.
 acct_tmpl="$ROOT/share/egress-account.nft"
 [ -f "$acct_tmpl" ] || fail "missing account ruleset template: $acct_tmpl"
-acct="$(sed 's/@ACCOUNT_UID@/4242/g' "$acct_tmpl")"
-printf '%s\n' "$acct" | grep -q '@ACCOUNT_UID@' &&
-  fail "account ruleset still contains @ACCOUNT_UID@ after rendering"
+# Render the empty-sets case the way account_render_rules does: uid substituted,
+# the lan-allow placeholders dropped to nothing (valid empty sets).
+acct="$(awk -v uid=4242 '
+  /^@LAN_ALLOW4@$/ { next }
+  /^@LAN_ALLOW6@$/ { next }
+  { gsub(/@ACCOUNT_UID@/, uid); print }' "$acct_tmpl")"
+printf '%s\n' "$acct" | grep -qE '@ACCOUNT_UID@|@LAN_ALLOW[46]@' &&
+  fail "account ruleset still contains a placeholder after rendering"
+# And the populated case: elements injected into both sets must still parse.
+acct_full="$(awk -v uid=4242 -v l4='    elements = { 10.20.30.40, 10.30.0.0/16 }' -v l6='    elements = { fd00::1 }' '
+  /^@LAN_ALLOW4@$/ { print l4; next }
+  /^@LAN_ALLOW6@$/ { print l6; next }
+  { gsub(/@ACCOUNT_UID@/, uid); print }' "$acct_tmpl")"
+printf '%s\n' "$acct_full" | grep -q 'elements = { 10.20.30.40' ||
+  fail "account ruleset did not inject the lan-allow elements"
 a_scope="$(printf '%s\n' "$acct" | grep -n 'meta skuid != 4242 accept' | head -1 | cut -d: -f1)"
 a_first="$(printf '%s\n' "$acct" | grep -nE '^\s+(oif|ct|udp|tcp|ip6? daddr|meta)' | head -1 | cut -d: -f1)"
 [ -n "$a_scope" ] || fail "account ruleset lost its uid-scoping rule"
@@ -297,7 +309,8 @@ printf '%s\n' "$acct" | grep -q 'ip daddr @lan_allow4 accept' ||
 ok "account ruleset renders (uid scoped first, DNS before drops, lan_allow sets present)"
 
 if command -v nft >/dev/null 2>&1; then
-  nft_check "account" "$acct"
+  nft_check "account (empty sets)" "$acct"
+  nft_check "account (with lan-allow elements)" "$acct_full"
   nft_check "lan-deny" "$lan_deny"
   nft_check "allow-list" "$allow_list"
   nft_check "guest (resolvers + lan-allow + logging)" "$guest"

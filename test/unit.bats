@@ -3462,3 +3462,44 @@ ip daddr 1.2.3.4 accept'
   run meta_get demo color
   assert_output 'blue'
 }
+
+# ---- sandbox account (stage 4: dual-kernel lan-allow) ------------------------
+
+@test "account_render_rules injects lan-allow elements into both sets" {
+  run account_render_rules 4242 "10.20.30.40, 10.30.0.0/16" "fd00::1"
+  assert_success
+  assert_output --partial 'elements = { 10.20.30.40, 10.30.0.0/16 }'
+  assert_output --partial 'elements = { fd00::1 }'
+  refute_output --partial '@LAN_ALLOW'
+}
+
+@test "account_render_rules with no elements leaves valid empty sets" {
+  run account_render_rules 4242
+  assert_success
+  # The private ranges always carry elements; only the lan_allow sets are empty.
+  # Two 'elements =' lines (private4, private6), none from lan_allow.
+  [ "$(printf '%s\n' "$output" | grep -c 'elements =')" = 2 ]
+  refute_output --partial '@LAN_ALLOW'
+}
+
+# The host sets are the UNION across all account boxes, address-only (ports live
+# in the guest layer), deduped, split by family.
+@test "account_host_allow_elements unions account boxes and strips ports" {
+  mk_meta a 'account=1' 'guest_egress_allow=10.20.30.40:5432,10.30.0.0/16'
+  mk_meta b 'account=1' 'guest_egress_allow=10.20.30.40,[fd00::1]:443,fd00::/8'
+  mk_meta plain 'guest_egress_allow=10.99.99.99'
+  run account_host_allow_elements
+  assert_success
+  # 10.20.30.40 appears in both a (port-stripped) and b — deduped to one.
+  assert_line '4 10.20.30.40,10.30.0.0/16'
+  assert_line '6 fd00::1,fd00::/8'
+  # A non-account box's exemption must NOT leak into the host union.
+  refute_output --partial '10.99.99.99'
+}
+
+@test "account_host_allow_elements is empty when no account box has exemptions" {
+  mk_meta a 'account=1'
+  run account_host_allow_elements
+  assert_line '4 '
+  assert_line '6 '
+}

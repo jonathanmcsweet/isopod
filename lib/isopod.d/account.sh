@@ -39,13 +39,89 @@ account_next_subid_start() {
 
 account_rules_loaded() { nft list table inet isopod_account >/dev/null 2>&1; }
 
-# Substitute the uid into the shipped ruleset. Refuses a non-numeric uid rather
-# than substituting it: this text is about to become firewall rules.
-account_render_rules() { # account_render_rules <uid>
+# Substitute the uid and the lan-allow set elements into the shipped ruleset.
+# Refuses a non-numeric uid rather than substituting it: this text is about to
+# become firewall rules. Args 2 and 3 are comma-separated element lists for the
+# IPv4 and IPv6 lan_allow sets (empty for a fresh setup); the elements themselves
+# were validated by lan_allow_valid before ever being stored.
+account_render_rules() { # account_render_rules <uid> [v4-elements] [v6-elements]
   case "${1:-}" in "" | *[!0-9]*) return 1 ;; esac
   local src="$ISOPOD_SHARE/egress-account.nft"
   [ -f "$src" ] || die "missing ruleset: $src (is your isopod install complete?)"
-  sed "s/@ACCOUNT_UID@/$1/g" "$src"
+  local e4="${2:-}" e6="${3:-}" l4="" l6=""
+  [ -n "$e4" ] && l4="    elements = { $e4 }"
+  [ -n "$e6" ] && l6="    elements = { $e6 }"
+  # Placeholders sit alone on their own lines; awk replaces them (or drops them
+  # to nothing), so an empty set stays a valid empty set.
+  awk -v uid="$1" -v l4="$l4" -v l6="$l6" '
+    /^@LAN_ALLOW4@$/ { if (l4 != "") print l4; next }
+    /^@LAN_ALLOW6@$/ { if (l6 != "") print l6; next }
+    { gsub(/@ACCOUNT_UID@/, uid); print }
+  ' "$src"
+}
+
+# The host lan_allow sets are the UNION of every account box's exemptions —
+# per-box granularity is a guest-layer concern (documented). Host elements are
+# address-wide: a port-scoped spec contributes its bare address here, and the
+# guest layer still enforces the port. Echoes two lines: "4 <csv>" and "6 <csv>".
+account_host_allow_elements() {
+  local d n spec addr fam
+  local -a v4=() v6=()
+  for d in "$BOXES_DIR"/*/; do
+    [ -d "$d" ] || continue
+    n="$(basename "$d")"
+    [ "$(meta_get "$n" account 2>/dev/null || true)" = 1 ] || continue
+    local csv
+    csv="$(meta_get "$n" guest_egress_allow 2>/dev/null || true)"
+    [ -n "$csv" ] || continue
+    local IFS=,
+    for spec in $csv; do
+      [ -n "$spec" ] || continue
+      # Strip the optional port to leave the bare address/CIDR.
+      case "$spec" in
+        "["*) # [v6]:port  ->  v6
+          addr="${spec#"["}"
+          addr="${addr%%]*}"
+          fam=6
+          ;;
+        *:*:*) # bare v6 (two+ colons, no port)
+          addr="$spec"
+          fam=6
+          ;;
+        *:*) # v4:port
+          addr="${spec%:*}"
+          fam=4
+          ;;
+        *)
+          addr="$spec"
+          fam=4
+          ;;
+      esac
+      if [ "$fam" = 6 ]; then v6+=("$addr"); else v4+=("$addr"); fi
+    done
+  done
+  # Dedup while preserving order (a set cannot hold the same element twice).
+  printf '4 %s\n' "$(printf '%s\n' ${v4+"${v4[@]}"} | awk '!s[$0]++' | paste -sd, -)"
+  printf '6 %s\n' "$(printf '%s\n' ${v6+"${v6[@]}"} | awk '!s[$0]++' | paste -sd, -)"
+}
+
+# Re-render and reload the host account ruleset with the current union of
+# exemptions, and persist it so a reboot keeps them. Needs root for nft and the
+# state file, so it runs the write+reload through one sudo invocation — the
+# occasional cost of an exemption on an account box, called out in the help.
+# Returns non-zero (without prompting twice) if the caller has no sudo path.
+account_sync_host_lan_allow() {
+  local uid e4 e6
+  uid="$(account_uid)" || return 1
+  e4="$(account_host_allow_elements | awk '$1=="4"{sub(/^4 ?/,"");print}')"
+  e6="$(account_host_allow_elements | awk '$1=="6"{sub(/^6 ?/,"");print}')"
+  local ruleset
+  ruleset="$(account_render_rules "$uid" "$e4" "$e6")" || return 1
+  # One privileged step: write the persisted copy and load it. tee + nft under a
+  # single sudo so the user is prompted at most once.
+  printf '%s\n' "$ruleset" |
+    sudo sh -c "cat >'$ISOPOD_ACCOUNT_STATE_DIR/egress-account.nft' &&
+      nft -f '$ISOPOD_ACCOUNT_STATE_DIR/egress-account.nft'" || return 1
 }
 
 account_require_root() {
@@ -108,7 +184,12 @@ cmd_account_setup() {
   # 4. The firewall rules, applied now and persisted for boot. The rendered copy
   # lives under ISOPOD_ACCOUNT_STATE_DIR so the boot unit has a stable path.
   mkdir -p "$ISOPOD_ACCOUNT_STATE_DIR"
-  account_render_rules "$uid" >"$ISOPOD_ACCOUNT_STATE_DIR/egress-account.nft" ||
+  # Re-running setup must preserve any exemptions already added to account boxes,
+  # so render with the current union rather than empty sets.
+  local se4 se6
+  se4="$(account_host_allow_elements | awk '$1=="4"{sub(/^4 ?/,"");print}')"
+  se6="$(account_host_allow_elements | awk '$1=="6"{sub(/^6 ?/,"");print}')"
+  account_render_rules "$uid" "$se4" "$se6" >"$ISOPOD_ACCOUNT_STATE_DIR/egress-account.nft" ||
     die "could not render the account ruleset"
   # Idempotent reload: replace the table rather than appending duplicate rules.
   nft delete table inet isopod_account 2>/dev/null || true

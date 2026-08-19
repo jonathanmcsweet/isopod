@@ -1089,6 +1089,22 @@ egress_lan_allow() { # egress_lan_allow <name> [--rm] [spec]
   fi
 
   meta_set "$name" guest_egress_allow "$new"
+
+  # An account box has a SECOND boundary — the host firewall keyed on the sandbox
+  # account — that would drop this address regardless of the guest ruleset. The
+  # exemption has to be opened there too, or the guest layer would allow what the
+  # host layer still drops. That half needs root, so it is a separate step with
+  # its own (single) sudo prompt. The port, if any, lives only in the guest layer.
+  if [ "$(meta_get "$name" account 2>/dev/null || true)" = 1 ]; then
+    if account_sync_host_lan_allow; then
+      info "host boundary updated for the sandbox account"
+    else
+      warn "could not update the host account firewall (needs sudo). The guest rule
+     is set, but the host boundary will still drop $spec. Re-apply with:
+       sudo isopod account setup"
+    fi
+  fi
+
   if ! lan_allow_applies "$name"; then
     info "stored. Guest egress is off for this box, so nothing is being filtered."
     return 0

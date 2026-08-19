@@ -28,7 +28,10 @@ The engine stays rootless; root is used once, to load a static rule.
 Boxes created with --account share the account's image store: one base image
 plus a thin layer per box. Existing boxes are unaffected until migrated.
 
-Trade-offs: every account box shares one firewall identity (per-box rules are
-a guest-layer concern); `egress lan-allow` on an account box needs sudo for
-the host half; Linux + podman only. Override the account name with
-ISOPOD_ACCOUNT (default: sandbox).
+Trade-offs: every account box shares one firewall identity, so `egress lan-allow`
+exemptions on account boxes form a UNION in the host rules (per-box granularity
+stays in the guest layer, which still enforces any port you scoped). Opening an
+exemption updates two kernels — the guest ruleset and the host account set — and
+the host half needs sudo, so `egress lan-allow` on an account box prompts once.
+Linux + podman only. Override the account name with ISOPOD_ACCOUNT (default:
+sandbox).

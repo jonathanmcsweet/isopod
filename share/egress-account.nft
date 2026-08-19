@@ -55,11 +55,13 @@ table inet isopod_account {
   set lan_allow4 {
     type ipv4_addr
     flags interval
+@LAN_ALLOW4@
   }
 
   set lan_allow6 {
     type ipv6_addr
     flags interval
+@LAN_ALLOW6@
   }
 
   chain output {
