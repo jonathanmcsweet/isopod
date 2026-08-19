@@ -68,6 +68,7 @@ _isopod() {
             '--guest-egress[in-box network isolation: on|off (default on)]:mode:(on off)' \
             '*--lan-allow[let the box reach one private address]:addr:' \
             '*--host-port[reach a host service from the box: PORT or BOXPORT:HOSTPORT]:spec:' \
+            '--account[run the box under the sandbox account (hard egress boundary)]' \
             '--container[run as a plain container instead of the default microVM]' \
             '--dev[add the dev/test toolchain (nested engines, lint/test tools)]' \
             '--disk[box-local data volume, SIZE or SIZE\:MOUNTPOINT (microVM boxes only)]:disk:' \

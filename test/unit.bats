@@ -3330,3 +3330,68 @@ ip daddr 1.2.3.4 accept'
   assert_failure
   assert_output --partial "unknown account action"
 }
+
+# ---- sandbox account (stage 2: engine routing + create --account) -----------
+
+# The wrapper must be transparent for a normal box: identical to calling the
+# engine directly. This is the property that keeps every existing box unaffected.
+@test "engine() runs the engine directly when not an account box" {
+  make_stub podman 0 "DIRECT"
+  ENGINE=podman ISOPOD_ENGINE_AS_ACCOUNT=0
+  run engine info
+  assert_success
+  assert_output "DIRECT"
+}
+
+@test "engine_ctx_for_box sets routing from meta" {
+  mk_meta acctbox 'account=1'
+  mk_meta plainbox 'guest_egress=on'
+  ISOPOD_ENGINE_AS_ACCOUNT=0
+  engine_ctx_for_box acctbox
+  [ "$ISOPOD_ENGINE_AS_ACCOUNT" = 1 ]
+  engine_ctx_for_box plainbox
+  [ "$ISOPOD_ENGINE_AS_ACCOUNT" = 0 ]
+}
+
+# Routing on but the account absent must fail with the fix, not a raw sudo error.
+@test "engine() dies with a clear message when the account is missing" {
+  make_stub podman 0 ""
+  ENGINE=podman ISOPOD_ENGINE_AS_ACCOUNT=1
+  ISOPOD_ACCOUNT="isopod-test-noexist-$$"
+  run engine info
+  assert_failure
+  assert_output --partial "sudo isopod account setup"
+}
+
+@test "account_create_preflight requires podman" {
+  account_exists() { return 0; }
+  run account_create_preflight docker
+  assert_failure
+  assert_output --partial "requires podman"
+}
+
+@test "account_create_preflight fails when the account is not set up" {
+  account_exists() { return 1; }
+  run account_create_preflight podman
+  assert_failure
+  assert_output --partial "sudo isopod account setup"
+}
+
+@test "box_egress_posture leads with the account boundary for an account box" {
+  mk_meta demo 'account=1' 'guest_egress=on' 'runtime=krun'
+  run box_egress_posture demo
+  assert_output --partial "account lan-deny"
+  assert_output --partial "survives guest root"
+}
+
+# The lock the user asked for: teardown must refuse while a box uses the account.
+@test "account teardown refuses while an account box exists" {
+  [ "$(id -u)" = 0 ] && skip "running as root"
+  # It checks root first; prove the guard by faking root-check away.
+  account_require_root() { :; }
+  mk_meta liveone 'account=1'
+  run cmd_account_teardown
+  assert_failure
+  assert_output --partial "liveone"
+  assert_output --partial "before teardown"
+}

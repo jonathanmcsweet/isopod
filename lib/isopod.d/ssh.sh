@@ -76,7 +76,7 @@ meta_set_port() { # meta_set_port <name> <port>
 
 resolve_port() { # resolve_port <name> -> echoes current host port for the box sshd
   local out
-  out=$("$ENGINE" port "$(ctr_name "$1")" "$BOX_SSHD_PORT/tcp" 2>/dev/null | head -1) || return 1
+  out=$(engine port "$(ctr_name "$1")" "$BOX_SSHD_PORT/tcp" 2>/dev/null | head -1) || return 1
   printf '%s' "${out##*:}"
 }
 

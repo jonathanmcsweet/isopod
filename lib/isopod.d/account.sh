@@ -198,21 +198,58 @@ cmd_account_status() {
     printf '  [MISSING] boot persistence (%s)\n' "$ISOPOD_ACCOUNT_NFT_UNIT"
     ok=0
   fi
+  # Boxes bound to the account, and the dangerous case: a box still runs under it
+  # while the rules are gone — the box is up but its boundary silently isn't.
+  local d n boxes=0
+  for d in "$BOXES_DIR"/*/; do
+    [ -d "$d" ] || continue
+    n="$(basename "$d")"
+    [ "$(meta_get "$n" account 2>/dev/null || true)" = 1 ] && boxes=$((boxes + 1))
+  done
+  if [ "$boxes" -gt 0 ]; then
+    printf '  [ok]      %d box(es) run under the account\n' "$boxes"
+    if [ "$ok" != 1 ]; then
+      warn "account boxes exist but the boundary above is incomplete — those boxes may be
+     running WITHOUT egress enforcement. Re-run: sudo isopod account setup"
+    fi
+  fi
   [ "$ok" = 1 ]
 }
 
 cmd_account_teardown() {
   account_require_root teardown
-  local purge=0
-  [ "${1:-}" = "--purge" ] && purge=1
-  # Future account boxes must block this; today the check is vacuous but cheap.
-  local d n
+  local purge=0 force=0 a
+  for a in "$@"; do
+    case "$a" in
+      --purge) purge=1 ;;
+      --force | -f) force=1 ;;
+      *) die "unknown option for account teardown: $a" ;;
+    esac
+  done
+  # The lock: refuse while any box still runs under the account. Removing the
+  # rules out from under a live account box would silently drop its egress
+  # boundary — the box keeps running, now unprotected. List them all rather than
+  # dying on the first, so the user can see the full set to deal with.
+  local d n found=0
   for d in "$BOXES_DIR"/*/; do
     [ -d "$d" ] || continue
     n="$(basename "$d")"
-    [ "$(meta_get "$n" account 2>/dev/null || true)" = 1 ] &&
-      die "box '$n' runs under the account — remove or migrate it first"
+    if [ "$(meta_get "$n" account 2>/dev/null || true)" = 1 ]; then
+      [ "$found" = 0 ] && printf 'These boxes run under the sandbox account:\n' >&2
+      printf '  %s\n' "$n" >&2
+      found=1
+    fi
   done
+  [ "$found" = 1 ] &&
+    die "remove or migrate them before teardown (isopod rm <box>), or they lose their egress boundary"
+  # Even with no boxes, teardown removes a host firewall boundary and a system
+  # account — confirm unless --force.
+  if [ "$force" != 1 ]; then
+    printf 'Tear down the sandbox account boundary%s? [y/N] ' "$([ "$purge" = 1 ] && printf ' and DELETE the account')" >&2
+    local ans
+    read -r ans
+    case "$ans" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
+  fi
   nft delete table inet isopod_account 2>/dev/null && printf '  removed firewall rules\n'
   systemctl disable "$ISOPOD_ACCOUNT_NFT_UNIT" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/$ISOPOD_ACCOUNT_NFT_UNIT" \
@@ -227,6 +264,22 @@ cmd_account_teardown() {
   elif account_exists; then
     printf '  account %s kept (it owns nothing; --purge removes it)\n' "$ISOPOD_ACCOUNT"
   fi
+}
+
+# Preconditions for `create --account`, all checkable without root. Dies with the
+# fix. Kept out of cmd_create so it is unit-testable on its own.
+account_create_preflight() { # account_create_preflight <engine>
+  is_macos && die "--account is Linux-only (the account needs subuids, linger, and nftables)"
+  [ "${1:-}" = podman ] ||
+    die "--account requires podman (the account is a rootless-podman design; got '${1:-none}')"
+  account_exists ||
+    die "the sandbox account is not set up — run: sudo isopod account setup"
+  [ -f /etc/sudoers.d/isopod-account ] ||
+    die "the sandbox account has no engine grant — run: sudo isopod account setup"
+  local uid
+  uid="$(account_uid)"
+  [ -n "$uid" ] && [ -d "/run/user/$uid" ] ||
+    die "the sandbox account has no runtime directory — run: sudo isopod account setup"
 }
 
 cmd_account() {

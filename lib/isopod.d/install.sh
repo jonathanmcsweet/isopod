@@ -29,7 +29,7 @@ valid_pkg_name() { # valid_pkg_name <name>
 # administrative key the host holds for it (see create / root_ssh) — the same
 # trust boundary, just the channel that works there.
 box_root_channel() { # box_root_channel <name> <ctr>
-  "$ENGINE" exec --user root "$2" true 2>/dev/null && {
+  engine exec --user root "$2" true 2>/dev/null && {
     printf engine
     return 0
   }
@@ -47,7 +47,7 @@ box_root_channel() { # box_root_channel <name> <ctr>
 # the SSH path where box_ssh's argv is re-split by the box's shell.
 box_root_sh() { # box_root_sh <name> <ctr> <channel> <script>   (stdin -> script)
   case "$3" in
-    engine) "$ENGINE" exec -i --user root "$2" sh -c "$4" ;;
+    engine) engine exec -i --user root "$2" sh -c "$4" ;;
     ssh) root_ssh "$1" -- "sh -c $(shq "$4")" ;;
     *) return 1 ;;
   esac
@@ -87,7 +87,7 @@ cmd_install() {
   open_box "$name" # asserts the box exists and selects its engine (sets ENGINE)
   local ctr status
   ctr="$(ctr_name "$name")"
-  status=$("$ENGINE" inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null || true)
+  status=$(engine inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null || true)
   [ "$status" = running ] ||
     die "box '$name' is not running (status: ${status:-missing}). Start it first: isopod start $name"
 

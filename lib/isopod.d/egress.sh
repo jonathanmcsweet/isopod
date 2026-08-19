@@ -1359,6 +1359,13 @@ box_egress_posture() { # box_egress_posture <name>
   allow="$(meta_get "$1" guest_egress_allow 2>/dev/null || true)"
   [ "$guest_on" = 1 ] && [ -n "$allow" ] && allow_note=", except $allow"
   guest_note="$guest_note$allow_note"
+  # The sandbox account is a HARD boundary: rules in the host kernel keyed on the
+  # account's uid, which guest root cannot remove. When a box runs under it, that
+  # is the headline posture — the in-guest layer, if any, sits beneath it.
+  if [ "$(meta_get "$1" account 2>/dev/null || true)" = 1 ]; then
+    printf 'account lan-deny (host-enforced on the sandbox account; survives guest root)%s' "$guest_note"
+    return
+  fi
   if [ "$degraded" = 1 ]; then
     printf 'OPEN — host enforcement was requested but could not be applied (see: isopod doctor)%s' "$guest_note"
   elif [ -n "$mode" ]; then

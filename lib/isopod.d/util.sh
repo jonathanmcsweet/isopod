@@ -197,12 +197,12 @@ on_exit() {
       # visible reason at all. Box-controlled text, so it is sanitized on the way
       # out; failures here are ignored because rollback must still happen.
       local ctrlog
-      ctrlog="$("$ENGINE" logs "$(ctr_name "$CREATE_ROLLBACK_NAME")" 2>&1 | tail -20)" || ctrlog=""
+      ctrlog="$(engine logs "$(ctr_name "$CREATE_ROLLBACK_NAME")" 2>&1 | tail -20)" || ctrlog=""
       if [ -n "$ctrlog" ]; then
         printf 'Last output from the box before rollback:\n' >&2
         printf '%s\n' "$(sanitize "$ctrlog")" | sed 's/^/    /' >&2
       fi
-      "$ENGINE" rm -f "$(ctr_name "$CREATE_ROLLBACK_NAME")" >/dev/null 2>&1 || true
+      engine rm -f "$(ctr_name "$CREATE_ROLLBACK_NAME")" >/dev/null 2>&1 || true
     fi
     rm -rf "$(box_dir "$CREATE_ROLLBACK_NAME")"
     write_ssh_include 2>/dev/null || true

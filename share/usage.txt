@@ -98,6 +98,11 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         brackets with a port, e.g. '[fd00::1]:5432'. Add or remove
                         them later with 'isopod egress lan-allow <box> [--rm]',
                         which applies to a running box right away.
+  --account             Run the box under the sandbox account, so the host
+                        firewall keyed on that account is its egress boundary —
+                        one that survives guest root, unlike --guest-egress.
+                        Needs a one-time 'sudo isopod account setup' first.
+                        Linux + podman only. See 'isopod account'.
   --host-port <spec>    Make a service on YOUR HOST reachable inside the box
                         (repeatable) — the opposite direction to --expose. A bare
                         'PORT' gives the box the host's 127.0.0.1:PORT at the same

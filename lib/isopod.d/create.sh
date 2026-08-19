@@ -8,7 +8,7 @@ cmd_create() {
   local name="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" sudo_opt=0 no_root_key=0 engine_opt="" dockerfile_opt="" image_opt=0
   local container_opt=0 dev_tools=0 harden_opt="" runtime_opt=""
-  local disk_opt="" nested=0 guest_egress_opt=""
+  local disk_opt="" nested=0 guest_egress_opt="" account_opt=0
   local -a lan_allow_opts=() host_port_opts=()
   local -a repos=() copies=() exposes=() secrets=()
 
@@ -119,6 +119,10 @@ cmd_create() {
         host_port_opts+=("$2")
         shift 2
         ;;
+      --account)
+        account_opt=1
+        shift
+        ;;
       -h | --help)
         usage
         exit 0
@@ -213,6 +217,20 @@ cmd_create() {
   fi
 
   detect_engine "$engine_opt"
+
+  # --account: run this box under the sandbox account so the host firewall keyed
+  # on that account's uid is its egress boundary — one that survives guest root.
+  # account_create_preflight validates the preconditions visible without root and
+  # dies with a clear fix if the account is not set up. Turning on engine routing
+  # HERE means the base-image build and the container run both go through the
+  # account and land in its store; account=1 in meta makes every later command
+  # (start/stop/rm/…) route the same way via open_box.
+  if [ "$account_opt" = 1 ]; then
+    account_create_preflight "$ENGINE"
+    # Read by engine() in engine.sh (another module, linted separately).
+    # shellcheck disable=SC2034
+    ISOPOD_ENGINE_AS_ACCOUNT=1
+  fi
 
   # Resolve the effective runtime (microVM by default, --container to opt out) and
   # egress mode (allow-list by default, degrades gracefully) BEFORE the microVM
@@ -369,7 +387,7 @@ cmd_create() {
   build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${EXPOSE_SPECS[@]:-}"
 
   info "Starting container ($ENGINE)..."
-  "$ENGINE" "${RUN_ARGS[@]}" >/dev/null
+  engine "${RUN_ARGS[@]}" >/dev/null
 
   # Apple `container` boxes have no published loopback port — they are reached at
   # their own vmnet IP (box_ssh_addr resolves it live), so there is no host port to
@@ -420,6 +438,7 @@ cmd_create() {
     printf 'secrets=%s\n' "$BOX_SECRETS"
     printf 'disk=%s\n' "$BOX_DISK"
     printf 'nested=%s\n' "$BOX_NESTED"
+    [ "$account_opt" = 1 ] && printf 'account=1\n'
   } >"$(box_dir "$name")/meta"
   write_box_config "$name"
 

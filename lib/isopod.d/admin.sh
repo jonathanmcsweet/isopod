@@ -31,7 +31,7 @@ cmd_rm() {
   # The tunnel is a host-side process; removing the box dir below would orphan it
   # along with the pidfile that identifies it.
   host_port_stop "$name"
-  "$ENGINE" rm -f "$(ctr_name "$name")" >/dev/null 2>&1 || true
+  engine rm -f "$(ctr_name "$name")" >/dev/null 2>&1 || true
   # Drop this box's snapshot images too (reconfigure leaves localhost/isopod-box-<name>:*),
   # so they don't accumulate. Exact-prefix match (awk index, not a regex) so box
   # 'a' never matches box 'ab'; the trailing ':' pins the boundary. The shared
@@ -41,8 +41,8 @@ cmd_rm() {
   if [ "$ENGINE" != container ]; then
     local img
     while IFS= read -r img; do
-      [ -n "$img" ] && "$ENGINE" rmi -f "$img" >/dev/null 2>&1 || true
-    done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
+      [ -n "$img" ] && engine rmi -f "$img" >/dev/null 2>&1 || true
+    done < <(engine images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null |
       awk -v p="localhost/isopod-box-$name:" 'index($0, p) == 1')
   fi
   rm -rf "$(box_dir "$name")"
@@ -105,7 +105,7 @@ cmd_gc() {
         [ -n "${ref[$img]:-}" ] || victims+=("$img")
         ;;
     esac
-  done < <("$ENGINE" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+  done < <(engine images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
   # Machine-readable preview: list the candidates, never remove. No prompts, so a
   # UI can show reclaimable images before offering a one-click `gc --force`.
   if [ "$json" -eq 1 ]; then
@@ -133,7 +133,7 @@ cmd_gc() {
     case "$ans" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
   fi
   for img in "${victims[@]}"; do
-    if "$ENGINE" rmi "$img" >/dev/null 2>&1; then info "removed $img"; else
+    if engine rmi "$img" >/dev/null 2>&1; then info "removed $img"; else
       warn "could not remove $img (still in use?)"
     fi
   done

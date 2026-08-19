@@ -79,7 +79,7 @@ cmd_start() {
   [ -n "$name" ] || die "usage: isopod start <name>"
   open_box "$name"
   acquire_lock # refresh_port may rewrite the shared ssh_config
-  "$ENGINE" start "$(ctr_name "$name")" >/dev/null
+  engine start "$(ctr_name "$name")" >/dev/null
   refresh_port "$name"
   # A box created with egress is on the isopod bridge; its isolation is the host
   # firewall, which a reboot / firewalld reload can silently drop. Say so loudly
@@ -116,7 +116,7 @@ cmd_stop() {
   # Before the engine stop, so the tunnel is torn down deliberately rather than
   # left to die with the connection and leave a stale pidfile behind.
   host_port_stop "$name"
-  "$ENGINE" stop "$(ctr_name "$name")" >/dev/null
+  engine stop "$(ctr_name "$name")" >/dev/null
   info "stopped '$name'"
 }
 
@@ -353,7 +353,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   info "Replacing the container..."
   local ctr
   ctr=$(ctr_name "$name")
-  "$ENGINE" rm -f "$ctr" >/dev/null 2>&1 || true
+  engine rm -f "$ctr" >/dev/null 2>&1 || true
   # A fresh container generates fresh SSH host keys, so the pin from the old one
   # is expected to fail. Drop it and re-pin below rather than tripping the
   # (correct) fail-closed host-key check in scan_host_key.
@@ -377,7 +377,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   }
   build_run_args "$name" "$newtag" "127.0.0.1:$port:$BOX_SSHD_PORT" \
     "$(meta_get "$name" memory || true)" "$(meta_get "$name" cpus || true)" "${EXPOSE_SPECS[@]:-}"
-  if ! "$ENGINE" "${RUN_ARGS[@]}" >/dev/null; then
+  if ! engine "${RUN_ARGS[@]}" >/dev/null; then
     die "could not start the rebuilt container. Your workspace is safe at:
      $ws"
   fi
@@ -412,7 +412,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   write_box_config "$name"
   # Drop the box's previous reconfigure snapshot, never the shared base image.
   case "$oldimg" in
-    localhost/isopod-box-"$name":*) "$ENGINE" rmi "$oldimg" >/dev/null 2>&1 || true ;;
+    localhost/isopod-box-"$name":*) engine rmi "$oldimg" >/dev/null 2>&1 || true ;;
   esac
   info "upgraded '$name' to the current image — see: isopod info $name"
   egress_posture_note "$name"
@@ -544,7 +544,7 @@ cmd_reconfigure() {
 
   local ctr
   ctr=$(ctr_name "$name")
-  "$ENGINE" inspect "$ctr" >/dev/null 2>&1 || die "container for '$name' is missing; recreate the box"
+  engine inspect "$ctr" >/dev/null 2>&1 || die "container for '$name' is missing; recreate the box"
 
   # Re-check egress enforcement + network before recreating (the profile may have
   # changed since create; no-op unless `egress lan-deny` is configured).
@@ -557,15 +557,15 @@ cmd_reconfigure() {
   old_img=$(meta_get "$name" image || true)
   snap="localhost/isopod-box-$name:r$(date -u +%Y%m%d%H%M%S)"
   info "Snapshotting '$name' (preserves your workspace and installed packages)..."
-  "$ENGINE" commit "$ctr" "$snap" >/dev/null || die "could not snapshot the box"
+  engine commit "$ctr" "$snap" >/dev/null || die "could not snapshot the box"
 
   # Recreate from the snapshot with the new flags, reusing the box's SSH port.
   local port
   port=$(meta_get "$name" port)
-  "$ENGINE" rm -f "$ctr" >/dev/null 2>&1 || true
+  engine rm -f "$ctr" >/dev/null 2>&1 || true
   build_run_args "$name" "$snap" "127.0.0.1:$port:$BOX_SSHD_PORT" "$d_memory" "$d_cpus" "${EXPOSE_SPECS[@]:-}"
   info "Recreating the container with the new settings ($ENGINE)..."
-  if ! "$ENGINE" "${RUN_ARGS[@]}" >/dev/null; then
+  if ! engine "${RUN_ARGS[@]}" >/dev/null; then
     die "recreate failed — your snapshot is saved as '$snap'"
   fi
 
@@ -603,7 +603,7 @@ cmd_reconfigure() {
 
   # Drop the previous snapshot image (never the shared base).
   case "$old_img" in
-    localhost/isopod-box-"$name":*) "$ENGINE" rmi "$old_img" >/dev/null 2>&1 || true ;;
+    localhost/isopod-box-"$name":*) engine rmi "$old_img" >/dev/null 2>&1 || true ;;
   esac
 
   info "reconfigured '$name' — see: isopod info $name"

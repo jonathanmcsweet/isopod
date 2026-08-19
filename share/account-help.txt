@@ -14,8 +14,11 @@ The engine stays rootless; root is used once, to load a static rule.
             firewall reload.
   status    what is and is not in place, including whether the rules are
             loaded and their drop counters.
-  teardown  remove the rules, unit and sudoers grant (as root). Add --purge
-            to also delete the account and its image store.
+  teardown  remove the rules, unit and sudoers grant (as root). Refuses while any
+            box still runs under the account (removing the boundary from under a
+            live box leaves it running unprotected) — remove or migrate those
+            first. Confirms unless --force; --purge also deletes the account and
+            its image store.
   rules     print the ruleset setup would load.
 
   sudo isopod account setup
