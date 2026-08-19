@@ -22,6 +22,8 @@ Usage:
   isopod gc [--dry-run] [--force]     Remove isopod images no box still references
   isopod egress [status|apply|allow …]  Manage the network egress firewall/proxy
   isopod host-port <add|rm|ls> <box>    Reach a host service from inside a box
+  isopod account [setup|status|...]     Sandbox account: opt-in hard egress boundary
+                                        that survives guest root (rootless engine)
   isopod secret [set|ls|rm] <NAME>    Manage secrets injected into boxes
   isopod doctor                       Check host prerequisites
   isopod help                         Show this help

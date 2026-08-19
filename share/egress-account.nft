@@ -1,0 +1,92 @@
+# isopod sandbox-account egress ruleset — loaded on the HOST by
+# `sudo isopod account setup` (and re-applied at boot by a systemd unit).
+#
+# Drops traffic from the dedicated sandbox account to private address space.
+# Boxes run under that account, so their traffic — passt terminates the guest's
+# connections and re-originates them as ordinary sockets owned by the account —
+# is matched by uid in the host kernel's output hook. Nothing inside a box can
+# remove these rules, and they still apply to a process that ESCAPED the box,
+# because it is still running as the account. This is the boundary the in-guest
+# ruleset (egress-guest.nft) cannot provide: that one runs inside the box, so
+# guest root can remove it. Spike record: docs/spike-sandbox-account.md.
+#
+# WHY PORT 53 IS EXEMPT WHOLESALE rather than per-resolver: this file is loaded
+# at boot from disk, so a per-resolver exemption rendered at setup time would go
+# stale the first time the host's resolvers change — a VPN connecting or
+# disconnecting does exactly that, and the account's DNS (image pulls, passt's
+# forwarder) would silently die. The earlier per-resolver design inside the box
+# works there because the box renders it fresh at every boot; a static host file
+# cannot. The cost is that account processes can reach internal DNS servers on
+# port 53 — accepted: the in-guest layer still pins each box to its own
+# resolvers, and this layer's job is stopping lateral movement, not recon on 53.
+#
+# The lan_allow sets start empty. `isopod egress lan-allow` on an account box
+# adds the address here (needs sudo) as well as to the box's own ruleset, so the
+# two layers agree. Host-side exemptions are address-wide: a port-scoped
+# exemption lives only in the guest layer, which still enforces it.
+#
+# @ACCOUNT_UID@ is substituted by `isopod account setup` before loading. Not a
+# render_tmpl template: this file is consumed by nft, never evaluated as shell.
+
+table inet isopod_account {
+  set private4 {
+    type ipv4_addr
+    flags interval
+    elements = {
+      10.0.0.0/8,
+      172.16.0.0/12,
+      192.168.0.0/16,
+      100.64.0.0/10,
+      169.254.0.0/16,
+      192.0.0.0/24,
+      198.18.0.0/15
+    }
+  }
+
+  set private6 {
+    type ipv6_addr
+    flags interval
+    elements = {
+      fc00::/7,
+      fe80::/10
+    }
+  }
+
+  set lan_allow4 {
+    type ipv4_addr
+    flags interval
+  }
+
+  set lan_allow6 {
+    type ipv6_addr
+    flags interval
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+
+    # Everything below concerns only the sandbox account. Leaving early keeps
+    # this table invisible to the rest of the system: accepting here does not
+    # bypass any other loaded table (each hook chain verdicts independently and
+    # a drop anywhere still wins), it only ends THIS chain's evaluation.
+    meta skuid != @ACCOUNT_UID@ accept
+
+    # The account's own loopback traffic: published box ports, engine internals.
+    oif "lo" accept
+    ct state established,related accept
+
+    # DNS — see the header for why this is port-wide rather than per-resolver.
+    udp dport 53 accept
+    tcp dport 53 accept
+
+    # Addresses the user explicitly allowed (isopod egress lan-allow).
+    ip daddr @lan_allow4 accept
+    ip6 daddr @lan_allow6 accept
+
+    # Everything else in private space, dropped with a counter — the counter is
+    # the ground truth when asking "did this rule fire": read it with
+    #   sudo nft list table inet isopod_account
+    ip daddr @private4 counter drop
+    ip6 daddr @private6 counter drop
+  }
+}

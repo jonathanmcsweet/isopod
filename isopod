@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.3.3"
+ISOPOD_VERSION="3.4.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -169,12 +169,21 @@ ISOPOD_EGRESS_STATE_DIR="${ISOPOD_EGRESS_STATE_DIR:-/etc/isopod/egress}"
 ISOPOD_EGRESS_PROXY_LOG_DIR="${ISOPOD_EGRESS_PROXY_LOG_DIR:-/var/log/isopod}"
 ISOPOD_EGRESS_PROXY_LOG="${ISOPOD_EGRESS_PROXY_LOG:-$ISOPOD_EGRESS_PROXY_LOG_DIR/egress-proxy.log}"
 
+# Sandbox account (isopod account …): the opt-in hard egress boundary — boxes
+# run under this dedicated unprivileged account and host nftables rules keyed on
+# its uid drop private-space traffic. 'sandbox' matches docs/spike-sandbox-account.md,
+# so a host that ran the spike adopts its account instead of growing a second one.
+ISOPOD_ACCOUNT="${ISOPOD_ACCOUNT:-sandbox}"
+# Host state written by account setup (root): the rendered ruleset the boot unit loads.
+ISOPOD_ACCOUNT_STATE_DIR="${ISOPOD_ACCOUNT_STATE_DIR:-/etc/isopod/account}"
+ISOPOD_ACCOUNT_NFT_UNIT="isopod-account-nft.service"
+
 # ---------------------------------------------------------------------------
 # function modules — sourced from lib/isopod.d/ (order: util first, so die()
 # exists for everything after it). Each defines functions and their globals
 # only; no module runs code at source time.
 # ---------------------------------------------------------------------------
-for _mod in util engine ssh color hardening egress hostport json runargs secret create transfer lifecycle install admin; do
+for _mod in util engine ssh color hardening egress hostport account json runargs secret create transfer lifecycle install admin; do
   if [ ! -f "$ISOPOD_LIB/isopod.d/$_mod.sh" ]; then
     # raw printf, not die: die() itself lives in the first module
     printf 'error: missing module: %s (is your isopod install complete?)\n' \
@@ -218,6 +227,7 @@ main() {
     gc) cmd_gc "$@" ;;
     egress) cmd_egress "$@" ;;
     host-port | hostport) cmd_host_port "$@" ;;
+    account) cmd_account "$@" ;;
     secret) cmd_secret "$@" ;;
     doctor) cmd_doctor "$@" ;;
     version | --version | -v) printf 'isopod %s\n' "$ISOPOD_VERSION" ;;

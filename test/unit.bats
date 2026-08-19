@@ -3252,3 +3252,81 @@ ip daddr 1.2.3.4 accept'
     return 1
   fi
 }
+
+# ---- sandbox account (stage 1: lifecycle module) ------------------------------
+
+# The range allocator must clear every existing allocation in BOTH files — a
+# collision would hand two accounts overlapping ids, which container storage
+# treats as the same owner.
+@test "account_next_subid_start clears existing ranges in subuid and subgid" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid" SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'alice:100000:65536\nbob:400000:65536\n' >"$SUBUID_FILE"
+  printf 'alice:100000:65536\ncarol:500000:65536\n' >"$SUBGID_FILE"
+  run account_next_subid_start
+  assert_output '565536'
+}
+
+@test "account_next_subid_start floors at 300000 on a fresh host" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid" SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'alice:100000:65536\n' >"$SUBUID_FILE"
+  : >"$SUBGID_FILE"
+  run account_next_subid_start
+  assert_output '300000'
+}
+
+@test "account_next_subid_start ignores malformed lines" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid" SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'alice:100000:65536\nbroken\nx:y:z\n' >"$SUBUID_FILE"
+  : >"$SUBGID_FILE"
+  run account_next_subid_start
+  assert_output '300000'
+}
+
+@test "account_render_rules substitutes the uid everywhere" {
+  run account_render_rules 4242
+  assert_success
+  assert_output --partial 'meta skuid != 4242 accept'
+  refute_output --partial '@ACCOUNT_UID@'
+}
+
+# The uid becomes rule text, so anything non-numeric must be refused rather
+# than substituted.
+@test "account_render_rules refuses a non-numeric uid" {
+  local bad
+  for bad in "" "12a" '4242; flush ruleset' '$(id -u)'; do
+    run account_render_rules "$bad"
+    assert_failure
+  done
+}
+
+@test "account setup and teardown refuse to run without root" {
+  [ "$(id -u)" = 0 ] && skip "running as root"
+  run cmd_account setup
+  assert_failure
+  assert_output --partial "sudo isopod account setup"
+  run cmd_account teardown
+  assert_failure
+  assert_output --partial "sudo isopod account teardown"
+}
+
+@test "account status reports what is missing without dying" {
+  ISOPOD_ACCOUNT="isopod-test-noexist-$$"
+  run cmd_account status
+  assert_failure
+  assert_output --partial "[MISSING] account"
+  assert_output --partial "sudo isopod account setup"
+}
+
+@test "account rules prints a loadable ruleset even with no account" {
+  ISOPOD_ACCOUNT="isopod-test-noexist-$$"
+  run cmd_account rules
+  assert_success
+  assert_output --partial 'table inet isopod_account'
+  refute_output --partial '@ACCOUNT_UID@'
+}
+
+@test "account rejects an unknown action" {
+  run cmd_account frobnicate
+  assert_failure
+  assert_output --partial "unknown account action"
+}

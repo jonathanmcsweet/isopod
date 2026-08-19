@@ -273,7 +273,31 @@ printf '%s\n' "$guest_empty" | grep -q 'counter drop' ||
   fail "logging=0 dropped the drop rules as well"
 ok "guest ruleset is balanced and still drops with no resolvers, no lan-allow, no logging"
 
+# --- sandbox-account ruleset (loaded on the HOST by account setup) -----------
+# Rendered exactly as account_render_rules does (uid substitution), then checked
+# for the properties that make it safe: the early-accept scoping rule must come
+# first so other users' traffic is untouched, DNS and loopback must precede the
+# drops, and the uid placeholder must be consumed.
+acct_tmpl="$ROOT/share/egress-account.nft"
+[ -f "$acct_tmpl" ] || fail "missing account ruleset template: $acct_tmpl"
+acct="$(sed 's/@ACCOUNT_UID@/4242/g' "$acct_tmpl")"
+printf '%s\n' "$acct" | grep -q '@ACCOUNT_UID@' &&
+  fail "account ruleset still contains @ACCOUNT_UID@ after rendering"
+a_scope="$(printf '%s\n' "$acct" | grep -n 'meta skuid != 4242 accept' | head -1 | cut -d: -f1)"
+a_first="$(printf '%s\n' "$acct" | grep -nE '^\s+(oif|ct|udp|tcp|ip6? daddr|meta)' | head -1 | cut -d: -f1)"
+[ -n "$a_scope" ] || fail "account ruleset lost its uid-scoping rule"
+[ "$a_scope" = "$a_first" ] ||
+  fail "account ruleset: the uid-scoping accept is not the first rule — other users' traffic would be evaluated"
+a_dns="$(printf '%s\n' "$acct" | grep -n 'udp dport 53 accept' | head -1 | cut -d: -f1)"
+a_drop="$(printf '%s\n' "$acct" | grep -n 'counter drop' | head -1 | cut -d: -f1)"
+[ -n "$a_dns" ] && [ -n "$a_drop" ] && [ "$a_dns" -lt "$a_drop" ] ||
+  fail "account ruleset orders DNS after the drop (account DNS would die — the 3.1.3 lesson)"
+printf '%s\n' "$acct" | grep -q 'ip daddr @lan_allow4 accept' ||
+  fail "account ruleset has no lan_allow set hook (stage-4 lan-allow has nothing to add to)"
+ok "account ruleset renders (uid scoped first, DNS before drops, lan_allow sets present)"
+
 if command -v nft >/dev/null 2>&1; then
+  nft_check "account" "$acct"
   nft_check "lan-deny" "$lan_deny"
   nft_check "allow-list" "$allow_list"
   nft_check "guest (resolvers + lan-allow + logging)" "$guest"

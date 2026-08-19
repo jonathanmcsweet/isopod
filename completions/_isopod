@@ -35,6 +35,7 @@ _isopod() {
     'rm:Delete a sandbox (container + keys)'
     'egress:Manage the network egress firewall'
     'host-port:Reach a host service from inside a box'
+    'account:Sandbox account — opt-in hard egress boundary'
     'secret:Manage secrets injected into boxes'
     'doctor:Check host prerequisites'
     'help:Show help'
@@ -102,6 +103,9 @@ _isopod() {
           ;;
         host-port|hostport)
           _arguments '1:action:(add rm ls)' '2:sandbox:_isopod_boxes'
+          ;;
+        account)
+          _arguments '1:action:(setup status teardown rules)'
           ;;
         info|shell|root-shell|upgrade|start|stop|export|copy-in)
           _arguments '1:sandbox:_isopod_boxes'
