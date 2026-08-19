@@ -161,6 +161,15 @@ meta_set() { # meta_set <name> <key> <value> — replace or append a meta line
   mv "$tmp" "$f"
 }
 
+meta_del() { # meta_del <name> <key> — drop a meta line (no-op if absent)
+  local f tmp
+  f="$(box_dir "$1")/meta"
+  [ -f "$f" ] || return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/isopod-meta-XXXXXX")"
+  grep -v "^$2=" "$f" 2>/dev/null >"$tmp" || true
+  mv "$tmp" "$f"
+}
+
 # Per-box config.yaml — a real, valid Compose service describing the box, kept as
 # a readable reference (see share/box-config.yaml). isopod owns it: it is rendered
 # from meta and a few fields are read back by `isopod reconfigure`. isopod does

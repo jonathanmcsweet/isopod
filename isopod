@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.5.0"
+ISOPOD_VERSION="3.6.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -214,6 +214,7 @@ main() {
     shell | sh) cmd_shell "$@" ;;
     root-shell | rootsh) cmd_root_shell "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
+    migrate) cmd_migrate "$@" ;;
     start) cmd_start "$@" ;;
     stop) cmd_stop "$@" ;;
     reconfigure | reconfig) cmd_reconfigure "$@" ;;

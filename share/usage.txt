@@ -13,6 +13,7 @@ Usage:
   isopod stop <name>                  Stop a running sandbox
   isopod config <name>                Show a box's editable config (config.yaml)
   isopod reconfigure <name> [opts]    Apply new run settings to an existing box
+  isopod migrate <name> --account     Rebuild a box onto (or off) the sandbox account
   isopod export <name> [dest]         Copy the workspace OUT (--exclude PAT, --gitignore)
   isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
   isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch

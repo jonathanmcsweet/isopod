@@ -13,7 +13,7 @@ _isopod() {
   cword="$COMP_CWORD"
   words=("${COMP_WORDS[@]}")
 
-  local cmds="create list info code shell root-shell upgrade start stop config reconfigure export fetch remap copy-in rm egress host-port account secret doctor help version"
+  local cmds="create list info code shell root-shell upgrade start stop config reconfigure migrate export fetch remap copy-in rm egress host-port account secret doctor help version"
   local colors="red orange amber green teal blue purple magenta gray grey"
   local apps="codium vscodium cursor windsurf code"
 
@@ -81,6 +81,13 @@ _isopod() {
       ;;
     account)
       mapfile -t COMPREPLY < <(compgen -W "setup status teardown rules" -- "$cur")
+      ;;
+    migrate)
+      if [[ "$cur" == -* ]]; then
+        mapfile -t COMPREPLY < <(compgen -W "--account --no-account --force" -- "$cur")
+      else
+        mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
+      fi
       ;;
     host-port | hostport)
       if [ "$cword" -eq 2 ]; then

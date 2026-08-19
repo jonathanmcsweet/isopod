@@ -418,6 +418,173 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   egress_posture_note "$name"
 }
 
+# Move an existing box onto (or off) the sandbox account. A container physically
+# lives in one account's rootless store and cannot be moved between stores in
+# place, so this is a rebuild: copy the workspace out over SSH (store-agnostic),
+# destroy the old container in the SOURCE store, then build and run a fresh one
+# in the TARGET store, keeping the box's identity (keys, port, colour, settings).
+# The one store flip in the middle is the whole trick — every engine call before
+# it hits the source store, every call after it the target.
+cmd_migrate() {
+  local name="" target="" force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
+    case "$1" in
+      --account)
+        target=1
+        shift
+        ;;
+      --no-account)
+        target=0
+        shift
+        ;;
+      --force | -f | --yes | -y)
+        force=1
+        shift
+        ;;
+      -h | --help)
+        printf 'usage: isopod migrate <box> --account | --no-account [--force]\n'
+        printf '  Rebuild a box under (or off) the sandbox account, keeping its identity.\n'
+        return 0
+        ;;
+      -*) die "unknown option for migrate: $1" ;;
+      *)
+        [ -z "$name" ] && name="$1" || die "unexpected argument: $1"
+        shift
+        ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: isopod migrate <box> --account | --no-account [--force]"
+  [ -n "$target" ] || die "say a direction: --account (onto the account) or --no-account (off it)"
+  open_box "$name" # sets ENGINE and the SOURCE routing flag from meta
+
+  local source=0
+  [ "$(meta_get "$name" account 2>/dev/null || true)" = 1 ] && source=1
+  [ "$source" = "$target" ] &&
+    die "'$name' is already $([ "$target" = 1 ] && printf 'on' || printf 'off') the sandbox account — nothing to do"
+
+  [ "$ENGINE" = container ] &&
+    die "migrate is not supported on the Apple 'container' engine (no shared account model)"
+  [ -n "$(meta_get "$name" disk 2>/dev/null || true)" ] &&
+    die "migrate cannot move a box with a --disk data volume — its contents live in the
+     container layer this replaces. Copy the volume out, then recreate with the new setting."
+  [ "$(box_status "$name" 2>/dev/null || true)" = running ] ||
+    die "start the box first so its workspace can be copied out: isopod start $name"
+  # Moving ONTO the account needs the account set up; validate before touching anything.
+  [ "$target" = 1 ] && account_create_preflight "$ENGINE"
+
+  if [ "$force" -ne 1 ]; then
+    printf 'Rebuild '\''%s'\'' %s the sandbox account?\n' "$name" "$([ "$target" = 1 ] && printf 'ONTO' || printf 'OFF')"
+    printf '  KEPT    : %s, your SSH keys, published port, secrets, colour, settings\n' "$WORKSPACE"
+    printf '  LOST    : packages installed inside the box and any OS state outside %s\n' "$WORKSPACE"
+    printf 'Proceed? [y/N] '
+    local reply
+    read -r reply
+    case "$reply" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
+  fi
+
+  # Reproduce the box's tier/egress, exactly as upgrade does.
+  local saved_rt base dev nested port
+  saved_rt=$(meta_get "$name" runtime 2>/dev/null || true)
+  case "$saved_rt" in
+    container) export ISOPOD_FORCE_CONTAINER=1 ;;
+    "") resolve_runtime "$ENGINE" 0 ;;
+    *) export ISOPOD_RUNTIME="$saved_rt" ;;
+  esac
+  resolve_egress "$ENGINE"
+  runtime_preflight "$ENGINE"
+  base="$(meta_get "$name" base)"
+  dev="$(meta_get "$name" dev 2>/dev/null || printf 0)"
+  nested="$(meta_get "$name" nested 2>/dev/null || printf 0)"
+  port="$(meta_get "$name" port)"
+  [ -f "$(box_config_file "$name")" ] || write_box_config "$name"
+  local -a exposes=()
+  mapfile -t exposes < <(config_expose "$name")
+  parse_expose_specs "${exposes[@]:-}"
+
+  # --- SOURCE store: copy the workspace out, then destroy the old container ---
+  # ISOPOD_ENGINE_AS_ACCOUNT is still the source value (open_box set it).
+  local ws
+  ws=$(mktemp "${TMPDIR:-/tmp}/isopod-migrate-$name-XXXXXX.tar")
+  info "Copying $WORKSPACE out of '$name'..."
+  local -a rc
+  set +e
+  box_tar_out "$name" "$WORKSPACE" 2> >(grep -v 'file changed as we read it' >&2) >"$ws"
+  rc=("${PIPESTATUS[@]}")
+  set -e
+  if [ "${rc[0]}" -gt 1 ]; then
+    rm -f "$ws"
+    die "could not read $WORKSPACE out of '$name' — nothing has been changed."
+  fi
+  info "Removing the old container..."
+  engine rm -f "$(ctr_name "$name")" >/dev/null 2>&1 || true
+  rm -f "$(box_dir "$name")/known_hosts"
+
+  # --- flip to the TARGET store for every engine call from here on ------------
+  # Read by engine() in engine.sh (another module, linted separately).
+  # shellcheck disable=SC2034
+  ISOPOD_ENGINE_AS_ACCOUNT="$target"
+
+  info "Building the base image in the $([ "$target" = 1 ] && printf 'account' || printf 'user') store..."
+  local newtag
+  newtag=$(build_image "$base" "$dev" "$nested") ||
+    die "image build failed in the target store (workspace kept at $ws)"
+
+  local BOX_SUDO BOX_HARDEN BOX_DISK BOX_NESTED BOX_SECRETS BOX_GUEST_EGRESS BOX_GUEST_EGRESS_ALLOW BOX_HOST_PORTS
+  BOX_SUDO="$(meta_get "$name" sudo 2>/dev/null || true)"
+  [ -n "$BOX_SUDO" ] || BOX_SUDO=1
+  # shellcheck disable=SC2034
+  {
+    BOX_HARDEN="$(meta_get "$name" harden 2>/dev/null || true)"
+    BOX_DISK=""
+    BOX_NESTED="$nested"
+    BOX_SECRETS="$(meta_get "$name" secrets 2>/dev/null || true)"
+    BOX_GUEST_EGRESS="$(meta_get "$name" guest_egress 2>/dev/null || true)"
+    BOX_GUEST_EGRESS_ALLOW="$(meta_get "$name" guest_egress_allow 2>/dev/null || true)"
+    BOX_HOST_PORTS="$(meta_get "$name" host_ports 2>/dev/null || true)"
+  }
+  build_run_args "$name" "$newtag" "127.0.0.1:$port:$BOX_SSHD_PORT" \
+    "$(meta_get "$name" memory || true)" "$(meta_get "$name" cpus || true)" "${EXPOSE_SPECS[@]:-}"
+  if ! engine "${RUN_ARGS[@]}" >/dev/null; then
+    die "could not start the migrated container. Your workspace is safe at:
+     $ws"
+  fi
+
+  # Record the new account membership NOW, so a later failure still leaves meta
+  # describing the container that actually exists (in the target store).
+  if [ "$target" = 1 ]; then meta_set "$name" account 1; else meta_del "$name" account; fi
+
+  local hostport
+  hostport=$(resolve_port "$name") || die "could not determine published SSH port (workspace kept at $ws)"
+  meta_set "$name" image "$newtag"
+  meta_set "$name" base_image "$newtag"
+  meta_set "$name" built_version "$ISOPOD_VERSION"
+  meta_set "$name" port "$hostport"
+  meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
+  write_ssh_include
+  scan_host_key "$name" >/dev/null || true
+  wait_for_ssh "$name" || die "the migrated box did not accept SSH. Your workspace is safe at:
+     $ws"
+
+  info "Restoring $WORKSPACE into the migrated box..."
+  box_ssh "$name" -- "mkdir -p '$WORKSPACE'" ||
+    die "could not create $WORKSPACE in the migrated box (workspace kept at $ws)"
+  box_tar_in "$name" "$WORKSPACE" <"$ws" ||
+    die "could not restore the workspace. It is kept at:
+     $ws"
+  rm -f "$ws"
+
+  inject_secrets "$name"
+  host_port_sync "$name" || true
+  apply_color "$name" "$(meta_get "$name" color || true)" ||
+    warn "could not apply window color (the box is fine without it)"
+  write_box_config "$name"
+  info "migrated '$name' $([ "$target" = 1 ] && printf 'onto' || printf 'off') the sandbox account — see: isopod info $name"
+  egress_posture_note "$name"
+}
+
 cmd_reconfigure() {
   local name="" memory="" cpus="" color="" memory_set=0 cpus_set=0 color_set=0 expose_set=0
   local guest_egress="" guest_egress_set=0

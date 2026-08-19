@@ -3395,3 +3395,70 @@ ip daddr 1.2.3.4 accept'
   assert_output --partial "liveone"
   assert_output --partial "before teardown"
 }
+
+# ---- sandbox account (stage 3: migrate) --------------------------------------
+# The rebuild body needs a live engine (two stores), so these cover the argument
+# and precondition logic — the part that decides whether to touch anything.
+
+@test "migrate needs a direction" {
+  mk_meta demo 'engine=podman'
+  open_box() { ENGINE=podman; }
+  run cmd_migrate demo
+  assert_failure
+  assert_output --partial "say a direction"
+}
+
+@test "migrate is a no-op when the box is already on the account" {
+  mk_meta demo 'engine=podman' 'account=1'
+  open_box() { ENGINE=podman; }
+  run cmd_migrate demo --account
+  assert_failure
+  assert_output --partial "already on the sandbox account"
+}
+
+@test "migrate --no-account is a no-op for a box not on the account" {
+  mk_meta demo 'engine=podman'
+  open_box() { ENGINE=podman; }
+  run cmd_migrate demo --no-account
+  assert_failure
+  assert_output --partial "already off the sandbox account"
+}
+
+@test "migrate onto the account refuses a --disk box" {
+  mk_meta demo 'engine=podman' 'disk=20g:/mnt/data'
+  open_box() { ENGINE=podman; }
+  box_status() { printf 'running'; }
+  account_create_preflight() { :; }
+  run cmd_migrate demo --account
+  assert_failure
+  assert_output --partial "--disk data volume"
+}
+
+@test "migrate refuses a stopped box" {
+  mk_meta demo 'engine=podman'
+  open_box() { ENGINE=podman; }
+  box_status() { printf 'exited'; }
+  account_create_preflight() { :; }
+  run cmd_migrate demo --account
+  assert_failure
+  assert_output --partial "start the box first"
+}
+
+@test "migrate onto the account runs the account preflight" {
+  mk_meta demo 'engine=podman'
+  open_box() { ENGINE=podman; }
+  box_status() { printf 'running'; }
+  account_create_preflight() { die "PREFLIGHT RAN: $1"; }
+  run cmd_migrate demo --account
+  assert_failure
+  assert_output --partial "PREFLIGHT RAN: podman"
+}
+
+@test "meta_del removes a key and leaves the rest" {
+  mk_meta demo 'account=1' 'color=blue' 'port=2222'
+  meta_del demo account
+  run meta_get demo account
+  assert_output ''
+  run meta_get demo color
+  assert_output 'blue'
+}
