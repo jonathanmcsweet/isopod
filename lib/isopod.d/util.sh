@@ -93,6 +93,11 @@ sanitize() { # sanitize <string...> -> the same text with control characters rem
   printf '%s' "$*" | LC_ALL=C tr -d '\000-\010\013-\037\177'
 }
 
+# Stream form of sanitize: strip the same control characters from stdin to stdout.
+# For box-originated output that arrives as a stream (a tar's stderr, a log tail)
+# rather than an argument, where buffering it into a string would be wrong.
+sanitize_stream() { LC_ALL=C tr -d '\000-\010\013-\037\177'; }
+
 # Host OS family isopod is running ON — NOT where boxes run. On macOS the
 # container engine runs boxes inside its own Linux VM (podman machine / Docker
 # Desktop), so the host that runs the `isopod` script and the

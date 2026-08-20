@@ -3609,3 +3609,55 @@ ip daddr 1.2.3.4 accept'
   assert_output --partial '192.168.1.0/24'
   refute_output --partial 'not-an-ip'
 }
+
+# ---- full-repo review fixes --------------------------------------------------
+
+# L1: a `..` segment must be rejected so the workspace-leak guard cannot be
+# bypassed by a path that resolves back into the workspace.
+@test "valid_secret_path rejects .. traversal but accepts a normal path" {
+  run valid_secret_path /run/secrets/token
+  assert_success
+  run valid_secret_path /run/secrets/../../home/dev/workspace/tok
+  assert_failure
+  run valid_secret_path /run/secrets/..
+  assert_failure
+  # A filename that merely contains dots is still fine.
+  run valid_secret_path /run/secrets/my..key
+  assert_success
+}
+
+# L2: a real key swap (same type, different blob) is flagged; a partial scan
+# (a type present in only one file) is NOT a change.
+@test "host_key_changed flags a swapped key but tolerates a partial scan" {
+  local a b
+  a="$(mktemp)" b="$(mktemp)"
+  printf '[127.0.0.1]:22 ssh-ed25519 AAAAoriginal\n[127.0.0.1]:22 ecdsa-sha2 AAAAecdsa\n' >"$a"
+  # Same material -> not changed.
+  cp "$a" "$b"
+  run host_key_changed "$a" "$b"
+  assert_failure
+  # ed25519 blob differs -> changed.
+  printf '[127.0.0.1]:22 ssh-ed25519 AAAAdifferent\n' >"$b"
+  run host_key_changed "$a" "$b"
+  assert_success
+  # Only a subset scanned (ecdsa slow, absent) but ed25519 matches -> not changed.
+  printf '[127.0.0.1]:22 ssh-ed25519 AAAAoriginal\n' >"$b"
+  run host_key_changed "$a" "$b"
+  assert_failure
+  rm -f "$a" "$b"
+}
+
+# L3: require_box must reject a traversal name before any path is derived from it.
+@test "require_box refuses a traversal name" {
+  run require_box '../../etc'
+  assert_failure
+  assert_output --partial 'invalid sandbox name'
+}
+
+# L8: an empty/failed `docker info` must read as "cannot confirm rootful" so a
+# rootless docker is never mistaken for rootful (which would build an open box).
+@test "egress_can_enforce treats empty docker info as not-enforceable" {
+  make_stub docker 0 ""
+  run egress_can_enforce docker
+  assert_failure
+}

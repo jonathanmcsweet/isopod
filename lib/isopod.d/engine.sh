@@ -91,6 +91,11 @@ ctr_name() { printf 'isopod-%s' "$1"; }
 box_dir() { printf '%s/%s' "$BOXES_DIR" "$1"; }
 
 require_box() {
+  # Validate before deriving any path from the name. create validates on the way
+  # in, but every other command reaches box_dir/meta/rm through here, so a
+  # traversal name (isopod rm '../../dir') must be refused here, not just trusted
+  # to be an existing directory.
+  valid_name "$1" || die "invalid sandbox name: '$1' (letters, digits, . _ - only)"
   [ -d "$(box_dir "$1")" ] || die "no such sandbox: '$1' (see: isopod list)"
 }
 

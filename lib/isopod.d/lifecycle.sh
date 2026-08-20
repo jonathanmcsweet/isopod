@@ -390,6 +390,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   meta_set "$name" port "$hostport"
   meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
   meta_set "$name" egress "$(active_egress)"
+  meta_set "$name" egress_degraded "${ISOPOD_EGRESS_DEGRADED:-0}"
   write_ssh_include
   scan_host_key "$name" >/dev/null || true
   wait_for_ssh "$name" || die "the rebuilt box did not accept SSH. Your workspace is safe at:
@@ -567,6 +568,8 @@ cmd_migrate() {
   meta_set "$name" built_version "$ISOPOD_VERSION"
   meta_set "$name" port "$hostport"
   meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
+  meta_set "$name" egress "$(active_egress)"
+  meta_set "$name" egress_degraded "${ISOPOD_EGRESS_DEGRADED:-0}"
   write_ssh_include
   scan_host_key "$name" >/dev/null || true
   wait_for_ssh "$name" || die "the migrated box did not accept SSH. Your workspace is safe at:
@@ -747,6 +750,7 @@ cmd_reconfigure() {
   meta_set "$name" port "$hostport"
   meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
   meta_set "$name" egress "$(active_egress)"
+  meta_set "$name" egress_degraded "${ISOPOD_EGRESS_DEGRADED:-0}"
   meta_set "$name" memory "$d_memory"
   meta_set "$name" cpus "$d_cpus"
   meta_set "$name" color "$hex"

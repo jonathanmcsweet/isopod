@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.7.2"
+ISOPOD_VERSION="3.7.3"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -166,6 +166,11 @@ ISOPOD_EGRESS_ALLOWLIST="${ISOPOD_EGRESS_ALLOWLIST:-$ISOPOD_DIR/security/egress-
 # Host state written by `egress apply` (root; apply already needs it): the
 # rendered proxy config + filter, and the access log tailed by `egress log`.
 ISOPOD_EGRESS_STATE_DIR="${ISOPOD_EGRESS_STATE_DIR:-/etc/isopod/egress}"
+# Root writes this world-readable marker when it loads the host egress rules, and
+# the boot unit re-writes it. It lives in /run (cleared each boot) so its presence
+# tracks "loaded this boot". A non-root create cannot read nft to confirm the
+# firewall, so an ABSENT marker lets it warn honestly instead of assuming loaded.
+ISOPOD_EGRESS_MARKER="${ISOPOD_EGRESS_MARKER:-/run/isopod-egress-loaded}"
 ISOPOD_EGRESS_PROXY_LOG_DIR="${ISOPOD_EGRESS_PROXY_LOG_DIR:-/var/log/isopod}"
 ISOPOD_EGRESS_PROXY_LOG="${ISOPOD_EGRESS_PROXY_LOG:-$ISOPOD_EGRESS_PROXY_LOG_DIR/egress-proxy.log}"
 

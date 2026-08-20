@@ -78,8 +78,13 @@ cmd_export() {
   mkdir -p "$dest"
   local -a rc
   set +e
-  box_tar_out "$name" "$WORKSPACE" ${tarx[@]+"${tarx[@]}"} 2> >(grep -v 'file changed as we read it' >&2) |
-    tar -C "$dest" --no-same-owner --no-same-permissions -xf -
+  # Both tar stderrs carry box-controlled filenames (tar embeds the offending
+  # name in diagnostics like 'socket ignored'), so strip control bytes on the way
+  # to the host terminal — the same ANSI/OSC-injection defense as the git-identity
+  # prints, on the archive channel.
+  box_tar_out "$name" "$WORKSPACE" ${tarx[@]+"${tarx[@]}"} \
+    2> >(grep -v 'file changed as we read it' | sanitize_stream >&2) |
+    tar -C "$dest" --no-same-owner --no-same-permissions -xf - 2> >(sanitize_stream >&2)
   rc=("${PIPESTATUS[@]}")
   set -e
   if [ "${rc[1]}" -ne 0 ] || [ "${rc[0]}" -gt 1 ]; then
@@ -457,7 +462,7 @@ cmd_remap() {
 
     info "Rewriting commits by <$(sanitize "$old_email")>${old_name:+ / \"$(sanitize "$old_name")\"} on:"
     printf '    %s\n' "${boxrefs[@]}"
-    info "            to: \"$new_name\" <$new_email>  (in $top)"
+    info "            to: \"$(sanitize "$new_name")\" <$(sanitize "$new_email")>  (in $top)"
   fi
 
   if [ "$force" -ne 1 ]; then

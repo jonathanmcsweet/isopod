@@ -96,8 +96,13 @@ egress_can_enforce() { # egress_can_enforce <engine>
       # entries look like 'name=seccomp,profile=default' or 'name=rootless'.
       # Match the exact 'name=rootless' token (one entry per line) rather than a
       # bare 'rootless' substring, which could match a profile path.
-      ! docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null |
-        grep -qx 'name=rootless'
+      local _secopts
+      _secopts="$(docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null)"
+      # Empty means docker info failed or reported nothing: cannot confirm rootful,
+      # so refuse to enforce rather than assume it (which would build an OPEN box
+      # on a genuinely rootless docker and report it as enforced).
+      [ -n "$_secopts" ] || return 1
+      ! printf '%s\n' "$_secopts" | grep -qx 'name=rootless'
       ;;
     *) return 1 ;;
   esac
@@ -132,6 +137,26 @@ egress_check_subnet() { # egress_check_subnet <engine> <subnets>
   esac
 }
 
+# Warn if a reused network's host bridge interface is not the fixed name the nft/pf
+# IPv6 drop is scoped to (iifname): a mismatch means box IPv6 egress silently is
+# not dropped. Only bites a network created out of band — ensure creates it with
+# the pinned name. Stays quiet when the name can't be read, so it never false-alarms.
+egress_check_iface() { # egress_check_iface <engine>
+  local engine="$1" iface=""
+  if [ "$engine" = docker ]; then
+    iface=$(docker network inspect "$ISOPOD_EGRESS_NET" \
+      --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
+  else
+    iface=$("$engine" network inspect "$ISOPOD_EGRESS_NET" \
+      --format '{{.NetworkInterface}}' 2>/dev/null || true)
+  fi
+  [ -z "$iface" ] && return 0
+  [ "$iface" = "$ISOPOD_EGRESS_IFACE" ] && return 0
+  warn "network '$ISOPOD_EGRESS_NET' uses host bridge '$iface', not '$ISOPOD_EGRESS_IFACE' — the
+       IPv6 egress drop is scoped to the latter, so box IPv6 on a dual-stack network would be
+       unfiltered. Recreate it: $engine network rm $ISOPOD_EGRESS_NET"
+}
+
 ensure_egress_network() { # ensure_egress_network <engine>
   local engine="$1" subnets=""
   # Already present? Confirm its subnet matches the firewall's, then reuse it.
@@ -140,6 +165,7 @@ ensure_egress_network() { # ensure_egress_network <engine>
       subnets=$(docker network inspect "$ISOPOD_EGRESS_NET" \
         --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true)
       egress_check_subnet "$engine" "$subnets"
+      egress_check_iface "$engine"
       return 0
     fi
   else
@@ -147,6 +173,7 @@ ensure_egress_network() { # ensure_egress_network <engine>
       subnets=$("$engine" network inspect "$ISOPOD_EGRESS_NET" \
         --format '{{range .Subnets}}{{.Subnet}} {{end}}' 2>/dev/null || true)
       egress_check_subnet "$engine" "$subnets"
+      egress_check_iface "$engine"
       return 0
     fi
   fi
@@ -516,6 +543,9 @@ egress_load_nft() {
   have nft || die "nft (nftables) not found — install nftables to apply the egress firewall"
   info "Loading isopod egress firewall into the host network namespace..."
   printf '%s\n' "$rendered" | egr_run_root nft -f - || die "nft failed to load the ruleset"
+  # Drop a world-readable marker so a later non-root create can tell the rules were
+  # loaded (it cannot read nft without root). Best-effort: never fail apply over it.
+  printf 'loaded\n' | egr_write_root "$ISOPOD_EGRESS_MARKER" 2>/dev/null || true
   info "egress firewall loaded (table inet isopod)."
   warn "not persistent across reboot / firewalld reload — re-run 'sudo isopod egress apply' after
        those. For reboot persistence, run: sudo isopod egress persist"
@@ -583,7 +613,7 @@ egress_unpersist() {
   fi
   have systemctl || die "needs systemd (systemctl)"
   egr_run_root systemctl disable --now "$ISOPOD_EGRESS_NFT_UNIT" 2>/dev/null || true
-  egr_run_root rm -f "/etc/systemd/system/$ISOPOD_EGRESS_NFT_UNIT.service"
+  egr_run_root rm -f "/etc/systemd/system/$ISOPOD_EGRESS_NFT_UNIT.service" "$ISOPOD_EGRESS_MARKER"
   egr_run_root systemctl daemon-reload
   info "removed the egress boot unit ('$ISOPOD_EGRESS_NFT_UNIT'). A currently-loaded ruleset stays until flushed."
 }
@@ -727,6 +757,13 @@ resolve_egress() { # resolve_egress <engine>
      ISOPOD_EGRESS=off to silence this."
     export ISOPOD_EGRESS=off
     ISOPOD_EGRESS_DEGRADED=1
+  elif [ "$rc" = 2 ] && [ ! -e "$ISOPOD_EGRESS_MARKER" ]; then
+    # Cannot read the firewall without root, and nothing recorded that apply ran.
+    # Do not flip to OPEN (a box built by an earlier isopod may be genuinely loaded
+    # but unmarked), but say so plainly rather than silently assuming enforcement.
+    warn "egress is on by default but this create cannot confirm the host firewall without root,
+     and no apply marker is present — if you have not run 'sudo isopod egress apply', this box may
+     be OPEN. Confirm with: sudo isopod egress status."
   fi
   return 0
 }

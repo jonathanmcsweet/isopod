@@ -43,7 +43,15 @@ fi
 # Authorized key. Append-if-absent, so reboots and reconfigure stay idempotent
 # and never overwrite a key the user added inside the box.
 if [ -n "${ISOPOD_AUTHORIZED_KEY:-}" ]; then
+  # The box user owns their home and controls it between boots. A symlink left at
+  # .ssh or authorized_keys makes these root-run install/touch/chown/chmod follow
+  # it and operate on a root-owned target (CWE-59): point .ssh at /etc, or
+  # authorized_keys at /etc/shadow, and a routine restart hands the box user
+  # ownership of that target, i.e. a path to root on a no-sudo box. No box process
+  # runs during boot, so removing any symlink first is race-free.
+  if [ -L "$iso_h/.ssh" ]; then rm -f "$iso_h/.ssh"; fi
   install -d -m 700 -o "$iso_u" -g "$iso_u" "$iso_h/.ssh"
+  if [ -L "$iso_h/.ssh/authorized_keys" ]; then rm -f "$iso_h/.ssh/authorized_keys"; fi
   touch "$iso_h/.ssh/authorized_keys"
   grep -qxF "$ISOPOD_AUTHORIZED_KEY" "$iso_h/.ssh/authorized_keys" ||
     printf '%s\n' "$ISOPOD_AUTHORIZED_KEY" >>"$iso_h/.ssh/authorized_keys"
@@ -74,6 +82,22 @@ elif [ "${ISOPOD_SUDO:-}" = "0" ]; then
   rm -f "/etc/sudoers.d/$iso_u"
 fi
 
+# Keep sudo's setuid bit in step with the policy. The image ships a setuid-root
+# sudo for every box, but a no-sudo box has no sudoers entry, so that binary is
+# pure standing escalation surface: a sudo LPE (Baron Samedit class) would be
+# root-in-box, the exact path --no-sudo removes. Strip the bit when there is no
+# policy, restore it when there is. Keyed on the policy FILE, not ISOPOD_SUDO, so
+# it stays correct on reconfigure boots where ISOPOD_SUDO is not re-passed. This
+# also covers engines (Apple container) whose run flags lack no-new-privileges.
+_iso_sudo="$(command -v sudo 2>/dev/null || true)"
+if [ -n "$_iso_sudo" ]; then
+  if [ -f "/etc/sudoers.d/$iso_u" ]; then
+    chmod u+s "$_iso_sudo" 2>/dev/null || true
+  else
+    chmod u-s "$_iso_sudo" 2>/dev/null || true
+  fi
+fi
+
 # Name resolution note (allow-list egress only). isopod runs an allow-list box
 # with `--dns=none`, so this box has no resolver at all: proxied clients hand the
 # hostname to the allow-list proxy, which resolves it. podman drops the file
@@ -96,6 +120,10 @@ fi
 # and do not exist in docker. Runs on every boot — the tmpfs starts empty.
 if [ -d /run/secrets ]; then
   chown "$iso_u:$iso_u" /run/secrets
+  # Normalize the mode: the podman/docker path mounts this tmpfs mode 0700, but
+  # Apple container's --tmpfs takes no options and defaults to 1777 (world
+  # read/write), which would expose injected secrets to any other uid in the box.
+  chmod 700 /run/secrets
 fi
 
 # Data volume (isopod create --disk). ISOPOD_DISK is "SIZE:MOUNTPOINT". The
@@ -123,6 +151,14 @@ if [ -n "${ISOPOD_DISK:-}" ]; then
     fi
   fi
   if [ -f "$iso_disk_img" ]; then
+    # Refuse a symlinked mountpoint: the box user could point a box-writable
+    # mountpoint at a root-owned dir so root's mount/chown here follows it (CWE-59,
+    # same class as the .ssh guard above). No box process runs at boot, so this
+    # check is race-free.
+    if [ -L "$iso_disk_mount" ]; then
+      rm -f "$iso_disk_mount"
+      mkdir -p "$iso_disk_mount"
+    fi
     if mount -o loop "$iso_disk_img" "$iso_disk_mount" 2>/dev/null; then
       chown "$iso_u:$iso_u" "$iso_disk_mount"
     else

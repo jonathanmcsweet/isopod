@@ -244,9 +244,10 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # Warn once here (not inside that function, which also renders the reference
   # Compose file) so the user knows those paths stay readable on Docker.
   if [ "$ENGINE" = docker ] && ! is_microvm_runtime && parse_hardening && [ "${#HARD_FMASKS[@]}" -gt 0 ]; then
-    warn "Docker can't mask these host-info files (runc blocks /proc bind mounts): ${HARD_FMASKS[*]}
-     — they stay readable inside the box. Use rootless podman, or a Tier 2/3 runtime
-     (runsc/kata/krun), to close them. Directory masks (/sys/*) are applied normally."
+    warn "SECURITY: Docker (runc) cannot mask these host-info files, so the box agent can READ them:
+     ${HARD_FMASKS[*]}. That leaks host fingerprint data (kernel cmdline, disk/LUKS UUIDs, ostree
+     commit, loaded modules). Close it with rootless podman or a Tier 2/3 runtime (runsc/kata/krun).
+     Directory masks (/sys/*) still apply."
   fi
   # Network egress isolation: put the box on the dedicated bridge the host
   # firewall targets and drop the raw-socket / net-admin caps so it cannot craft

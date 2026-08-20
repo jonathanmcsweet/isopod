@@ -166,6 +166,25 @@ refresh_port() { # refresh stored port + ssh config if the mapping changed
   fi
 }
 
+# A real host-key change vs a partial scan. ssh-keyscan -T can return a SUBSET of
+# the host's key types when one is slow to answer; a full-set comparison then
+# false-flags that as a swap and trains users to disable the check. Compare only
+# the key types present in BOTH files: an attacker on the port lacks the box's
+# private key, so any blob offered for a shared type differs and is still caught,
+# while a merely-absent type is not treated as a change. The ssh connection's own
+# StrictHostKeyChecking is the ultimate gate; this is the early, friendly signal.
+host_key_changed() { # host_key_changed <pinned-known_hosts> <fresh-scan>
+  local t b
+  declare -A pinned=()
+  while read -r t b; do [ -n "$t" ] && pinned["$t"]="$b"; done \
+    < <(awk 'NF>=3 {print $2, $3}' "$1")
+  while read -r t b; do
+    [ -n "$t" ] || continue
+    [ -n "${pinned[$t]:-}" ] && [ "${pinned[$t]}" != "$b" ] && return 0
+  done < <(awk 'NF>=3 {print $2, $3}' "$2")
+  return 1
+}
+
 # Pin the box's SSH host key. This is trust-on-first-use: the very first scan
 # (at create) is trusted blindly. A box's key is fixed at first boot and persists
 # across start/stop/reconfigure, and a recreated box gets a fresh box dir (hence
@@ -187,8 +206,7 @@ scan_host_key() { # scan_host_key <name>
       ssh-keyscan -p "$port" -T 3 "$host" 2>/dev/null >"$tmp" && [ -s "$tmp" ]; then
       # Compare only the key material (type + blob), not the leading [host]:port
       # field, which legitimately changes when the box gets a new published port.
-      if [ -s "$kh" ] &&
-        [ "$(awk '{print $2, $3}' "$kh" | sort -u)" != "$(awk '{print $2, $3}' "$tmp" | sort -u)" ]; then
+      if [ -s "$kh" ] && host_key_changed "$kh" "$tmp"; then
         # A box's key is fixed at first boot and persists across start/stop/
         # reconfigure, and a recreated box gets a fresh (empty) known_hosts, so an
         # already-pinned box should never present a different key. If one does, the
