@@ -1,5 +1,13 @@
 # Guidance for AI agents working in this repo
 
+## Your behavior
+- Never modify this document without consulting the user first
+- Explain things in concise, plain english free of technical jargon.
+- Use technical terms accurate to the domain terms in the codebase
+- When making technical decisions, do not give weight to development cost or development hours. Instead prefer readability, quality, simplicity, robustness, scalability, testability, and long term maintainability
+- when writting code comments or commit messages, be extremely concise. Favor concision over proper grammar.
+- never use em dash
+
 ## What this repo is
 Isopod is a CLI utility meant to make it easier for developers to use agents and LLMS in a safe manner via sandboxing. Isopod also contains an important key features that let developers copy files in or pull from a git repo, and fetch / copy them out. Another key feature is allowing them to rapidly launch an IDE (VSCodium for now) to connect to the sandbox via SSH. It has varying levels of sandboxing and security mitigations depending on the user's preferences and device capabilities. Our first most important users are Linux users, including all the distros mentioned in the README.md.
 
