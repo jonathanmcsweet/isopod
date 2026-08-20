@@ -336,7 +336,7 @@ EOF
   chmod +x "$STUB_DIR/docker"
   run "$ISOPOD_ROOT/isopod" create demo --color teal --engine docker
   assert_success
-  assert_output --partial "Docker can't mask"
+  assert_output --partial "Docker (runc) cannot mask"
   assert_output --partial "/proc/cmdline"
   # directory masks are still applied as --tmpfs, and no /proc bind is attempted
   assert_stub_called "docker run .*--tmpfs /sys/class/net"

@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.7.3"
+ISOPOD_VERSION="3.7.4"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -102,7 +102,7 @@ BOX_DISK_DEFAULT_MOUNT="/mnt/data"
 # image layers on the virtiofs filesystem a microVM box boots from (it cannot
 # carry the multiple uids/gids container storage needs), so layer extraction
 # fails with "setting up pivot dir: permission denied" until its storage sits on
-# a real block device. See docs/opt-in-security.md "Nested containers".
+# a real block device. See docs/security-model.md "Data volumes and nested containers".
 NESTED_STORAGE_MOUNT="/home/$CONTAINER_USER/.local/share/containers"
 NESTED_DISK_DEFAULT_SIZE="20g"
 # Default guest memory when a Tier 3 microVM runtime is active and the user gave
