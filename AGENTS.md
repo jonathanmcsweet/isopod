@@ -8,6 +8,14 @@
 - when writting code comments or commit messages, be extremely concise. Favor concision over proper grammar.
 - never use em dash
 
+## In-app text and user documentation
+- Write as one person telling another something useful, not as a specification.
+- Let related facts share a sentence with commas or appositives. Don't give each fact its own sentence.
+- Say what a thing is and what it's good for, not what it isn't.
+- Don't add a paragraph explaining how to interpret what you just said.
+- Cut any detail that doesn't change what the reader thinks or does.
+- Never end a paragraph on a short punchy line.
+
 ## What this repo is
 Isopod is a CLI utility meant to make it easier for developers to use agents and LLMS in a safe manner via sandboxing. Isopod also contains an important key features that let developers copy files in or pull from a git repo, and fetch / copy them out. Another key feature is allowing them to rapidly launch an IDE (VSCodium for now) to connect to the sandbox via SSH. It has varying levels of sandboxing and security mitigations depending on the user's preferences and device capabilities. Our first most important users are Linux users, including all the distros mentioned in the README.md.
 
