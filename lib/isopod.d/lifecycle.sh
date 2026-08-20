@@ -552,8 +552,12 @@ cmd_migrate() {
      $ws"
   fi
 
-  # Record the new account membership NOW, so a later failure still leaves meta
-  # describing the container that actually exists (in the target store).
+  # Record the new account membership as the FIRST action after the container is
+  # live — before any further step can fail — so meta always names the store the
+  # container is actually in. This is what box_status/open_box route on; if they
+  # disagreed, the box would read as "not running". The only gap left is a crash
+  # in the single statement between the run and this write, and the workspace tar
+  # (kept on every failure below) is the recovery for that.
   if [ "$target" = 1 ]; then meta_set "$name" account 1; else meta_del "$name" account; fi
 
   local hostport

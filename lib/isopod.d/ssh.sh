@@ -134,7 +134,17 @@ box_status() { # box_status <name>
       sed -nE 's/.*"state"[[:space:]]*:[[:space:]]*"([a-zA-Z]+)".*/\1/p' | head -n1 |
       grep . # non-zero when no state line was found (missing box)
   else
-    "${eng:-$ENGINE}" inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null
+    # Route through engine() so an --account box is inspected in the sandbox
+    # account's store, not the caller's. A direct `podman inspect` runs as the
+    # invoking user and never sees the account's container, so every status check
+    # would read "not running". A LOCAL routing flag (and a local ENGINE pinned to
+    # the box's own engine) keeps this from leaking to callers that iterate boxes
+    # (list, ssh include, gc).
+    # ISOPOD_ENGINE_AS_ACCOUNT is read by engine() (engine.sh, linted separately).
+    # shellcheck disable=SC2034
+    local ISOPOD_ENGINE_AS_ACCOUNT ENGINE="${eng:-$ENGINE}"
+    engine_ctx_for_box "$name"
+    engine inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null
   fi
 }
 

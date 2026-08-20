@@ -358,6 +358,13 @@ build_image() { # build_image <base-image> [dev-tools 0|1] [nested 0|1] -> echoe
   # engine copy the Dockerfile in and point -f at it; podman/docker read it from
   # share/ directly. Strip any trailing slash on TMPDIR to avoid the '//'.
   local ctx tmpbase="${TMPDIR:-/tmp}" dockerfile="$ISOPOD_DOCKERFILE"
+  # An --account build runs AS the sandbox account, which must traverse to and
+  # read the context. A TMPDIR under a 0700 home is not traversable by another
+  # user, so opening the context alone (chmod below) is not enough — the account
+  # cannot even reach it. For account builds base the context on world-traversable
+  # /tmp (sticky) instead; the context is three package files, so /tmp space is a
+  # non-issue. Non-account builds honour TMPDIR unchanged.
+  [ "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" = 1 ] && tmpbase=/tmp
   ctx=$(mktemp -d "${tmpbase%/}/isopod-ctx-XXXXXX")
   cp "$ISOPOD_ENTRYPOINT" "$ctx/isopod-entrypoint"
   cp "$ISOPOD_SYSCTL_CONF" "$ctx/hardening-sysctl.conf"

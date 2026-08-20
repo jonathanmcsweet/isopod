@@ -3503,3 +3503,91 @@ ip daddr 1.2.3.4 accept'
   assert_line '4 '
   assert_line '6 '
 }
+
+# ---- sandbox account: two-store correctness (adversarial-review fixes) --------
+# These model the reality the engine stubs otherwise hide: an --account box's
+# container and images live in a SEPARATE rootless store, reached only by routing
+# engine() through the account. The stubs report which store they were routed to.
+
+# Regression: box_status used to call the engine binary directly, so an account
+# box was always inspected in the caller's store and read as "not running".
+@test "box_status inspects the account store for an --account box" {
+  mk_meta acctbox 'account=1' 'engine=podman'
+  engine() { printf 'store=%s\n' "${ISOPOD_ENGINE_AS_ACCOUNT:-0}"; }
+  ENGINE=podman
+  run box_status acctbox
+  assert_success
+  assert_output --partial 'store=1'
+}
+
+@test "box_status uses the caller store for a plain box and does not leak routing" {
+  mk_meta plainbox 'engine=podman'
+  engine() { printf 'store=%s\n' "${ISOPOD_ENGINE_AS_ACCOUNT:-0}"; }
+  ENGINE=podman
+  ISOPOD_ENGINE_AS_ACCOUNT=0
+  run box_status plainbox
+  assert_output --partial 'store=0'
+  # Called in the current shell (not `run`), the local routing flag must not escape.
+  box_status plainbox >/dev/null
+  [ "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" = 0 ]
+}
+
+# Regression: gc only ever listed the user store, so account-store images could
+# never be reclaimed. It must sweep both and remove each orphan in its own store.
+@test "gc sweeps the account store and removes orphans in the right store" {
+  mk_meta acctbox 'account=1' 'engine=podman' 'image=localhost/isopod-base:kept'
+  detect_engine() { ENGINE=podman; }
+  account_exists() { return 0; }
+  account_uid() { printf 4242; }
+  account_runtime_dir() { printf '%s' "$TEST_TMP"; }
+  engine() {
+    case "$1" in
+      images)
+        if [ "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" = 1 ]; then
+          printf 'localhost/isopod-base:orphanacct\n'
+        else
+          printf 'localhost/isopod-base:orphanuser\n'
+        fi
+        ;;
+      rmi) printf 'store=%s %s\n' "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" "$2" >>"$TEST_TMP/rmi.log" ;;
+    esac
+  }
+  run cmd_gc --force
+  assert_success
+  assert_output --partial 'orphanuser'
+  assert_output --partial 'orphanacct'
+  assert_output --partial '(account store)'
+  grep -q 'store=0 localhost/isopod-base:orphanuser' "$TEST_TMP/rmi.log"
+  grep -q 'store=1 localhost/isopod-base:orphanacct' "$TEST_TMP/rmi.log"
+}
+
+# A set-up account with no live runtime dir cannot be reached; gc must skip it
+# (rather than die mid-sweep in engine()) and say the store was not swept.
+@test "gc skips the account store with a warning when its runtime dir is absent" {
+  mk_meta acctbox 'account=1' 'engine=podman'
+  detect_engine() { ENGINE=podman; }
+  account_exists() { return 0; }
+  account_uid() { printf 4242; }
+  account_runtime_dir() { printf '%s/nope' "$TEST_TMP"; }
+  engine() {
+    case "$1" in
+      images) printf 'localhost/isopod-base:orphanuser\n' ;;
+      rmi) : ;;
+    esac
+  }
+  run cmd_gc --force
+  assert_success
+  assert_output --partial 'was not swept'
+}
+
+# Defence in depth: a corrupted/hand-edited meta value must not reach the
+# root-loaded ruleset — account_host_allow_elements drops any spec that no longer
+# validates, keeping the good ones.
+@test "account_host_allow_elements skips a malformed stored spec" {
+  mk_meta acctbox 'account=1' 'guest_egress_allow=10.0.0.5,not-an-ip,192.168.1.0/24'
+  run account_host_allow_elements
+  assert_success
+  assert_output --partial '10.0.0.5'
+  assert_output --partial '192.168.1.0/24'
+  refute_output --partial 'not-an-ip'
+}

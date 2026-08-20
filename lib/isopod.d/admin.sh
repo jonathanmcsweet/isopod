@@ -95,24 +95,46 @@ cmd_gc() {
       [ -n "$v" ] && ref["$v"]=1
     done
   done
-  # Any isopod-managed image not in that set is a candidate for removal.
-  local img
-  local -a victims=()
-  while IFS= read -r img; do
-    [ -n "$img" ] || continue
-    case "$img" in
-      localhost/isopod-base:* | localhost/isopod-user:* | localhost/isopod-box-*:*)
-        [ -n "${ref[$img]:-}" ] || victims+=("$img")
-        ;;
-    esac
-  done < <(engine images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+  # Any isopod-managed image not in that set is a candidate for removal. Sweep
+  # BOTH stores: normal boxes' images live in the caller's rootless store,
+  # --account boxes' in the sandbox account's. Each victim is tagged with the
+  # store it lives in so removal targets the right one. Using the shared `ref` set
+  # across both stores is safe in either direction — an image referenced by any
+  # box is never a victim — so a base image that happens to exist in both stores
+  # is only ever kept (under-collected), never wrongly removed.
+  local img store spec acct_uid
+  local -a victims=() stores=("0:user")
+  # The account store is reachable only via podman as the account, and only once
+  # it is set up with a live runtime dir (else engine() would die mid-sweep).
+  if [ "$ENGINE" = podman ] && account_exists; then
+    acct_uid="$(account_uid 2>/dev/null || true)"
+    if [ -n "$acct_uid" ] && [ -d "$(account_runtime_dir)" ]; then
+      stores+=("1:account")
+    else
+      warn "sandbox account has no live runtime dir — its image store was not swept
+     (its images are not reclaimable until: sudo isopod account setup)"
+    fi
+  fi
+  for spec in "${stores[@]}"; do
+    ISOPOD_ENGINE_AS_ACCOUNT="${spec%%:*}"
+    store="${spec#*:}"
+    while IFS= read -r img; do
+      [ -n "$img" ] || continue
+      case "$img" in
+        localhost/isopod-base:* | localhost/isopod-user:* | localhost/isopod-box-*:*)
+          [ -n "${ref[$img]:-}" ] || victims+=("$store"$'\t'"$img")
+          ;;
+      esac
+    done < <(engine images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+  done
+  ISOPOD_ENGINE_AS_ACCOUNT=0
   # Machine-readable preview: list the candidates, never remove. No prompts, so a
   # UI can show reclaimable images before offering a one-click `gc --force`.
   if [ "$json" -eq 1 ]; then
     if [ "${#victims[@]}" -eq 0 ]; then
       printf '{"images":[]}\n'
     else
-      printf '{"images":%s}\n' "$(printf '%s\n' "${victims[@]}" | json_lines_array)"
+      printf '{"images":%s}\n' "$(printf '%s\n' "${victims[@]#*$'\t'}" | json_lines_array)"
     fi
     return 0
   fi
@@ -121,7 +143,10 @@ cmd_gc() {
     return 0
   fi
   printf 'Unreferenced isopod images:\n'
-  printf '  %s\n' "${victims[@]}"
+  for spec in "${victims[@]}"; do
+    store="${spec%%$'\t'*}" img="${spec#*$'\t'}"
+    if [ "$store" = account ]; then printf '  %s  (account store)\n' "$img"; else printf '  %s\n' "$img"; fi
+  done
   if [ "$dry" -eq 1 ]; then
     info "(dry run — nothing removed; re-run without --dry-run to delete)"
     return 0
@@ -132,11 +157,16 @@ cmd_gc() {
     read -r ans
     case "$ans" in y | Y | yes | YES) ;; *) die "aborted" ;; esac
   fi
-  for img in "${victims[@]}"; do
+  for spec in "${victims[@]}"; do
+    store="${spec%%$'\t'*}" img="${spec#*$'\t'}"
+    [ "$store" = account ] && ISOPOD_ENGINE_AS_ACCOUNT=1 || ISOPOD_ENGINE_AS_ACCOUNT=0
     if engine rmi "$img" >/dev/null 2>&1; then info "removed $img"; else
       warn "could not remove $img (still in use?)"
     fi
   done
+  # Read by engine() in engine.sh (linted separately, so it looks unused here).
+  # shellcheck disable=SC2034
+  ISOPOD_ENGINE_AS_ACCOUNT=0
 }
 
 # `isopod doctor` line(s) for the Tier-3 hardware-virt backend on Linux: /dev/kvm

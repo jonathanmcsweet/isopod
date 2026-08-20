@@ -15,6 +15,12 @@ account_uid() { id -u "$ISOPOD_ACCOUNT" 2>/dev/null; }
 
 account_exists() { id -u "$ISOPOD_ACCOUNT" >/dev/null 2>&1; }
 
+# The account's systemd runtime directory. Its presence is what makes rootless
+# podman reachable as the account; callers that route to the account store gate
+# on it (a missing one means the account was never started — engine() would die).
+# Kept as one function so the gate is testable without a real /run/user entry.
+account_runtime_dir() { printf '/run/user/%s' "$(account_uid)"; }
+
 account_has_subids() {
   grep -q "^$ISOPOD_ACCOUNT:" "$SUBUID_FILE" 2>/dev/null &&
     grep -q "^$ISOPOD_ACCOUNT:" "$SUBGID_FILE" 2>/dev/null
@@ -77,6 +83,11 @@ account_host_allow_elements() {
     local IFS=,
     for spec in $csv; do
       [ -n "$spec" ] || continue
+      # Re-validate before the address becomes part of a root-loaded ruleset.
+      # These were checked by lan_allow_valid when stored, but this is the last
+      # gate before `nft -f` runs as root, so a corrupted or hand-edited meta
+      # value is skipped here rather than breaking the whole account ruleset.
+      lan_allow_valid "$spec" || continue
       # Strip the optional port to leave the bare address/CIDR.
       case "$spec" in
         "["*) # [v6]:port  ->  v6
