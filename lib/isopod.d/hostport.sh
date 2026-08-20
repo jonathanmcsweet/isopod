@@ -61,6 +61,10 @@ host_port_parse() { # host_port_parse <spec>
         *:*)
           target="${rest%:*}"
           tgtp="${rest##*:}"
+          # An IPv6 target must use the [addr]:port form. Left bare, its own colons
+          # are indistinguishable from the field separators and ssh -R would reject
+          # the whole spec at connect time — catch it here with a clear error.
+          case "$target" in *:*) return 1 ;; esac
           ;;
         *)
           target="127.0.0.1"

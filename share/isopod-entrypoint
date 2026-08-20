@@ -269,6 +269,35 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
       if (p !~ /^[0-9][0-9]?[0-9]?[0-9]?[0-9]?$/) return 1
       return (p + 0 < 1 || p + 0 > 65535)
     }
+    function h4(g) { return (g ~ /^[0-9a-fA-F][0-9a-fA-F]?[0-9a-fA-F]?[0-9a-fA-F]?$/) }
+    # Strict IPv6 literal check, matching the host valid_ip6: at most one "::",
+    # eight groups without it (fewer with it), each group 1-4 hex digits, no
+    # embedded IPv4. A loose "hex and colons" test passes a malformed literal that
+    # nft then rejects, which takes EVERY exemption down with it (the whole allow
+    # layer fails to load) instead of skipping just this one, the way bad4 does for
+    # IPv4. Interval quantifiers ({1,4}) are avoided for the same awk-portability
+    # reason as bad4/badport.
+    function bad6(a,   c, idx, left, right, ln, rn, la, ra, parts, nseg, i) {
+      if (a ~ /:::/) return 1
+      if (index(a, ".") > 0) return 1
+      c = gsub(/::/, "::", a)
+      if (c > 1) return 1
+      if (c == 1) {
+        idx = index(a, "::")
+        left = substr(a, 1, idx - 1)
+        right = substr(a, idx + 2)
+        ln = (left == "" ? 0 : split(left, la, ":"))
+        rn = (right == "" ? 0 : split(right, ra, ":"))
+        if (ln + rn > 7) return 1
+        for (i = 1; i <= ln; i++) if (!h4(la[i])) return 1
+        for (i = 1; i <= rn; i++) if (!h4(ra[i])) return 1
+        return 0
+      }
+      nseg = split(a, parts, ":")
+      if (nseg != 8) return 1
+      for (i = 1; i <= nseg; i++) if (!h4(parts[i])) return 1
+      return 0
+    }
     # Tagged with a comment so `isopod egress lan-allow` can find and replace
     # exactly these rules later, without touching anything else in the chain.
     function emit(kw, a, p,   tag) {
@@ -318,7 +347,7 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
           if (pfx != "" && badpfx(pfx, 32)) continue
           emit("ip", addr, port)
         } else {
-          if (base !~ /^[0-9a-fA-F:]+$/ || index(base, ":") == 0) continue
+          if (bad6(base)) continue
           if (pfx != "" && badpfx(pfx, 128)) continue
           emit("ip6", addr, port)
         }

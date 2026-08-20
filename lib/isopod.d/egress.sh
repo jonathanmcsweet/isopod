@@ -1139,6 +1139,9 @@ egress_lan_allow() { # egress_lan_allow <name> [--rm] [spec]
 egress_lan_denied() { # egress_lan_denied <name> [count]
   local name="${1:-}" n="${2:-20}" helper="$ISOPOD_LIB/guest_egress_allow.sh"
   [ -n "$name" ] || die "usage: isopod egress lan-denied <box> [count]"
+  # The count is interpolated into a command run as root inside the box, so it
+  # must be digits only — never a path for shell metacharacters into that shell.
+  case "$n" in "" | *[!0-9]*) die "count must be a non-negative integer, got '$n'" ;; esac
   open_box "$name"
   [ -f "$helper" ] || die "missing helper: $helper (reinstall isopod)"
   lan_allow_applies "$name" ||

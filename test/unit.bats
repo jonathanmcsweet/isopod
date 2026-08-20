@@ -2730,6 +2730,15 @@ ip daddr 1.2.3.4 accept'
   assert_output ''
 }
 
+# The count reaches a root shell inside the box; a non-numeric one must be
+# refused before open_box or any box command runs, not carried into that shell.
+@test "egress lan-denied rejects a non-numeric count" {
+  open_box() { :; }
+  run egress_lan_denied demo '20; reboot'
+  assert_failure
+  assert_output --partial "count must be a non-negative integer"
+}
+
 @test "egress lan-allow appends rather than replacing" {
   mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1'
   open_box() { :; }
@@ -2940,6 +2949,15 @@ ip daddr 1.2.3.4 accept'
     run host_port_parse "$spec"
     assert_failure
   done
+}
+
+# An IPv6 target must be bracketed; unbracketed, its colons are ambiguous and ssh
+# -R would reject the spec at connect time — reject it at parse instead.
+@test "host_port_parse rejects an unbracketed IPv6 target" {
+  run host_port_parse '8080:fd00::1:443'
+  assert_failure
+  run host_port_parse '8080:2001:db8::5:443'
+  assert_failure
 }
 
 # The spec is stored comma-separated and handed to ssh as an argument.

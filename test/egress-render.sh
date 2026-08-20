@@ -206,11 +206,25 @@ printf '%s\n' "$allow_rules" | grep -qc 'isopod-lan-allow' >/dev/null ||
 ok "lan-allow rules generated from specs (addresses, ranges, ports, IPv6)"
 
 for bad in '10.20.30.999' '10.20.30.40/33' '1.1.1.1; nft flush ruleset' 'accept' \
-  '10.0.0.1:0' '10.0.0.1:99999' 'zzz' '10.0.0.1 accept'; do
+  '10.0.0.1:0' '10.0.0.1:99999' 'zzz' '10.0.0.1 accept' \
+  '1:2:3:4:5:6:7:8:9' '12345::1' 'fd00:::1' 'gg00::1' 'fd00::1::2' 'fd00::/129'; do
   out="$(awk -v specs="$bad" "$allow_prog" </dev/null)"
   [ -z "$out" ] || fail "lan-allow program accepted a malformed spec '$bad': $out"
 done
 ok "lan-allow program rejects malformed specs (no rule injection)"
+
+# A malformed IPv6 entry must cost only itself: the valid entries around it still
+# emit, so one bad address cannot take the whole allow layer down (which is what a
+# ruleset nft rejects would do). This is the IPv6 counterpart of the per-entry
+# skip the IPv4 path already had.
+mixed="$(awk -v specs='fd00::1,1:2:3:4:5:6:7:8:9,10.0.0.5' "$allow_prog" </dev/null)"
+printf '%s\n' "$mixed" | grep -q 'ip6 daddr fd00::1 accept' ||
+  fail "a good IPv6 entry was dropped alongside a malformed sibling"
+printf '%s\n' "$mixed" | grep -q 'ip daddr 10.0.0.5 accept' ||
+  fail "a good IPv4 entry was dropped alongside a malformed IPv6 sibling"
+printf '%s\n' "$mixed" | grep -q '1:2:3:4:5:6:7:8:9' &&
+  fail "the malformed IPv6 entry was emitted instead of skipped"
+ok "a malformed IPv6 entry is skipped per-entry, keeping the valid ones"
 
 guest="$(awk -v gw="192.168.1.1" -v rules="$guest_rules" -v allow="$allow_rules" \
   -v logging=1 -v log4="$log4" -v log6="$log6" "$render_prog" "$guest_tmpl")"
