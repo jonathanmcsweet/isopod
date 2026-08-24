@@ -1,0 +1,37 @@
+usage: isopod account <setup|status|teardown|rules>
+
+The sandbox account is an OPT-IN hard network boundary: boxes run under a
+dedicated unprivileged account that owns nothing, and the host kernel drops
+that account's traffic to private address space. Unlike the in-box ruleset
+(--guest-egress), nothing inside a box — including root gained by an exploit —
+can remove these rules, and they still apply to a process that escaped the box.
+The engine stays rootless; root is used once, to load a static rule.
+
+  setup     one-time, as root: create the account (subordinate ids, linger,
+            home for its image store), load the firewall rules, install the
+            boot persistence unit and a sudoers grant scoped to the engine
+            binary. Idempotent — safe to re-run; re-applies rules after a
+            firewall reload.
+  status    what is and is not in place, including whether the rules are
+            loaded and their drop counters.
+  teardown  remove the rules, unit and sudoers grant (as root). Refuses while any
+            box still runs under the account (removing the boundary from under a
+            live box leaves it running unprotected) — remove or migrate those
+            first. Confirms unless --force; --purge also deletes the account and
+            its image store.
+  rules     print the ruleset setup would load.
+
+  sudo isopod account setup
+  isopod account status
+  isopod create devbox --account     (after setup; stage 2 of this feature)
+
+Boxes created with --account share the account's image store: one base image
+plus a thin layer per box. Existing boxes are unaffected until migrated.
+
+Trade-offs: every account box shares one firewall identity, so `egress lan-allow`
+exemptions on account boxes form a UNION in the host rules (per-box granularity
+stays in the guest layer, which still enforces any port you scoped). Opening an
+exemption updates two kernels — the guest ruleset and the host account set — and
+the host half needs sudo, so `egress lan-allow` on an account box prompts once.
+Linux + podman only. Override the account name with ISOPOD_ACCOUNT (default:
+sandbox).

@@ -18,6 +18,44 @@ load_libs() {
   load "$ISOPOD_ROOT/test/libs/bats-assert/load.bash"
 }
 
+# Commands the suite must be able to treat as ABSENT. A stub can ADD a command to
+# PATH, but nothing can take one away — so on a machine that genuinely has kata,
+# krun, runsc or an editor installed, every test asserting "nothing is installed"
+# fails. Worse, it is not confined to those tests: resolve_runtime probes real
+# binaries, so a half-installed kata on the host silently changes which runtime
+# unrelated create tests select. These names are left out of the mirrored PATH
+# below; a test that wants one present installs its own stub, as before.
+ISOPOD_TEST_HIDDEN_BINS="kata kata-runtime kata-qemu kata-clh kata-fc krun runsc runsc-kvm crun-vm codium vscodium code cursor windsurf flatpak git-filter-repo"
+
+# A PATH that mirrors the host's, minus ISOPOD_TEST_HIDDEN_BINS. Mirroring —
+# rather than listing the tools the suite needs — means nothing can go missing:
+# every command still resolves except the handful the tests control. Built once
+# per bats run (BATS_RUN_TMPDIR is per-run, so it cannot go stale between runs)
+# and reused, because the symlink farm is too slow to rebuild for each test.
+isopod_hermetic_bin() {
+  local cache="${BATS_RUN_TMPDIR:-${BATS_TMPDIR:-/tmp}}/isopod-hermetic-bin"
+  if [ ! -d "$cache" ]; then
+    local tmp="$cache.$$" dir f name
+    local -a dirs=()
+    mkdir -p "$tmp"
+    IFS=: read -ra dirs <<<"$PATH"
+    for dir in "${dirs[@]}"; do
+      [ -d "$dir" ] || continue
+      for f in "$dir"/*; do
+        [ -f "$f" ] && [ -x "$f" ] || continue
+        name="${f##*/}"
+        case " $ISOPOD_TEST_HIDDEN_BINS " in *" $name "*) continue ;; esac
+        # First match wins, mirroring how PATH itself resolves a name.
+        [ -e "$tmp/$name" ] || ln -s "$f" "$tmp/$name" 2>/dev/null || true
+      done
+    done
+    # Publish atomically so a concurrent builder (bats -j) either wins or loses
+    # cleanly, rather than exposing a half-populated directory.
+    mv "$tmp" "$cache" 2>/dev/null || rm -rf "$tmp"
+  fi
+  printf '%s' "$cache"
+}
+
 # Create a sandboxed environment for a single test.
 isopod_setup_env() {
   TEST_TMP="$(mktemp -d "${BATS_TMPDIR:-/tmp}/isopod-test.XXXXXX")"
@@ -26,12 +64,13 @@ isopod_setup_env() {
   export ISOPOD_CONFIG_DIR="$TEST_TMP/home/.config/isopod"
   mkdir -p "$HOME/.ssh"
 
-  # Stub directory takes precedence on PATH.
+  # Stub directory takes precedence on PATH, over a mirror of the host's PATH
+  # with the tests' controlled commands removed (see isopod_hermetic_bin).
   export STUB_DIR="$TEST_TMP/stubs"
   mkdir -p "$STUB_DIR"
   export STUB_LOG="$TEST_TMP/stub-calls.log"
   : >"$STUB_LOG"
-  export PATH="$STUB_DIR:$PATH"
+  export PATH="$STUB_DIR:$(isopod_hermetic_bin)"
 }
 
 isopod_teardown_env() {
@@ -88,20 +127,18 @@ sed_i() {
 
 # Look up an IDE binary (find_ide_bin) in an environment isolated from the host's
 # real editors, so these tests pass whether or not the developer has codium etc.
-# installed. Two host leaks are closed: PATH is reduced to the test stubs plus
-# the base system dirs (hiding a host codium/cursor in /opt/homebrew, /usr/local,
-# ...), and the target table is copied with its macOS .app paths blanked (so an
-# installed /Applications/*.app cannot satisfy the lookup either). The base dirs
-# are kept on PATH so stub shebangs (/usr/bin/env bash) still run. Sets IDE_CMD
-# like find_ide_bin and returns its exit status.
+# installed. PATH is already hermetic (isopod_hermetic_bin drops the editor names
+# wherever they live, including /usr/bin — an earlier version reduced PATH to the
+# base system dirs instead, which missed a distro-packaged editor sitting in one
+# of them). This closes the remaining leak: the target table is copied with its
+# macOS .app paths blanked, so an installed /Applications/*.app cannot satisfy
+# the lookup either. Sets IDE_CMD like find_ide_bin and returns its exit status.
 ide_lookup() {
-  local _path="$PATH" _share="$ISOPOD_SHARE" _rc=0
+  local _share="$ISOPOD_SHARE" _rc=0
   mkdir -p "$TEST_TMP/ide-share"
   awk 'NF==0 || $1 ~ /^#/ { print; next } { $3="-"; print }' \
     "$ISOPOD_ROOT/share/ide-targets" >"$TEST_TMP/ide-share/ide-targets"
-  ISOPOD_SHARE="$TEST_TMP/ide-share" PATH="$STUB_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
-    find_ide_bin "$@" || _rc=$?
-  PATH="$_path"
+  ISOPOD_SHARE="$TEST_TMP/ide-share" find_ide_bin "$@" || _rc=$?
   ISOPOD_SHARE="$_share"
   return "$_rc"
 }

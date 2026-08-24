@@ -96,8 +96,13 @@ egress_can_enforce() { # egress_can_enforce <engine>
       # entries look like 'name=seccomp,profile=default' or 'name=rootless'.
       # Match the exact 'name=rootless' token (one entry per line) rather than a
       # bare 'rootless' substring, which could match a profile path.
-      ! docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null |
-        grep -qx 'name=rootless'
+      local _secopts
+      _secopts="$(docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null)"
+      # Empty means docker info failed or reported nothing: cannot confirm rootful,
+      # so refuse to enforce rather than assume it (which would build an OPEN box
+      # on a genuinely rootless docker and report it as enforced).
+      [ -n "$_secopts" ] || return 1
+      ! printf '%s\n' "$_secopts" | grep -qx 'name=rootless'
       ;;
     *) return 1 ;;
   esac
@@ -132,6 +137,26 @@ egress_check_subnet() { # egress_check_subnet <engine> <subnets>
   esac
 }
 
+# Warn if a reused network's host bridge interface is not the fixed name the nft/pf
+# IPv6 drop is scoped to (iifname): a mismatch means box IPv6 egress silently is
+# not dropped. Only bites a network created out of band — ensure creates it with
+# the pinned name. Stays quiet when the name can't be read, so it never false-alarms.
+egress_check_iface() { # egress_check_iface <engine>
+  local engine="$1" iface=""
+  if [ "$engine" = docker ]; then
+    iface=$(docker network inspect "$ISOPOD_EGRESS_NET" \
+      --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
+  else
+    iface=$("$engine" network inspect "$ISOPOD_EGRESS_NET" \
+      --format '{{.NetworkInterface}}' 2>/dev/null || true)
+  fi
+  [ -z "$iface" ] && return 0
+  [ "$iface" = "$ISOPOD_EGRESS_IFACE" ] && return 0
+  warn "network '$ISOPOD_EGRESS_NET' uses host bridge '$iface', not '$ISOPOD_EGRESS_IFACE' — the
+       IPv6 egress drop is scoped to the latter, so box IPv6 on a dual-stack network would be
+       unfiltered. Recreate it: $engine network rm $ISOPOD_EGRESS_NET"
+}
+
 ensure_egress_network() { # ensure_egress_network <engine>
   local engine="$1" subnets=""
   # Already present? Confirm its subnet matches the firewall's, then reuse it.
@@ -140,6 +165,7 @@ ensure_egress_network() { # ensure_egress_network <engine>
       subnets=$(docker network inspect "$ISOPOD_EGRESS_NET" \
         --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true)
       egress_check_subnet "$engine" "$subnets"
+      egress_check_iface "$engine"
       return 0
     fi
   else
@@ -147,6 +173,7 @@ ensure_egress_network() { # ensure_egress_network <engine>
       subnets=$("$engine" network inspect "$ISOPOD_EGRESS_NET" \
         --format '{{range .Subnets}}{{.Subnet}} {{end}}' 2>/dev/null || true)
       egress_check_subnet "$engine" "$subnets"
+      egress_check_iface "$engine"
       return 0
     fi
   fi
@@ -516,6 +543,9 @@ egress_load_nft() {
   have nft || die "nft (nftables) not found — install nftables to apply the egress firewall"
   info "Loading isopod egress firewall into the host network namespace..."
   printf '%s\n' "$rendered" | egr_run_root nft -f - || die "nft failed to load the ruleset"
+  # Drop a world-readable marker so a later non-root create can tell the rules were
+  # loaded (it cannot read nft without root). Best-effort: never fail apply over it.
+  printf 'loaded\n' | egr_write_root "$ISOPOD_EGRESS_MARKER" 2>/dev/null || true
   info "egress firewall loaded (table inet isopod)."
   warn "not persistent across reboot / firewalld reload — re-run 'sudo isopod egress apply' after
        those. For reboot persistence, run: sudo isopod egress persist"
@@ -583,7 +613,7 @@ egress_unpersist() {
   fi
   have systemctl || die "needs systemd (systemctl)"
   egr_run_root systemctl disable --now "$ISOPOD_EGRESS_NFT_UNIT" 2>/dev/null || true
-  egr_run_root rm -f "/etc/systemd/system/$ISOPOD_EGRESS_NFT_UNIT.service"
+  egr_run_root rm -f "/etc/systemd/system/$ISOPOD_EGRESS_NFT_UNIT.service" "$ISOPOD_EGRESS_MARKER"
   egr_run_root systemctl daemon-reload
   info "removed the egress boot unit ('$ISOPOD_EGRESS_NFT_UNIT'). A currently-loaded ruleset stays until flushed."
 }
@@ -727,6 +757,13 @@ resolve_egress() { # resolve_egress <engine>
      ISOPOD_EGRESS=off to silence this."
     export ISOPOD_EGRESS=off
     ISOPOD_EGRESS_DEGRADED=1
+  elif [ "$rc" = 2 ] && [ ! -e "$ISOPOD_EGRESS_MARKER" ]; then
+    # Cannot read the firewall without root, and nothing recorded that apply ran.
+    # Do not flip to OPEN (a box built by an earlier isopod may be genuinely loaded
+    # but unmarked), but say so plainly rather than silently assuming enforcement.
+    warn "egress is on by default but this create cannot confirm the host firewall without root,
+     and no apply marker is present — if you have not run 'sudo isopod egress apply', this box may
+     be OPEN. Confirm with: sudo isopod egress status."
   fi
   return 0
 }
@@ -741,10 +778,24 @@ egress_posture_note() { # egress_posture_note <name>
     lan-deny) info "Network: egress lan-deny ACTIVE — LAN/host/metadata blocked, public internet reachable." ;;
     *)
       if [ "${ISOPOD_EGRESS_DEGRADED:-0}" = 1 ]; then
-        warn "Network: OPEN — egress isolation is ON by default but could NOT be enforced here, so
+        # The in-guest ruleset is a separate mechanism, and it applies precisely
+        # when host enforcement does not — so this branch is exactly where it is
+        # most likely to be running. Announcing an unfiltered LAN while nft is
+        # dropping that traffic is not a harmless overstatement: it sends the user
+        # hunting a hole that is not there, and it hides the layer that IS
+        # filtering when something in the box stops reaching the network.
+        if [ "$(meta_get "$name" guest_egress 2>/dev/null || true)" = on ] && is_microvm_runtime; then
+          warn "Network: no host-enforced boundary here ('$name' runs under a rootless engine), but
+     in-box isolation IS active (--guest-egress): the box cannot reach your LAN, and its own
+     resolvers stay reachable on port 53 so DNS keeps working. This runs INSIDE the box, so
+     guest root could remove it. For a boundary that survives that, use a rootful engine:
+       sudo isopod egress apply"
+        else
+          warn "Network: OPEN — egress isolation is ON by default but could NOT be enforced here, so
      '$name' can reach your LAN and the internet unfiltered. Enable it (needs root, one time):
        sudo isopod egress apply
      then recreate the box (or: isopod reconfigure $name). Silence with ISOPOD_EGRESS=off."
+        fi
       else
         info "Network: OPEN (egress disabled by config)."
       fi
@@ -876,6 +927,288 @@ egress_preflight() { # egress_preflight <engine>
 # egress — manage the host-side firewall (and, for allow-list, the filtering
 # proxy) for `egress lan-deny` / `egress allow-list` boxes
 # ---------------------------------------------------------------------------
+# --- guest ruleset: private-space exemptions (isopod egress lan-allow) --------
+# These are per BOX, not per host: the rules live in the box's own nftables
+# ruleset (share/egress-guest.nft), so they only mean anything on a microVM box
+# with guest egress on. The host-side `egress allow` above is a different thing —
+# it adds a DOMAIN to the filtering proxy's allow-list.
+
+# Validate one spec. Accepted: ADDR, ADDR/PREFIX, ADDR:PORT, ADDR/PREFIX:PORT for
+# IPv4; the same for IPv6, with brackets when a port is present ([ADDR]:PORT), so
+# the port separator can't be confused with the address's own colons. Mirrors the
+# entrypoint's validation: the host decides what gets stored, the box re-checks
+# before anything becomes a rule.
+lan_allow_valid() { # lan_allow_valid <spec>
+  local spec="${1:-}" addr="" port="" fam=4 base pfx x
+  local -a o=()
+  # A comma would split the stored list and whitespace would break the rule
+  # shape, so neither can appear in a spec.
+  case "$spec" in
+    "" | *[[:space:],]*) return 1 ;;
+  esac
+  case "$spec" in
+    "["*)
+      case "$spec" in *"]:"*) ;; *) return 1 ;; esac
+      port="${spec##*]:}"
+      addr="${spec#"["}"
+      addr="${addr%%]:*}"
+      fam=6
+      ;;
+    # Two or more colons is IPv6; a bare IPv6 cannot carry a port.
+    *:*:*) addr="$spec" fam=6 ;;
+    *:*)
+      port="${spec##*:}"
+      addr="${spec%:*}"
+      ;;
+    *) addr="$spec" ;;
+  esac
+  [ -n "$addr" ] || return 1
+  [ -z "$port" ] || valid_port "$port" || return 1
+  case "$addr" in
+    */*)
+      base="${addr%%/*}"
+      pfx="${addr##*/}"
+      ;;
+    *)
+      base="$addr"
+      pfx=""
+      ;;
+  esac
+  [ -n "$base" ] || return 1
+  if [ "$fam" = 4 ]; then
+    IFS=. read -ra o <<<"$base"
+    [ "${#o[@]}" -eq 4 ] || return 1
+    for x in "${o[@]}"; do
+      case "$x" in "" | *[!0-9]*) return 1 ;; esac
+      [ "${#x}" -le 3 ] && [ "$x" -le 255 ] || return 1
+    done
+    [ -z "$pfx" ] && return 0
+    case "$pfx" in *[!0-9]*) return 1 ;; esac
+    [ "${#pfx}" -le 3 ] && [ "$pfx" -le 32 ] || return 1
+  else
+    # Strict literal check — a loose "hex and colons" test lets a malformed
+    # address (too many groups, a 5-digit group) through, and nft then rejects
+    # the whole ruleset, failing the box closed with no sshd.
+    valid_ip6 "$base" || return 1
+    [ -z "$pfx" ] && return 0
+    case "$pfx" in *[!0-9]*) return 1 ;; esac
+    [ "${#pfx}" -le 3 ] && [ "$pfx" -le 128 ] || return 1
+  fi
+  return 0
+}
+
+# Turn the stored comma-separated list into nft rule lines, tagged so the in-box
+# helper can find and replace exactly these. Assumes each spec already passed
+# lan_allow_valid; the box checks the rendered shape again regardless.
+lan_allow_rules() { # lan_allow_rules <csv>
+  local csv="${1:-}" spec addr port fam kw
+  local -a specs=()
+  [ -n "$csv" ] || return 0
+  IFS=, read -ra specs <<<"$csv"
+  for spec in "${specs[@]}"; do
+    [ -n "$spec" ] || continue
+    port="" fam=4
+    case "$spec" in
+      "["*)
+        port="${spec##*]:}"
+        addr="${spec#"["}"
+        addr="${addr%%]:*}"
+        fam=6
+        ;;
+      *:*:*) addr="$spec" fam=6 ;;
+      *:*)
+        port="${spec##*:}"
+        addr="${spec%:*}"
+        ;;
+      *) addr="$spec" ;;
+    esac
+    kw=ip
+    [ "$fam" = 6 ] && kw=ip6
+    if [ -z "$port" ]; then
+      printf '%s daddr %s accept comment "isopod-lan-allow"\n' "$kw" "$addr"
+    else
+      printf '%s daddr %s tcp dport %s accept comment "isopod-lan-allow"\n' "$kw" "$addr" "$port"
+      printf '%s daddr %s udp dport %s accept comment "isopod-lan-allow"\n' "$kw" "$addr" "$port"
+    fi
+  done
+}
+
+# Warn when the stored list cannot currently take effect. It is still stored, so
+# turning guest egress on later picks it up — better than refusing the command
+# and losing what the user asked for.
+lan_allow_applies() { # lan_allow_applies <name>
+  [ "$(meta_get "$1" guest_egress 2>/dev/null || true)" = on ]
+}
+
+lan_allow_apply_live() { # lan_allow_apply_live <name> <csv>
+  local name="$1" csv="$2" helper="$ISOPOD_LIB/guest_egress_allow.sh"
+  [ -f "$helper" ] || die "missing helper: $helper (reinstall isopod)"
+  [ "$(box_status "$name" 2>/dev/null || true)" = running ] || return 1
+  local rules
+  rules="$(lan_allow_rules "$csv")"
+  root_ssh "$name" -- "sh -s -- sync $(shq "$rules")" <"$helper" >/dev/null 2>&1 || return 1
+  return 0
+}
+
+egress_lan_allow() { # egress_lan_allow <name> [--rm] [spec]
+  local name="" action=list spec=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --rm | --remove)
+        action="rm"
+        shift
+        ;;
+      -h | --help)
+        render_tmpl egress-help.txt
+        return 0
+        ;;
+      -*) die "unknown option for egress lan-allow: $1" ;;
+      *)
+        if [ -z "$name" ]; then
+          name="$1"
+        elif [ -z "$spec" ]; then
+          spec="$1"
+        else
+          die "unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+  [ -n "$name" ] ||
+    die "usage: isopod egress lan-allow <box> [--rm] [<addr>[/<prefix>][:<port>]]"
+  open_box "$name"
+  [ "$action" = rm ] && [ -z "$spec" ] &&
+    die "usage: isopod egress lan-allow <box> --rm <addr>"
+  [ "$action" = list ] && [ -n "$spec" ] && action=add
+
+  local cur new=""
+  cur="$(meta_get "$name" guest_egress_allow 2>/dev/null || true)"
+
+  if [ "$action" = list ]; then
+    if [ -z "$cur" ]; then
+      printf 'no lan-allow entries for %s\n' "$name"
+      printf '  add one with: isopod egress lan-allow %s <addr>[/<prefix>][:<port>]\n' "$name"
+    else
+      printf '%s\n' "${cur//,/$'\n'}"
+    fi
+    lan_allow_applies "$name" ||
+      warn "guest egress is off for this box, so these entries are stored but not enforced"
+    return 0
+  fi
+
+  local e found=0
+  local -a keep=()
+  IFS=, read -ra keep <<<"$cur"
+  if [ "$action" = add ]; then
+    lan_allow_valid "$spec" || die "invalid address '$spec'
+     Use an address or range, with an optional single port:
+       10.20.30.40        10.20.0.0/16        10.20.30.40:5432
+       fd00::1            fd00::/8            [fd00::1]:5432"
+    for e in "${keep[@]}"; do
+      [ "$e" = "$spec" ] && found=1
+    done
+    if [ "$found" = 1 ]; then
+      info "$spec is already allowed for $name"
+      return 0
+    fi
+    new="$cur${cur:+,}$spec"
+  else
+    for e in "${keep[@]}"; do
+      [ -z "$e" ] && continue
+      if [ "$e" = "$spec" ]; then
+        found=1
+        continue
+      fi
+      new="$new${new:+,}$e"
+    done
+    [ "$found" = 1 ] || die "$spec is not in the lan-allow list for $name"
+  fi
+
+  meta_set "$name" guest_egress_allow "$new"
+
+  # An account box has a SECOND boundary — the host firewall keyed on the sandbox
+  # account — that would drop this address regardless of the guest ruleset. The
+  # exemption has to be opened there too, or the guest layer would allow what the
+  # host layer still drops. That half needs root, so it is a separate step with
+  # its own (single) sudo prompt. The port, if any, lives only in the guest layer.
+  if [ "$(meta_get "$name" account 2>/dev/null || true)" = 1 ]; then
+    if account_sync_host_lan_allow; then
+      info "host boundary updated for the sandbox account"
+    else
+      warn "could not update the host account firewall (needs sudo). The guest rule
+     is set, but the host boundary will still drop $spec. Re-apply with:
+       sudo isopod account setup"
+    fi
+  fi
+
+  if ! lan_allow_applies "$name"; then
+    info "stored. Guest egress is off for this box, so nothing is being filtered."
+    return 0
+  fi
+  # A box built before this feature has an entrypoint that never reads the list.
+  # The live apply below still works — same table, same chain — so the address
+  # starts working immediately and then disappears at the next restart, with
+  # nothing saying why. Say why now instead.
+  local stale=0
+  box_is_stale "$name" 2>/dev/null && stale=1
+  if lan_allow_apply_live "$name" "$new"; then
+    info "$([ "$action" = add ] && printf 'allowed' || printf 'removed') $spec for $name (applied now)"
+    if [ "$stale" = 1 ]; then
+      warn "this box predates lan-allow, so the change applies NOW but is lost on the
+     next restart. Make it stick: isopod upgrade $name"
+    fi
+  else
+    info "$([ "$action" = add ] && printf 'allowed' || printf 'removed') $spec for $name"
+    if [ "$stale" = 1 ]; then
+      warn "this box predates lan-allow — its ruleset cannot use the list.
+     Run: isopod upgrade $name"
+    elif [ "$(box_status "$name" 2>/dev/null || true)" != running ]; then
+      # lan_allow_apply_live returns non-zero for a stopped box too, so tell a
+      # stopped box to start rather than to restart something already down.
+      warn "stored; it takes effect when the box starts: isopod start $name"
+    else
+      warn "could not update the running box — restart it to apply: isopod stop $name && isopod start $name"
+    fi
+  fi
+}
+
+egress_lan_denied() { # egress_lan_denied <name> [count]
+  local name="${1:-}" n="${2:-20}" helper="$ISOPOD_LIB/guest_egress_allow.sh"
+  [ -n "$name" ] || die "usage: isopod egress lan-denied <box> [count]"
+  # The count is interpolated into a command run as root inside the box, so it
+  # must be digits only — never a path for shell metacharacters into that shell.
+  case "$n" in "" | *[!0-9]*) die "count must be a non-negative integer, got '$n'" ;; esac
+  open_box "$name"
+  [ -f "$helper" ] || die "missing helper: $helper (reinstall isopod)"
+  lan_allow_applies "$name" ||
+    die "guest egress is off for $name — nothing is being blocked, so nothing is logged"
+  [ "$(box_status "$name" 2>/dev/null || true)" = running ] ||
+    die "$name is not running (start it with: isopod start $name)"
+
+  local out
+  out="$(root_ssh "$name" -- "sh -s -- denied $n" <"$helper" 2>/dev/null || true)"
+  if [ -z "$out" ]; then
+    printf 'nothing blocked recently for %s\n' "$name"
+    if box_is_stale "$name" 2>/dev/null; then
+      printf '  This box predates drop logging, so it has nothing to report.\n'
+      printf '  Run: isopod upgrade %s\n' "$name"
+    else
+      printf '  Either the box has not tried to reach private space, or this kernel\n'
+      printf '  cannot log dropped packets (filtering still works either way).\n'
+    fi
+    return 0
+  fi
+  printf 'Blocked destinations for %s (most recent last):\n\n' "$name"
+  printf '  %-24s %-6s %s\n' DESTINATION PROTO COUNT
+  local dest proto count
+  while IFS=$'\t' read -r dest proto count; do
+    [ -n "$dest" ] || continue
+    printf '  %-24s %-6s %s\n' "$dest" "${proto:-?}" "$count"
+  done <<<"$out"
+  printf '\nAllow one with: isopod egress lan-allow %s <destination>\n' "$name"
+}
+
 cmd_egress() {
   local action="${1:-status}"
   shift 2>/dev/null || true
@@ -889,6 +1222,8 @@ cmd_egress() {
       [ -n "${1:-}" ] || die "usage: isopod egress allow <domain>"
       egress_allow "$1"
       ;;
+    lan-allow) egress_lan_allow "$@" ;;
+    lan-denied) egress_lan_denied "$@" ;;
     log) egress_log "$@" ;;
     denied)
       if [ "${1:-}" = "--json" ]; then egress_denied_json; else egress_denied; fi
@@ -908,7 +1243,7 @@ cmd_egress() {
       fi
       ;;
     -h | --help | help) render_tmpl egress-help.txt ;;
-    *) die "unknown egress action: $action (try: isopod egress status|apply|observe|persist|unpersist|allow|allowlist|log|denied|rules)" ;;
+    *) die "unknown egress action: $action (try: isopod egress status|apply|observe|persist|unpersist|allow|allowlist|log|denied|rules|lan-allow|lan-denied)" ;;
   esac
 }
 
@@ -1040,5 +1375,60 @@ egress_allowlist_show() {
     egress_allowlist_domains "$USER_EGRESS_ALLOWLIST" | sed 's/^/  /'
   else
     printf '  (none — add with: isopod egress allow <domain>)\n'
+  fi
+}
+
+# One-line description of a box's ACTUAL network posture, for `isopod info`.
+# Deliberately reports what is in force, not what was requested: a box whose
+# egress degraded at create (rootless engine, host firewall not loaded) was
+# previously indistinguishable from an isolated one once the create output
+# scrolled away — which is how a box ends up open while its owner believes
+# otherwise. Names the in-guest layer too, so "blocked" is never ambiguous about
+# which mechanism is doing it.
+box_egress_posture() { # box_egress_posture <name>
+  local mode degraded guest guest_on=0
+  mode="$(meta_get "$1" egress 2>/dev/null || true)"
+  degraded="$(meta_get "$1" egress_degraded 2>/dev/null || printf 0)"
+  guest="$(meta_get "$1" guest_egress 2>/dev/null || true)"
+  # The guest ruleset is loaded by the entrypoint ONLY on a Tier 3 microVM box —
+  # build_run_args gates it on is_microvm_runtime. A plain container and a gVisor
+  # (Tier 2) box both keep guest_egress=on in meta (create records it regardless
+  # of runtime) but never get the ruleset, so the meta flag alone would claim
+  # isolation the box does not have. Gate on the box's RECORDED runtime tier —
+  # authoritative for what this box actually got, and independent of whatever
+  # runtime happens to be active when `isopod info` runs.
+  [ "$guest" = on ] &&
+    [ "$(runtime_tier "$(meta_get "$1" runtime 2>/dev/null || true)" 2>/dev/null)" = 3 ] &&
+    guest_on=1
+  # The in-guest layer is reported alongside the host verdict, never instead of it.
+  # Reporting only the host side hid an active in-box ruleset behind the 'OPEN'
+  # message, so a box whose DNS and outbound traffic were being filtered read as
+  # having no isolation at all — which is exactly backwards when something in the
+  # box stops working and the ruleset is the first thing worth suspecting.
+  local guest_note=''
+  [ "$guest_on" = 1 ] &&
+    guest_note=' + guest lan-deny (in-box nft; defence in depth, not a hard boundary)'
+  # Exemptions belong next to the verdict that would otherwise imply the box can
+  # reach nothing in private space. Named here so `isopod info` shows what was
+  # opened without the user having to remember or go looking.
+  local allow allow_note=''
+  allow="$(meta_get "$1" guest_egress_allow 2>/dev/null || true)"
+  [ "$guest_on" = 1 ] && [ -n "$allow" ] && allow_note=", except $allow"
+  guest_note="$guest_note$allow_note"
+  # The sandbox account is a HARD boundary: rules in the host kernel keyed on the
+  # account's uid, which guest root cannot remove. When a box runs under it, that
+  # is the headline posture — the in-guest layer, if any, sits beneath it.
+  if [ "$(meta_get "$1" account 2>/dev/null || true)" = 1 ]; then
+    printf 'account lan-deny (host-enforced on the sandbox account; survives guest root)%s' "$guest_note"
+    return
+  fi
+  if [ "$degraded" = 1 ]; then
+    printf 'OPEN — host enforcement was requested but could not be applied (see: isopod doctor)%s' "$guest_note"
+  elif [ -n "$mode" ]; then
+    printf '%s (host-enforced)%s' "$mode" "$guest_note"
+  elif [ "$guest_on" = 1 ]; then
+    printf 'guest lan-deny (in-box nft; defence in depth, not a hard boundary)%s' "$allow_note"
+  else
+    printf 'OPEN — no egress isolation'
   fi
 }

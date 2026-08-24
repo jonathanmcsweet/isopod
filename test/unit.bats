@@ -247,6 +247,22 @@ teardown() { isopod_teardown_env; }
   release_lock
 }
 
+@test "acquire_lock reclaims a pidless lock (killed mid-acquire), never wedging" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/.lock" # dir exists but no pid was ever written
+  acquire_lock                        # must reclaim after the grace, not spin to death
+  [ "$LOCK_DIR" = "$ISOPOD_CONFIG_DIR/.lock" ]
+  release_lock
+}
+
+@test "acquire_lock reclaims a lock whose pid was recycled onto another process" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/.lock"
+  echo "$$" >"$ISOPOD_CONFIG_DIR/.lock/pid"                    # a LIVE pid...
+  echo "Thu Jan  1 00:00:00 1970" >"$ISOPOD_CONFIG_DIR/.lock/born" # ...but not its real start
+  acquire_lock                                                 # reused pid -> reclaim, not wedge
+  [ "$LOCK_DIR" = "$ISOPOD_CONFIG_DIR/.lock" ]
+  release_lock
+}
+
 # ---- hardening_run_args (baseline + user override layering) -------------------
 @test "hardening_run_args uses the shipped baseline when there is no override" {
   run hardening_run_args podman
@@ -1851,6 +1867,7 @@ EOF
 }
 @test "gc --json lists unreferenced isopod images without removing" {
   detect_engine() { ENGINE=podman; }
+  account_exists() { return 1; } # no sandbox account in this test's world
   podman() {
     [ "$1" = images ] &&
       printf 'localhost/isopod-base:v1\nlocalhost/isopod-box-abc:v1\nlocalhost/isopod-user:keep\ndocker.io/library/alpine:latest\n'
@@ -1862,6 +1879,7 @@ EOF
 }
 @test "gc --json emits an empty array when nothing is unreferenced" {
   detect_engine() { ENGINE=podman; }
+  account_exists() { return 1; }
   podman() { [ "$1" = images ] && printf 'docker.io/library/alpine:latest\n'; }
   run cmd_gc --json
   assert_output '{"images":[]}'
@@ -2037,4 +2055,1632 @@ EOF
   q="$(shq "a'b*.log")"
   run bash -c "printf %s $q"
   assert_output "a'b*.log"
+}
+
+# ---- assert_safe_run_args (F-6) ----------------------------------------------
+# ISOPOD_RUN_ARGS is word-split straight into the engine command line, so anything
+# that can set it in the user's shell could turn a sandbox into a passthrough with
+# no trace in the box or in `isopod info`. These assert the deny list holds for
+# BOTH spelling forms — `--opt=value` and `--opt value` — because the space form
+# needs lookahead state and is the form that silently slipped through first.
+
+@test "assert_safe_run_args allows ordinary resource and publish flags" {
+  run assert_safe_run_args --memory 4g --cpus 2 -p 127.0.0.1::2222 --dns 1.1.1.1
+  assert_success
+}
+
+@test "assert_safe_run_args allows an empty argument list" {
+  run assert_safe_run_args
+  assert_success
+}
+
+@test "assert_safe_run_args refuses host filesystem exposure" {
+  run assert_safe_run_args -v /:/host
+  assert_failure
+  run assert_safe_run_args --volume=/etc:/etc
+  assert_failure
+  run assert_safe_run_args --mount type=bind,src=/,dst=/host
+  assert_failure
+}
+
+@test "assert_safe_run_args refuses restored privileges" {
+  run assert_safe_run_args --privileged
+  assert_failure
+  run assert_safe_run_args --cap-add SYS_ADMIN
+  assert_failure
+  run assert_safe_run_args --security-opt seccomp=unconfined
+  assert_failure
+  run assert_safe_run_args --device /dev/kvm
+  assert_failure
+  run assert_safe_run_args --systemd always
+  assert_failure
+}
+
+@test "assert_safe_run_args refuses shared host namespaces" {
+  run assert_safe_run_args --userns=host
+  assert_failure
+  run assert_safe_run_args --pid host
+  assert_failure
+  run assert_safe_run_args --ipc=host
+  assert_failure
+  run assert_safe_run_args --uts host
+  assert_failure
+}
+
+# --net/--network is the one pair whose safety depends on the VALUE, so it needs
+# lookahead: the space form was accepted while the = form was refused.
+@test "assert_safe_run_args refuses --network host in both spellings" {
+  run assert_safe_run_args --network=host
+  assert_failure
+  run assert_safe_run_args --network host
+  assert_failure
+  run assert_safe_run_args --net=host
+  assert_failure
+  run assert_safe_run_args --net host
+  assert_failure
+}
+
+@test "assert_safe_run_args refuses joining another container's netns" {
+  run assert_safe_run_args --network container:victim
+  assert_failure
+  run assert_safe_run_args --net=container:victim
+  assert_failure
+}
+
+# isopod picks the box's own network, so any OTHER value is a deliberate choice.
+@test "assert_safe_run_args allows a named network" {
+  run assert_safe_run_args --network isopod0
+  assert_success
+  run assert_safe_run_args --network=isopod0
+  assert_success
+}
+
+# The scanner is positional: 'host' is only dangerous as a --net/--network value.
+@test "assert_safe_run_args does not refuse a bare 'host' token elsewhere" {
+  run assert_safe_run_args --dns host
+  assert_success
+}
+
+@test "assert_safe_run_args scans every position, not just the first" {
+  run assert_safe_run_args --memory 4g --cpus 2 -v /:/host
+  assert_failure
+}
+
+@test "ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 is the deliberate override" {
+  ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 run assert_safe_run_args --privileged -v /:/host
+  assert_success
+}
+
+@test "the refusal names the offending flag and the override" {
+  run assert_safe_run_args --privileged
+  assert_failure
+  assert_output --partial "--privileged"
+  assert_output --partial "ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1"
+}
+
+# ---- sanitize (F-5) ----------------------------------------------------------
+# Box-controlled strings reach the host terminal (branch names, repo lists). The
+# job is to strip terminal control sequences WITHOUT mangling legitimate text.
+
+@test "sanitize strips escape sequences and DEL" {
+  run sanitize "$(printf 'a\033[31mred\177b')"
+  assert_output "a[31mredb"
+}
+
+@test "sanitize strips carriage returns (line-overwrite spoofing)" {
+  run sanitize "$(printf 'real\rfake')"
+  assert_output "realfake"
+}
+
+# 0x80-0x9F are UTF-8 continuation bytes, NOT C1 controls, in a UTF-8 locale.
+# Stripping them would corrupt every non-ASCII branch name.
+@test "sanitize leaves UTF-8 text intact" {
+  run sanitize 'héllo — ✓ 日本語'
+  assert_output 'héllo — ✓ 日本語'
+}
+
+@test "sanitize leaves ordinary text untouched" {
+  run sanitize 'feature/add-thing_2'
+  assert_output 'feature/add-thing_2'
+}
+
+# ---- valid_ident_email / valid_ident_name (F-5) ------------------------------
+# The box supplies old_email to `isopod remap`, which builds a git filter. A
+# newline or angle bracket there is a mailmap/argument injection.
+
+@test "valid_ident_email accepts an ordinary address" {
+  run valid_ident_email 'me@example.com'
+  assert_success
+}
+
+@test "valid_ident_email rejects empty, space, and no-@ values" {
+  run valid_ident_email ''
+  assert_failure
+  run valid_ident_email 'a b@example.com'
+  assert_failure
+  run valid_ident_email 'notanaddress'
+  assert_failure
+}
+
+@test "valid_ident_email rejects newline and angle brackets" {
+  run valid_ident_email "$(printf 'a@b.com\nx@y.com')"
+  assert_failure
+  run valid_ident_email "$(printf 'a@b.com\rx')"
+  assert_failure
+  run valid_ident_email 'a<b>@c.com'
+  assert_failure
+}
+
+@test "valid_ident_name allows spaces but not newlines or brackets" {
+  run valid_ident_name 'Real Name'
+  assert_success
+  run valid_ident_name ''
+  assert_success
+  run valid_ident_name 'Bad <injected@x>'
+  assert_failure
+  run valid_ident_name "$(printf 'a\nb')"
+  assert_failure
+}
+
+# ---- box_is_stale / box_egress_posture (F-2, F-3) ----------------------------
+# A minimal box on disk: just the meta file these readers consult.
+mk_meta() { # mk_meta <name> <meta-line...>
+  mkdir -p "$BOXES_DIR/$1"
+  printf '%s\n' "${@:2}" >"$BOXES_DIR/$1/meta"
+}
+
+@test "box_is_stale reports current when the recorded image is what isopod builds today" {
+  mk_meta demo 'base=docker.io/library/debian:bookworm-slim' 'dev=0' 'nested=0'
+  local want
+  want="$(box_wanted_base_tag demo)"
+  mk_meta demo 'base=docker.io/library/debian:bookworm-slim' 'dev=0' 'nested=0' "base_image=$want"
+  run box_is_stale demo
+  assert_failure # rc 1 == up to date
+}
+
+@test "box_is_stale reports stale when the recorded image differs" {
+  mk_meta demo 'base=docker.io/library/debian:bookworm-slim' 'dev=0' 'nested=0' \
+    'base_image=localhost/isopod-base:deadbeefdeadbeef'
+  run box_is_stale demo
+  assert_success
+}
+
+# A box created before provenance was recorded has no base_image line. It
+# predates every fix since, so absent must mean stale — never "assume current".
+@test "box_is_stale treats a box with no recorded image as stale" {
+  mk_meta demo 'base=docker.io/library/debian:bookworm-slim'
+  run box_is_stale demo
+  assert_success
+}
+
+# Staleness is only meaningful if the wanted tag tracks the build inputs: the
+# lean, --dev and --nested images come from one Dockerfile but are not the same.
+@test "box_wanted_base_tag separates the lean, dev and nested images" {
+  mk_meta lean 'base=debian:bookworm-slim' 'dev=0' 'nested=0'
+  mk_meta devbox 'base=debian:bookworm-slim' 'dev=1' 'nested=0'
+  mk_meta nestbox 'base=debian:bookworm-slim' 'dev=0' 'nested=1'
+  [ "$(box_wanted_base_tag lean)" != "$(box_wanted_base_tag devbox)" ]
+  [ "$(box_wanted_base_tag lean)" != "$(box_wanted_base_tag nestbox)" ]
+  [ "$(box_wanted_base_tag devbox)" != "$(box_wanted_base_tag nestbox)" ]
+}
+
+# The posture line reports what is IN FORCE, not what was asked for — a box whose
+# egress degraded at create was previously indistinguishable from an isolated one
+# once the create output scrolled away.
+@test "box_egress_posture reports OPEN when host enforcement degraded" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=1' 'guest_egress=on'
+  run box_egress_posture demo
+  assert_output --partial 'OPEN'
+  assert_output --partial 'could not be applied'
+}
+
+@test "box_egress_posture names the host-enforced mode when it is in force" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=0'
+  run box_egress_posture demo
+  assert_output 'allow-list (host-enforced)'
+}
+
+@test "box_egress_posture names the in-guest layer and its limits" {
+  mk_meta demo 'guest_egress=on' 'runtime=krun'
+  run box_egress_posture demo
+  assert_output --partial 'guest lan-deny'
+  assert_output --partial 'not a hard boundary'
+}
+
+@test "box_egress_posture says OPEN when nothing isolates the box" {
+  mk_meta demo 'guest_egress=off'
+  run box_egress_posture demo
+  assert_output 'OPEN — no egress isolation'
+}
+
+# ---- build_run_args: root key, sudo hardening, guest egress ------------------
+# These assemble the engine command line, so they decide what a box actually IS.
+# Driven directly (rather than through `create`) so each input can be varied on
+# its own — including the combinations only `reconfigure` produces, where the
+# create-time variables are unset and the persisted meta is the only source.
+setup_run_args_box() { # setup_run_args_box <name> <meta-line...>
+  mk_meta "$@"
+  ENGINE=podman
+  # Pin the two ambient facts these tests vary deliberately.
+  is_microvm_runtime() { return 0; }
+  active_egress() { printf ''; }
+}
+
+@test "build_run_args passes only the PUBLIC half of the administrative root key" {
+  setup_run_args_box demo 'harden=off' 'sudo=0'
+  printf 'PRIVATE-ROOT-KEY-MATERIAL\n' >"$BOXES_DIR/demo/id_ed25519_root"
+  printf 'ssh-ed25519 AAAArootpub isopod-demo-root\n' >"$BOXES_DIR/demo/id_ed25519_root.pub"
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_ROOT_AUTHORIZED_KEY=ssh-ed25519 AAAArootpub"* ]]
+  [[ " ${RUN_ARGS[*]} " != *"PRIVATE-ROOT-KEY-MATERIAL"* ]]
+}
+
+@test "build_run_args omits the root key env when the box has none (--no-root-key)" {
+  setup_run_args_box demo 'harden=off' 'sudo=0'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_ROOT_AUTHORIZED_KEY* ]]
+}
+
+# On reconfigure BOX_SUDO is unset, so the persisted meta is the only source. An
+# ABSENT key means a box built before the flag existed: it must keep behaving as
+# it did, because no-new-privileges would break the sudo it already has.
+@test "no-new-privileges follows the persisted sudo meta when BOX_SUDO is unset" {
+  setup_run_args_box demo 'harden=off' 'sudo=0'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"no-new-privileges"* ]]
+
+  setup_run_args_box demo 'harden=off' 'sudo=1'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *"no-new-privileges"* ]]
+
+  setup_run_args_box demo 'harden=off'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *"no-new-privileges"* ]]
+}
+
+@test "guest egress is switched on for a microVM box that asked for it" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=on'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_GUEST_EGRESS=1"* ]]
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_GUEST_EGRESS_DNS="* ]]
+}
+
+@test "guest egress stays off when the box asked for off" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=off'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# A container box shares the host kernel and its entrypoint has no CAP_NET_ADMIN,
+# so it could not load the ruleset — asking would only hit the fail-closed path.
+@test "guest egress is never asked of a non-microVM box" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=on'
+  is_microvm_runtime() { return 1; }
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# Host-side egress routes the box through a proxy on an RFC1918 bridge address —
+# exactly what the guest ruleset drops. It is also stronger (it survives guest
+# root), so the in-guest layer must yield to it rather than cut the box off.
+@test "guest egress yields to host-side egress enforcement" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=on'
+  active_egress() { printf 'allow-list'; }
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# Regression guard. A box created before this feature has neither the nft binary
+# nor /etc/isopod/egress-guest.nft, so enforcement hits the entrypoint's
+# fail-closed path and the box comes back with no sshd — unreachable, from a
+# `reconfigure` that changed nothing else. Absent meta must therefore mean OFF.
+@test "a box predating guest egress is never asked to enforce it" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' # no guest_egress line at all
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# ---- filter_repo_usable: a broken git-filter-repo must not be selected --------
+# `git-filter-repo` is a Python program that imports the git_filter_repo module.
+# A split install — pip and the distro package disagreeing about which
+# interpreter owns the module — leaves the command on PATH and the import broken,
+# so every invocation dies with ModuleNotFoundError. Presence is not usability.
+
+# A git-filter-repo exactly as a broken install behaves: found, then fails.
+_stub_broken_filter_repo() {
+  cat >"$STUB_DIR/git-filter-repo" <<'EOF'
+#!/usr/bin/env bash
+echo "ModuleNotFoundError: No module named 'git_filter_repo'" >&2
+exit 1
+EOF
+  chmod +x "$STUB_DIR/git-filter-repo"
+}
+
+@test "filter_repo_usable rejects a git-filter-repo whose module is missing" {
+  _stub_broken_filter_repo
+  run filter_repo_usable "$TEST_TMP"
+  assert_failure
+}
+
+@test "filter_repo_usable accepts a git-filter-repo that runs" {
+  make_stub git-filter-repo 0
+  run filter_repo_usable "$TEST_TMP"
+  assert_success
+}
+
+@test "filter_repo_usable is false when git-filter-repo is not installed" {
+  run filter_repo_usable "$TEST_TMP"
+  assert_failure
+}
+
+# doctor calls it with no repo argument, from wherever the user happens to be.
+@test "filter_repo_usable works without a repo argument" {
+  make_stub git-filter-repo 0
+  run filter_repo_usable
+  assert_success
+  _stub_broken_filter_repo
+  run filter_repo_usable
+  assert_failure
+}
+
+# ---- box entrypoint: DNS under guest egress -----------------------------------
+# Regression tests for a real outage. The entrypoint used to replace resolv.conf
+# with a pinned public resolver, on the reasoning that an internal resolver is a
+# reconnaissance channel. That assumed a public resolver is always reachable. On a
+# host behind a VPN in lockdown mode it is not — DNS to any external resolver is
+# blocked (1.1.1.1:443 reachable, 1.1.1.1:53 not) — and the VPN's own resolver sits
+# in 100.64.0.0/10 or 169.254.0.0/16, the ranges the rules block. The box was left
+# resolving nothing while the nft drop counters sat at zero.
+#
+# The rules are generated from resolv.conf by an awk program in the entrypoint,
+# extracted and run here rather than reimplemented, so the tests cannot drift from
+# what boxes execute.
+_ns_rules() { # _ns_rules <resolv.conf body>
+  local prog
+  prog=$(sed -n "/iso_ns_rules=\$(awk '/,/}' \/etc\/resolv.conf/p" "$ISOPOD_ENTRYPOINT" |
+    sed "1s/.*awk '//; \$s/}'.*/}/")
+  printf '%s\n' "$1" | awk "$prog"
+}
+
+# The exact configuration that broke: a VPN resolver on a link-local address, a
+# second on CGNAT, and a gateway that serves no DNS at all.
+@test "entrypoint exempts every inherited resolver on port 53" {
+  run _ns_rules 'search lan
+nameserver 169.254.1.1
+nameserver 100.64.0.12
+nameserver 192.168.1.1'
+  assert_output "    ip daddr 169.254.1.1 udp dport 53 accept
+    ip daddr 169.254.1.1 tcp dport 53 accept
+    ip daddr 100.64.0.12 udp dport 53 accept
+    ip daddr 100.64.0.12 tcp dport 53 accept
+    ip daddr 192.168.1.1 udp dport 53 accept
+    ip daddr 192.168.1.1 tcp dport 53 accept"
+}
+
+@test "entrypoint exempts IPv6 resolvers with ip6 rules" {
+  run _ns_rules 'nameserver fe80::1'
+  assert_output "    ip6 daddr fe80::1 udp dport 53 accept
+    ip6 daddr fe80::1 tcp dport 53 accept"
+}
+
+# The exemption is port 53 and nothing else — the box must still be unable to open
+# an ordinary connection to a resolver's host.
+@test "the resolver exemption is limited to port 53" {
+  run _ns_rules 'nameserver 10.0.0.53'
+  assert_output --partial "udp dport 53 accept"
+  assert_output --partial "tcp dport 53 accept"
+  # No rule may accept the resolver's address without a port match, or the box
+  # would regain general access to a host in blocked space.
+  local line
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    case "$line" in *"dport 53 accept") ;; *) return 1 ;; esac
+  done <<<"$output"
+}
+
+# This text becomes firewall rules, so anything that is not a bare IP literal must
+# be dropped rather than substituted — a malformed line cannot inject a rule.
+@test "entrypoint refuses to turn a malformed resolver into a rule" {
+  run _ns_rules 'nameserver 999.1.1.1
+nameserver 1.2.3.4.5
+nameserver bogus;accept
+nameserver ../../etc
+nameserver 8.8.8.8'
+  assert_output "    ip daddr 8.8.8.8 udp dport 53 accept
+    ip daddr 8.8.8.8 tcp dport 53 accept"
+}
+
+@test "entrypoint generates no rules when resolv.conf has no nameserver" {
+  run _ns_rules 'search lan
+options ndots:1'
+  assert_output ""
+}
+
+# Ordering is the whole point: an exemption after the range drop would never match.
+@test "the ruleset exempts resolvers before the private-range drop" {
+  local ns_line drop_line
+  # Anchored: the placeholder sits alone on its line, while the header comment
+  # above also names it.
+  ns_line=$(grep -n '^@RESOLVERS@$' "$ISOPOD_GUEST_EGRESS_NFT" | cut -d: -f1)
+  drop_line=$(grep -n 'counter drop' "$ISOPOD_GUEST_EGRESS_NFT" | head -1 | cut -d: -f1)
+  [ -n "$ns_line" ] && [ -n "$drop_line" ] && [ "$ns_line" -lt "$drop_line" ]
+}
+
+# The fallback still exists for a box with no resolver at all, and must say that it
+# will not help on a network that forces local DNS.
+@test "the entrypoint warns when it pins the public resolver as a last resort" {
+  run grep -c 'no resolver in /etc/resolv.conf' "$ISOPOD_ENTRYPOINT"
+  assert_output "1"
+  run grep -q 'lockdown mode' "$ISOPOD_ENTRYPOINT"
+  assert_success
+}
+
+# ---- posture reports the in-guest layer alongside the host verdict ------------
+# It used to report the host verdict and stop, so an active in-box ruleset was
+# invisible behind 'OPEN' — the worst case, because the ruleset is the first
+# thing worth suspecting when something in the box stops reaching the network.
+@test "box_egress_posture names guest egress even when host enforcement degraded" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=1' 'guest_egress=on' 'runtime=krun'
+  run box_egress_posture demo
+  assert_output --partial 'OPEN'
+  assert_output --partial 'guest lan-deny'
+}
+
+@test "box_egress_posture names guest egress alongside host enforcement" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=0' 'guest_egress=on' 'runtime=krun'
+  run box_egress_posture demo
+  assert_output --partial 'allow-list (host-enforced)'
+  assert_output --partial 'guest lan-deny'
+}
+
+@test "box_egress_posture stays quiet about guest egress when it is off" {
+  mk_meta demo 'egress=allow-list' 'egress_degraded=1' 'guest_egress=off'
+  run box_egress_posture demo
+  assert_output --partial 'OPEN'
+  refute_output --partial 'guest lan-deny'
+}
+
+# ---- the rendered guest ruleset ----------------------------------------------
+# The generated rules landed in the header comment once, above `table ... {`,
+# because the substitution matched the placeholder unanchored and the comment
+# names it. nft rejects rules at top level, so every box failed closed and came up
+# without sshd. The render is exercised whole here: an earlier check looked only
+# below the `table` line, which is precisely where the bug was not.
+_render_nft() { # _render_nft <gateway> <rules block> [allow block] [logging]
+  local prog
+  prog=$(sed -n "/-v logging=\"\$1\" -v log4=/,/' \/etc\/isopod\/egress-guest.nft/p" "$ISOPOD_ENTRYPOINT" |
+    sed "1s/.*-v log6=\"\$iso_log6\" '//; \$s/' \/etc\/isopod.*//")
+  [ -n "$prog" ] || {
+    echo "could not extract the render program from the entrypoint" >&2
+    return 1
+  }
+  ISO_RULES="$2" ISO_ALLOW="${3:-}" \
+    awk -v gw="$1" -v logging="${4:-0}" \
+    -v log4='    ip daddr @private4 limit rate 10/minute log prefix "isopod-egress-drop "' \
+    -v log6='    ip6 daddr @private6 limit rate 10/minute log prefix "isopod-egress-drop "' \
+    "$prog" "$ISOPOD_GUEST_EGRESS_NFT"
+}
+
+@test "rendered ruleset places resolver rules inside the table, not the header" {
+  local out table_line rule_line
+  out=$(_render_nft 192.168.1.1 '    ip daddr 9.9.9.9 udp dport 53 accept')
+  table_line=$(printf '%s\n' "$out" | grep -n '^table inet isopod_egress' | cut -d: -f1)
+  rule_line=$(printf '%s\n' "$out" | grep -n 'ip daddr 9\.9\.9\.9' | head -1 | cut -d: -f1)
+  [ -n "$table_line" ] && [ -n "$rule_line" ]
+  [ "$rule_line" -gt "$table_line" ]
+}
+
+@test "rendered ruleset emits each resolver rule exactly once" {
+  run _render_nft 192.168.1.1 '    ip daddr 9.9.9.9 udp dport 53 accept'
+  [ "$(printf '%s\n' "$output" | grep -c 'ip daddr 9\.9\.9\.9 udp dport 53 accept')" = 1 ]
+}
+
+@test "rendered ruleset substitutes the gateway and consumes the placeholder line" {
+  local out
+  out=$(_render_nft 10.88.7.1 '    ip daddr 9.9.9.9 udp dport 53 accept')
+  printf '%s\n' "$out" | grep -q 'ip daddr 10\.88\.7\.1 accept'
+  ! printf '%s\n' "$out" | grep -q '^@RESOLVERS@$'
+  ! printf '%s\n' "$out" | grep -q 'daddr @GATEWAY@'
+}
+
+# A box with no usable resolver still has to get a loadable ruleset.
+@test "rendered ruleset is intact when there are no resolver rules" {
+  local out
+  out=$(_render_nft 192.168.1.1 '')
+  ! printf '%s\n' "$out" | grep -q '^@RESOLVERS@$'
+  printf '%s\n' "$out" | grep -q '^table inet isopod_egress {'
+  printf '%s\n' "$out" | grep -q 'counter drop'
+  # balanced braces — a truncated ruleset would be rejected by nft
+  [ "$(printf '%s\n' "$out" | grep -c '{')" = "$(printf '%s\n' "$out" | grep -c '}')" ]
+}
+
+# Nothing outside the table body may be a rule: that is the exact shape of the bug.
+@test "no rule text appears before the table declaration" {
+  local out head_part
+  out=$(_render_nft 192.168.1.1 '    ip daddr 9.9.9.9 udp dport 53 accept')
+  head_part=$(printf '%s\n' "$out" | sed -n '1,/^table inet isopod_egress/p')
+  ! printf '%s\n' "$head_part" | grep -qE '^[[:space:]]+(ip|ip6) daddr'
+}
+
+# ---- the create/upgrade posture note -----------------------------------------
+# This note fires exactly when host enforcement failed, which is exactly when the
+# in-guest ruleset is doing the work — so claiming an unfiltered LAN there is a
+# false statement about a box whose nft rules are dropping that traffic.
+@test "posture note does not claim an open LAN when guest egress is active" {
+  mk_meta demo 'guest_egress=on'
+  ISOPOD_EGRESS_DEGRADED=1
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  run egress_posture_note demo
+  refute_output --partial "can reach your LAN and the internet unfiltered"
+  assert_output --partial "in-box isolation IS active"
+  assert_output --partial "guest root could remove it"
+}
+
+@test "posture note still reports an open LAN when nothing is isolating the box" {
+  mk_meta demo 'guest_egress=off'
+  ISOPOD_EGRESS_DEGRADED=1
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  run egress_posture_note demo
+  assert_output --partial "can reach your LAN and the internet unfiltered"
+}
+
+# A container box cannot load the ruleset, so guest_egress=on in its meta must not
+# be reported as protection it does not have.
+@test "posture note reports an open LAN for a container box even with guest egress in meta" {
+  mk_meta demo 'guest_egress=on'
+  ISOPOD_EGRESS_DEGRADED=1
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 1; }
+  run egress_posture_note demo
+  assert_output --partial "can reach your LAN and the internet unfiltered"
+}
+
+# ---- lan_allow_valid / lan_allow_rules --------------------------------------
+# The gate on what reaches the box's firewall ruleset. The entrypoint re-checks
+# everything, but this is what decides what gets stored in the first place.
+
+@test "lan_allow_valid accepts an address, a range, and either with a port" {
+  local spec
+  for spec in 10.20.30.40 10.20.0.0/16 10.20.30.40:5432 10.20.0.0/16:5432 \
+    192.168.1.1 100.64.0.0/10; do
+    run lan_allow_valid "$spec"
+    assert_success
+  done
+}
+
+@test "lan_allow_valid accepts IPv6, with brackets when a port is given" {
+  local spec
+  for spec in fd00::1 fd00::/8 'fe80::1' '[fd00::1]:5432' '[fd00::/8]:443'; do
+    run lan_allow_valid "$spec"
+    assert_success
+  done
+}
+
+@test "lan_allow_valid rejects malformed addresses" {
+  local spec
+  for spec in 10.20.30.999 10.20.30 999.1.1.1 10.20.30.40.50 zzz '' 1.1.1 \
+    10.20.30.40/33 'fd00::1/129' 10.20.30.40:0 10.20.30.40:99999; do
+    run lan_allow_valid "$spec"
+    assert_failure
+  done
+}
+
+# A spec becomes firewall rule text, and the list is stored comma-separated, so
+# anything that could split the list or extend the rule has to be refused here.
+@test "lan_allow_valid rejects separators and rule injection" {
+  local spec
+  for spec in '10.0.0.1 accept' '10.0.0.1,10.0.0.2' '1.1.1.1; nft flush ruleset' \
+    '10.0.0.1	accept' 'fd00::1]:53' '[fd00::1]' '10.0.0.1:80:90'; do
+    run lan_allow_valid "$spec"
+    assert_failure
+  done
+}
+
+@test "lan_allow_valid rejects a spec containing a newline" {
+  run lan_allow_valid '10.0.0.1
+ip daddr 1.2.3.4 accept'
+  assert_failure
+}
+
+@test "lan_allow_rules emits a tagged accept per spec" {
+  run lan_allow_rules '10.20.30.40'
+  assert_success
+  assert_output 'ip daddr 10.20.30.40 accept comment "isopod-lan-allow"'
+}
+
+@test "lan_allow_rules emits both protocols for a port-scoped spec" {
+  run lan_allow_rules '10.20.30.40:5432'
+  assert_line 'ip daddr 10.20.30.40 tcp dport 5432 accept comment "isopod-lan-allow"'
+  assert_line 'ip daddr 10.20.30.40 udp dport 5432 accept comment "isopod-lan-allow"'
+}
+
+@test "lan_allow_rules uses ip6 for IPv6 specs" {
+  run lan_allow_rules 'fd00::1,[fd00::2]:443'
+  assert_line 'ip6 daddr fd00::1 accept comment "isopod-lan-allow"'
+  assert_line 'ip6 daddr fd00::2 tcp dport 443 accept comment "isopod-lan-allow"'
+}
+
+@test "lan_allow_rules emits nothing for an empty list" {
+  run lan_allow_rules ''
+  assert_success
+  assert_output ''
+}
+
+# The tag is how `egress lan-allow` finds its own rules in the live chain later.
+# Untagged rules would accumulate on every change instead of being replaced.
+@test "lan_allow_rules tags every rule it emits" {
+  run lan_allow_rules '10.0.0.1,10.0.0.2:80,fd00::1'
+  local n_lines n_tagged
+  n_lines=$(printf '%s\n' "$output" | grep -c .)
+  n_tagged=$(printf '%s\n' "$output" | grep -c 'comment "isopod-lan-allow"')
+  [ "$n_lines" = "$n_tagged" ]
+}
+
+# ---- egress lan-allow (per-box list management) ------------------------------
+
+@test "egress lan-allow lists nothing for a box with no entries" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run egress_lan_allow demo
+  assert_success
+  assert_output --partial "no lan-allow entries for demo"
+}
+
+@test "egress lan-allow stores a valid address" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  lan_allow_apply_live() { return 1; }
+  box_status() { printf 'exited'; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  run meta_get demo guest_egress_allow
+  assert_output '10.20.30.40'
+}
+
+@test "egress lan-allow refuses an invalid address and stores nothing" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run egress_lan_allow demo 10.20.30.999
+  assert_failure
+  assert_output --partial "invalid address"
+  run meta_get demo guest_egress_allow
+  assert_output ''
+}
+
+# The count reaches a root shell inside the box; a non-numeric one must be
+# refused before open_box or any box command runs, not carried into that shell.
+@test "egress lan-denied rejects a non-numeric count" {
+  open_box() { :; }
+  run egress_lan_denied demo '20; reboot'
+  assert_failure
+  assert_output --partial "count must be a non-negative integer"
+}
+
+@test "egress lan-allow appends rather than replacing" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1'
+  open_box() { :; }
+  lan_allow_apply_live() { return 1; }
+  box_status() { printf 'exited'; }
+  run egress_lan_allow demo 10.0.0.2
+  assert_success
+  run meta_get demo guest_egress_allow
+  assert_output '10.0.0.1,10.0.0.2'
+}
+
+@test "egress lan-allow is a no-op when the address is already allowed" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1'
+  open_box() { :; }
+  run egress_lan_allow demo 10.0.0.1
+  assert_success
+  assert_output --partial "already allowed"
+  run meta_get demo guest_egress_allow
+  assert_output '10.0.0.1'
+}
+
+@test "egress lan-allow --rm removes one entry and keeps the rest" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1,10.0.0.2,10.0.0.3'
+  open_box() { :; }
+  lan_allow_apply_live() { return 1; }
+  box_status() { printf 'exited'; }
+  run egress_lan_allow demo --rm 10.0.0.2
+  assert_success
+  run meta_get demo guest_egress_allow
+  assert_output '10.0.0.1,10.0.0.3'
+}
+
+@test "egress lan-allow --rm fails for an entry that is not in the list" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.0.0.1'
+  open_box() { :; }
+  run egress_lan_allow demo --rm 10.9.9.9
+  assert_failure
+  assert_output --partial "is not in the lan-allow list"
+}
+
+# Stored but inert: guest egress off means no ruleset exists to exempt anything
+# from. Storing it anyway means turning guest egress on later picks it up.
+@test "egress lan-allow warns but still stores when guest egress is off" {
+  mk_meta demo 'guest_egress=off'
+  open_box() { :; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  assert_output --partial "Guest egress is off"
+  run meta_get demo guest_egress_allow
+  assert_output '10.20.30.40'
+}
+
+@test "egress lan-denied refuses a box with guest egress off" {
+  mk_meta demo 'guest_egress=off'
+  open_box() { :; }
+  run egress_lan_denied demo
+  assert_failure
+  assert_output --partial "guest egress is off"
+}
+
+# ---- build_run_args passes the list to the box ------------------------------
+
+@test "build_run_args passes the lan-allow list into the box" {
+  setup_run_args_box demo
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.20.30.40,10.20.0.0/16'
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  build_run_args demo img 127.0.0.1:2222:2222 2g 2
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"ISOPOD_GUEST_EGRESS_ALLOW=10.20.30.40,10.20.0.0/16"* ]]
+}
+
+@test "build_run_args omits the lan-allow var when the box has no entries" {
+  setup_run_args_box demo
+  mk_meta demo 'guest_egress=on'
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  build_run_args demo img 127.0.0.1:2222:2222 2g 2
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"ISOPOD_GUEST_EGRESS_ALLOW"* ]]
+}
+
+# Guest egress off means the entrypoint never loads a ruleset, so passing the
+# list would be misleading — nothing would enforce it.
+@test "build_run_args omits the lan-allow var when guest egress is off" {
+  setup_run_args_box demo
+  mk_meta demo 'guest_egress=off' 'guest_egress_allow=10.20.30.40'
+  active_egress() { printf ''; }
+  is_microvm_runtime() { return 0; }
+  build_run_args demo img 127.0.0.1:2222:2222 2g 2
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" != *"ISOPOD_GUEST_EGRESS_ALLOW"* ]]
+}
+
+# An exemption is part of the posture: a verdict that says "lan-deny" while an
+# address is open would misrepresent what the box can reach.
+@test "box_egress_posture names the lan-allow exemptions" {
+  mk_meta demo 'guest_egress=on' 'guest_egress_allow=10.20.30.40,10.20.0.0/16' 'runtime=krun'
+  run box_egress_posture demo
+  assert_output --partial "guest lan-deny"
+  assert_output --partial "except 10.20.30.40,10.20.0.0/16"
+}
+
+@test "box_egress_posture stays quiet about exemptions when there are none" {
+  mk_meta demo 'guest_egress=on'
+  run box_egress_posture demo
+  refute_output --partial "except"
+}
+
+# Exemptions only mean something when a ruleset is loaded to be exempt from.
+@test "box_egress_posture ignores stored exemptions when guest egress is off" {
+  mk_meta demo 'guest_egress=off' 'guest_egress_allow=10.20.30.40'
+  run box_egress_posture demo
+  refute_output --partial "except"
+}
+
+# A box built before this feature has an entrypoint that ignores the list, but
+# the same table and chain — so a live apply succeeds and then silently reverts
+# at the next restart. The warning is the only thing standing between the user
+# and an exemption that works until it doesn't.
+@test "egress lan-allow warns when a stale box cannot persist the entry" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  box_is_stale() { return 0; }
+  lan_allow_apply_live() { return 0; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  assert_output --partial "applies NOW but is lost on the"
+  assert_output --partial "isopod upgrade demo"
+}
+
+@test "egress lan-allow says nothing about staleness for a current box" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  box_is_stale() { return 1; }
+  lan_allow_apply_live() { return 0; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  refute_output --partial "isopod upgrade"
+}
+
+@test "egress lan-allow points a stopped stale box at upgrade, not restart" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  box_is_stale() { return 0; }
+  lan_allow_apply_live() { return 1; }
+  run egress_lan_allow demo 10.20.30.40
+  assert_success
+  assert_output --partial "isopod upgrade demo"
+  refute_output --partial "isopod stop demo"
+}
+
+@test "egress lan-denied explains an empty result on a stale box" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  box_is_stale() { return 0; }
+  box_status() { printf 'running'; }
+  root_ssh() { printf ''; }
+  run egress_lan_denied demo
+  assert_success
+  assert_output --partial "predates drop logging"
+  assert_output --partial "isopod upgrade demo"
+}
+
+# ---- host_port_parse ---------------------------------------------------------
+# The spec becomes ssh -R arguments, so this decides both what works and what
+# reaches the ssh command line.
+
+@test "host_port_parse expands a bare port to the same port on both sides" {
+  run host_port_parse 5432
+  assert_success
+  assert_output '5432 127.0.0.1 5432'
+}
+
+@test "host_port_parse maps a box port to a different host port" {
+  run host_port_parse 8080:5432
+  assert_success
+  assert_output '8080 127.0.0.1 5432'
+}
+
+@test "host_port_parse accepts an explicit target host" {
+  run host_port_parse 8080:10.20.30.40:443
+  assert_success
+  assert_output '8080 10.20.30.40 443'
+  run host_port_parse 8080:gitlab.corp.internal:443
+  assert_output '8080 gitlab.corp.internal 443'
+}
+
+@test "host_port_parse accepts a bracketed IPv6 target" {
+  run host_port_parse '8080:[fd00::1]:443'
+  assert_success
+  assert_output '8080 fd00::1 443'
+}
+
+# sshd opens the box-side listener as the box user, which cannot bind below 1024.
+# Distinguished from a plain parse error so the message can say why.
+@test "host_port_parse rejects a privileged box port with its own status" {
+  run host_port_parse 443
+  assert_failure 2
+  run host_port_parse 80:80
+  assert_failure 2
+}
+
+@test "host_port_parse rejects malformed specs" {
+  local spec
+  for spec in 0 65536 '' '8080:' ':5432' '8080:host:' '8080:host:0' \
+    '8080:[fd00::1]' '8080:[zzz]:443' abc '8080:abc'; do
+    run host_port_parse "$spec"
+    assert_failure
+  done
+}
+
+# An IPv6 target must be bracketed; unbracketed, its colons are ambiguous and ssh
+# -R would reject the spec at connect time — reject it at parse instead.
+@test "host_port_parse rejects an unbracketed IPv6 target" {
+  run host_port_parse '8080:fd00::1:443'
+  assert_failure
+  run host_port_parse '8080:2001:db8::5:443'
+  assert_failure
+}
+
+# The spec is stored comma-separated and handed to ssh as an argument.
+@test "host_port_parse rejects separators and shell metacharacters in the target" {
+  local spec
+  for spec in '80 80' '8080,9090' '8080:ho st:443' '8080:h;rm -rf:443' \
+    '8080:$(id):443' '8080:a|b:443'; do
+    run host_port_parse "$spec"
+    assert_failure
+  done
+}
+
+@test "host_port_parse accepts the port boundaries" {
+  run host_port_parse 1024
+  assert_success
+  run host_port_parse 65535
+  assert_success
+}
+
+# ---- tunnel process identity -------------------------------------------------
+# A pidfile alone is not proof: pids are recycled, and killing a stranger's
+# process because it inherited our number would be worse than a dead tunnel.
+
+@test "host_port_running rejects a pid that is not our ssh" {
+  mkdir -p "$(box_dir demo)"
+  bash -c 'sleep 30; :' dummy-not-ours &
+  local other=$!
+  printf '%s\n' "$other" >"$(host_port_pidfile demo)"
+  run host_port_running demo
+  assert_failure
+  kill "$other" 2>/dev/null || true
+}
+
+@test "host_port_running accepts a live process carrying the box identity file" {
+  mkdir -p "$(box_dir demo)"
+  # The trailing ': ' stops bash exec-replacing itself with sleep, which would
+  # drop the marker argument from the process's argv and defeat the check.
+  bash -c 'sleep 30; :' dummy "$(box_dir demo)/id_ed25519" &
+  local ours=$!
+  printf '%s\n' "$ours" >"$(host_port_pidfile demo)"
+  run host_port_running demo
+  assert_success
+  kill "$ours" 2>/dev/null || true
+}
+
+@test "host_port_running is false with no pidfile, an empty one, or a dead pid" {
+  mkdir -p "$(box_dir demo)"
+  run host_port_running demo
+  assert_failure
+  : >"$(host_port_pidfile demo)"
+  run host_port_running demo
+  assert_failure
+  printf 'notanumber\n' >"$(host_port_pidfile demo)"
+  run host_port_running demo
+  assert_failure
+}
+
+@test "host_port_stop clears the pidfile" {
+  mkdir -p "$(box_dir demo)"
+  printf '999999\n' >"$(host_port_pidfile demo)"
+  host_port_stop demo
+  [ ! -f "$(host_port_pidfile demo)" ]
+}
+
+# ---- host-port list management ----------------------------------------------
+
+@test "host-port ls reports nothing for a box with no forwards" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run cmd_host_port ls demo
+  assert_success
+  assert_output --partial "no host-port forwards for demo"
+}
+
+@test "host-port add stores a valid spec" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  host_port_sync() { return 0; }
+  run cmd_host_port add demo 5432
+  assert_success
+  run meta_get demo host_ports
+  assert_output '5432'
+}
+
+@test "host-port add refuses a privileged box port with a reason" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run cmd_host_port add demo 443
+  assert_failure
+  assert_output --partial "must be 1024 or above"
+  assert_output --partial "8443:443"
+}
+
+@test "host-port add refuses an invalid spec and stores nothing" {
+  mk_meta demo 'guest_egress=on'
+  open_box() { :; }
+  run cmd_host_port add demo 'nonsense'
+  assert_failure
+  assert_output --partial "invalid host-port"
+  run meta_get demo host_ports
+  assert_output ''
+}
+
+# One tunnel carries every forward, so a duplicate box port would fail under
+# ExitOnForwardFailure and take the working forwards down with it.
+@test "host-port add refuses a box port already forwarded" {
+  mk_meta demo 'guest_egress=on' 'host_ports=8080:5432'
+  open_box() { :; }
+  host_port_sync() { return 0; }
+  run cmd_host_port add demo 8080:9999
+  assert_failure
+  assert_output --partial "box port 8080 is already forwarded"
+}
+
+@test "host-port add is a no-op for a spec already present" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  open_box() { :; }
+  run cmd_host_port add demo 5432
+  assert_success
+  assert_output --partial "already forwarded"
+  run meta_get demo host_ports
+  assert_output '5432'
+}
+
+@test "host-port add appends to the existing list" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  open_box() { :; }
+  host_port_sync() { return 0; }
+  run cmd_host_port add demo 11434
+  assert_success
+  run meta_get demo host_ports
+  assert_output '5432,11434'
+}
+
+@test "host-port rm removes one and keeps the rest" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432,11434,8080:9090'
+  open_box() { :; }
+  host_port_sync() { return 0; }
+  run cmd_host_port rm demo 11434
+  assert_success
+  run meta_get demo host_ports
+  assert_output '5432,8080:9090'
+}
+
+@test "host-port rm fails for a spec that is not forwarded" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  open_box() { :; }
+  run cmd_host_port rm demo 9999
+  assert_failure
+  assert_output --partial "is not forwarded"
+}
+
+@test "host-port ls shows the direction of each forward" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432,8080:10.20.30.40:443'
+  open_box() { :; }
+  host_port_running() { return 1; }
+  run cmd_host_port ls demo
+  assert_success
+  assert_output --partial "127.0.0.1:5432"
+  assert_output --partial "10.20.30.40:443"
+  assert_output --partial "not running"
+}
+
+@test "host-port rejects an unknown action" {
+  run cmd_host_port frobnicate demo
+  assert_failure
+  assert_output --partial "unknown host-port action"
+}
+
+# ---- sync behaviour ----------------------------------------------------------
+
+@test "host_port_sync stops the tunnel and stays quiet when there are no specs" {
+  mk_meta demo 'guest_egress=on'
+  mkdir -p "$(box_dir demo)"
+  printf '999999\n' >"$(host_port_pidfile demo)"
+  run host_port_sync demo
+  assert_success
+  [ ! -f "$(host_port_pidfile demo)" ]
+}
+
+# A stored forward on a stopped box is not an error, but silence would leave the
+# user to discover it by failing to connect.
+@test "host_port_sync warns when specs exist but the box is not running" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  box_status() { printf 'exited'; }
+  run host_port_sync demo
+  assert_success
+  assert_output --partial "not running"
+}
+
+@test "host_port_sync is silent about a stopped box when asked to be quiet" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  box_status() { printf 'exited'; }
+  run host_port_sync demo quiet
+  assert_success
+  assert_output ''
+}
+
+# The tunnel runs detached, so ssh's stderr is the only account of why it failed.
+# A warning that guesses at the cause sends the user after the wrong thing.
+@test "host_port_sync reports what ssh actually said when the tunnel fails" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  mkdir -p "$(box_dir demo)"
+  box_status() { printf 'running'; }
+  host_port_start() {
+    printf 'Warning: remote port forwarding failed for listen port 5432\n' \
+      >"$(host_port_logfile demo)"
+    return 1
+  }
+  run host_port_sync demo
+  assert_failure
+  assert_output --partial "ssh said:"
+  assert_output --partial "remote port forwarding failed for listen port 5432"
+  refute_output --partial "A port already in use inside the box is the usual cause"
+}
+
+@test "host_port_sync says so plainly when ssh left no message" {
+  mk_meta demo 'guest_egress=on' 'host_ports=5432'
+  mkdir -p "$(box_dir demo)"
+  box_status() { printf 'running'; }
+  host_port_start() {
+    : >"$(host_port_logfile demo)"
+    return 1
+  }
+  run host_port_sync demo
+  assert_failure
+  assert_output --partial "reported nothing"
+}
+
+# ---- valid_ip6 (shared strict IPv6 check) -----------------------------------
+# The address becomes an nft rule; nft rejects a malformed literal and the whole
+# ruleset with it, so "hex and colons" is not enough — it must be a real address.
+
+@test "valid_ip6 accepts well-formed addresses" {
+  local a
+  for a in fd00::1 fe80::1 :: ::1 fd00:: 1:2:3:4:5:6:7:8 \
+    2001:db8::ff00:42:8329 abcd:ef01:2345:6789:abcd:ef01:2345:6789; do
+    run valid_ip6 "$a"
+    assert_success
+  done
+}
+
+@test "valid_ip6 rejects the addresses nft would reject" {
+  local a
+  for a in 1:2:3:4:5:6:7:8:9 12345::1 fd00:::1 gg::1 1::2::3 :1:2:3 1:2:3: \
+    "" 1:2:3:4:5:6:7 1.2.3.4 fd00::1::; do
+    run valid_ip6 "$a"
+    assert_failure
+  done
+}
+
+# The specific brick inputs from the review must not survive lan_allow_valid.
+@test "lan_allow_valid rejects malformed IPv6 that would fail the ruleset closed" {
+  local s
+  for s in 1:2:3:4:5:6:7:8:9 12345::1 "[1:2:3:4:5:6:7:8:9]:443" fd00:::1; do
+    run lan_allow_valid "$s"
+    assert_failure
+  done
+}
+
+@test "lan_allow_valid still accepts the IPv6 forms it should" {
+  local s
+  for s in fd00::1 fd00::/8 "[fd00::1]:5432" "2001:db8::1"; do
+    run lan_allow_valid "$s"
+    assert_success
+  done
+}
+
+# ---- F2: posture must not claim in-box isolation a box never got ------------
+# guest_egress=on is written to meta for every box, but the ruleset only loads on
+# a Tier 3 microVM. A plain container and a gVisor box must not be reported as
+# filtered.
+@test "box_egress_posture reports OPEN for a container box despite guest_egress=on" {
+  mk_meta demo 'guest_egress=on' 'runtime=container'
+  run box_egress_posture demo
+  assert_output --partial "OPEN"
+  refute_output --partial "guest lan-deny"
+}
+
+@test "box_egress_posture does not claim in-box isolation for a gVisor box" {
+  mk_meta demo 'guest_egress=on' 'runtime=runsc'
+  run box_egress_posture demo
+  refute_output --partial "guest lan-deny"
+}
+
+@test "box_egress_posture names in-box isolation for a real microVM box" {
+  mk_meta demo 'guest_egress=on' 'runtime=krun'
+  run box_egress_posture demo
+  assert_output --partial "guest lan-deny"
+}
+
+@test "box_egress_posture hides lan-allow exemptions on a non-microVM box" {
+  mk_meta demo 'guest_egress=on' 'runtime=container' 'guest_egress_allow=10.20.30.40'
+  run box_egress_posture demo
+  refute_output --partial "except 10.20.30.40"
+}
+
+# ---- F1: host_port_sync must never be called bare under set -e ---------------
+# host_port_sync returns non-zero when a forward cannot open — by design, a
+# warning, not a failure. A bare call would let `set -e` abort the command that
+# made it (start/create/upgrade/reconfigure) after the box is already up. Every
+# call site must guard the result (if, ||, &&-with-fallback).
+@test "no host_port_sync call site is unguarded under set -e" {
+  local hits
+  hits="$(grep -rnE '(^|[^|&])[[:space:]]*host_port_sync ' \
+    "$ISOPOD_ROOT"/lib/isopod.d/*.sh |
+    grep -vE '\|\| true|if host_port_sync|host_port_sync\(\)' || true)"
+  if [ -n "$hits" ]; then
+    printf 'unguarded host_port_sync call(s):\n%s\n' "$hits" >&2
+    return 1
+  fi
+}
+
+# ---- sandbox account (stage 1: lifecycle module) ------------------------------
+
+# The range allocator must clear every existing allocation in BOTH files — a
+# collision would hand two accounts overlapping ids, which container storage
+# treats as the same owner.
+@test "account_next_subid_start clears existing ranges in subuid and subgid" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid" SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'alice:100000:65536\nbob:400000:65536\n' >"$SUBUID_FILE"
+  printf 'alice:100000:65536\ncarol:500000:65536\n' >"$SUBGID_FILE"
+  run account_next_subid_start
+  assert_output '565536'
+}
+
+@test "account_next_subid_start floors at 300000 on a fresh host" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid" SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'alice:100000:65536\n' >"$SUBUID_FILE"
+  : >"$SUBGID_FILE"
+  run account_next_subid_start
+  assert_output '300000'
+}
+
+@test "account_next_subid_start ignores malformed lines" {
+  SUBUID_FILE="$BATS_TEST_TMPDIR/subuid" SUBGID_FILE="$BATS_TEST_TMPDIR/subgid"
+  printf 'alice:100000:65536\nbroken\nx:y:z\n' >"$SUBUID_FILE"
+  : >"$SUBGID_FILE"
+  run account_next_subid_start
+  assert_output '300000'
+}
+
+@test "account_render_rules substitutes the uid everywhere" {
+  run account_render_rules 4242
+  assert_success
+  assert_output --partial 'meta skuid != 4242 accept'
+  refute_output --partial '@ACCOUNT_UID@'
+}
+
+# The uid becomes rule text, so anything non-numeric must be refused rather
+# than substituted.
+@test "account_render_rules refuses a non-numeric uid" {
+  local bad
+  for bad in "" "12a" '4242; flush ruleset' '$(id -u)'; do
+    run account_render_rules "$bad"
+    assert_failure
+  done
+}
+
+@test "account setup and teardown refuse to run without root" {
+  [ "$(id -u)" = 0 ] && skip "running as root"
+  run cmd_account setup
+  assert_failure
+  assert_output --partial "sudo isopod account setup"
+  run cmd_account teardown
+  assert_failure
+  assert_output --partial "sudo isopod account teardown"
+}
+
+@test "account status reports what is missing without dying" {
+  ISOPOD_ACCOUNT="isopod-test-noexist-$$"
+  run cmd_account status
+  assert_failure
+  assert_output --partial "[MISSING] account"
+  assert_output --partial "sudo isopod account setup"
+}
+
+@test "account rules prints a loadable ruleset even with no account" {
+  ISOPOD_ACCOUNT="isopod-test-noexist-$$"
+  run cmd_account rules
+  assert_success
+  assert_output --partial 'table inet isopod_account'
+  refute_output --partial '@ACCOUNT_UID@'
+}
+
+@test "account rejects an unknown action" {
+  run cmd_account frobnicate
+  assert_failure
+  assert_output --partial "unknown account action"
+}
+
+# ---- sandbox account (stage 2: engine routing + create --account) -----------
+
+# The wrapper must be transparent for a normal box: identical to calling the
+# engine directly. This is the property that keeps every existing box unaffected.
+@test "engine() runs the engine directly when not an account box" {
+  make_stub podman 0 "DIRECT"
+  ENGINE=podman ISOPOD_ENGINE_AS_ACCOUNT=0
+  run engine info
+  assert_success
+  assert_output "DIRECT"
+}
+
+@test "engine_ctx_for_box sets routing from meta" {
+  mk_meta acctbox 'account=1'
+  mk_meta plainbox 'guest_egress=on'
+  ISOPOD_ENGINE_AS_ACCOUNT=0
+  engine_ctx_for_box acctbox
+  [ "$ISOPOD_ENGINE_AS_ACCOUNT" = 1 ]
+  engine_ctx_for_box plainbox
+  [ "$ISOPOD_ENGINE_AS_ACCOUNT" = 0 ]
+}
+
+# Routing on but the account absent must fail with the fix, not a raw sudo error.
+@test "engine() dies with a clear message when the account is missing" {
+  make_stub podman 0 ""
+  ENGINE=podman ISOPOD_ENGINE_AS_ACCOUNT=1
+  ISOPOD_ACCOUNT="isopod-test-noexist-$$"
+  run engine info
+  assert_failure
+  assert_output --partial "sudo isopod account setup"
+}
+
+@test "account_create_preflight requires podman" {
+  is_macos() { return 1; } # exercise the Linux path on any host runner
+  account_exists() { return 0; }
+  run account_create_preflight docker
+  assert_failure
+  assert_output --partial "requires podman"
+}
+
+@test "account_create_preflight fails when the account is not set up" {
+  is_macos() { return 1; }
+  account_exists() { return 1; }
+  run account_create_preflight podman
+  assert_failure
+  assert_output --partial "sudo isopod account setup"
+}
+
+@test "box_egress_posture leads with the account boundary for an account box" {
+  mk_meta demo 'account=1' 'guest_egress=on' 'runtime=krun'
+  run box_egress_posture demo
+  assert_output --partial "account lan-deny"
+  assert_output --partial "survives guest root"
+}
+
+# The lock the user asked for: teardown must refuse while a box uses the account.
+@test "account teardown refuses while an account box exists" {
+  [ "$(id -u)" = 0 ] && skip "running as root"
+  # It checks root first; prove the guard by faking root-check away.
+  account_require_root() { :; }
+  mk_meta liveone 'account=1'
+  run cmd_account_teardown
+  assert_failure
+  assert_output --partial "liveone"
+  assert_output --partial "before teardown"
+}
+
+# ---- sandbox account (stage 3: migrate) --------------------------------------
+# The rebuild body needs a live engine (two stores), so these cover the argument
+# and precondition logic — the part that decides whether to touch anything.
+
+@test "migrate needs a direction" {
+  mk_meta demo 'engine=podman'
+  open_box() { ENGINE=podman; }
+  run cmd_migrate demo
+  assert_failure
+  assert_output --partial "say a direction"
+}
+
+@test "migrate is a no-op when the box is already on the account" {
+  mk_meta demo 'engine=podman' 'account=1'
+  open_box() { ENGINE=podman; }
+  run cmd_migrate demo --account
+  assert_failure
+  assert_output --partial "already on the sandbox account"
+}
+
+@test "migrate --no-account is a no-op for a box not on the account" {
+  mk_meta demo 'engine=podman'
+  open_box() { ENGINE=podman; }
+  run cmd_migrate demo --no-account
+  assert_failure
+  assert_output --partial "already off the sandbox account"
+}
+
+@test "migrate onto the account refuses a --disk box" {
+  mk_meta demo 'engine=podman' 'disk=20g:/mnt/data'
+  open_box() { ENGINE=podman; }
+  box_status() { printf 'running'; }
+  account_create_preflight() { :; }
+  run cmd_migrate demo --account
+  assert_failure
+  assert_output --partial "--disk data volume"
+}
+
+@test "migrate refuses a stopped box" {
+  mk_meta demo 'engine=podman'
+  open_box() { ENGINE=podman; }
+  box_status() { printf 'exited'; }
+  account_create_preflight() { :; }
+  run cmd_migrate demo --account
+  assert_failure
+  assert_output --partial "start the box first"
+}
+
+@test "migrate onto the account runs the account preflight" {
+  mk_meta demo 'engine=podman'
+  open_box() { ENGINE=podman; }
+  box_status() { printf 'running'; }
+  account_create_preflight() { die "PREFLIGHT RAN: $1"; }
+  run cmd_migrate demo --account
+  assert_failure
+  assert_output --partial "PREFLIGHT RAN: podman"
+}
+
+@test "meta_del removes a key and leaves the rest" {
+  mk_meta demo 'account=1' 'color=blue' 'port=2222'
+  meta_del demo account
+  run meta_get demo account
+  assert_output ''
+  run meta_get demo color
+  assert_output 'blue'
+}
+
+# ---- sandbox account (stage 4: dual-kernel lan-allow) ------------------------
+
+@test "account_render_rules injects lan-allow elements into both sets" {
+  run account_render_rules 4242 "10.20.30.40, 10.30.0.0/16" "fd00::1"
+  assert_success
+  assert_output --partial 'elements = { 10.20.30.40, 10.30.0.0/16 }'
+  assert_output --partial 'elements = { fd00::1 }'
+  refute_output --partial '@LAN_ALLOW'
+}
+
+@test "account_render_rules with no elements leaves valid empty sets" {
+  run account_render_rules 4242
+  assert_success
+  # The private ranges always carry elements; only the lan_allow sets are empty.
+  # Two 'elements =' lines (private4, private6), none from lan_allow.
+  [ "$(printf '%s\n' "$output" | grep -c 'elements =')" = 2 ]
+  refute_output --partial '@LAN_ALLOW'
+}
+
+# The host sets are the UNION across all account boxes, address-only (ports live
+# in the guest layer), deduped, split by family.
+@test "account_host_allow_elements unions account boxes and strips ports" {
+  mk_meta a 'account=1' 'guest_egress_allow=10.20.30.40:5432,10.30.0.0/16'
+  mk_meta b 'account=1' 'guest_egress_allow=10.20.30.40,[fd00::1]:443,fd00::/8'
+  mk_meta plain 'guest_egress_allow=10.99.99.99'
+  run account_host_allow_elements
+  assert_success
+  # 10.20.30.40 appears in both a (port-stripped) and b — deduped to one.
+  assert_line '4 10.20.30.40,10.30.0.0/16'
+  assert_line '6 fd00::1,fd00::/8'
+  # A non-account box's exemption must NOT leak into the host union.
+  refute_output --partial '10.99.99.99'
+}
+
+@test "account_host_allow_elements is empty when no account box has exemptions" {
+  mk_meta a 'account=1'
+  run account_host_allow_elements
+  assert_line '4 '
+  assert_line '6 '
+}
+
+# ---- sandbox account: two-store correctness (adversarial-review fixes) --------
+# These model the reality the engine stubs otherwise hide: an --account box's
+# container and images live in a SEPARATE rootless store, reached only by routing
+# engine() through the account. The stubs report which store they were routed to.
+
+# Regression: box_status used to call the engine binary directly, so an account
+# box was always inspected in the caller's store and read as "not running".
+@test "box_status inspects the account store for an --account box" {
+  mk_meta acctbox 'account=1' 'engine=podman'
+  engine() { printf 'store=%s\n' "${ISOPOD_ENGINE_AS_ACCOUNT:-0}"; }
+  ENGINE=podman
+  run box_status acctbox
+  assert_success
+  assert_output --partial 'store=1'
+}
+
+@test "box_status uses the caller store for a plain box and does not leak routing" {
+  mk_meta plainbox 'engine=podman'
+  engine() { printf 'store=%s\n' "${ISOPOD_ENGINE_AS_ACCOUNT:-0}"; }
+  ENGINE=podman
+  ISOPOD_ENGINE_AS_ACCOUNT=0
+  run box_status plainbox
+  assert_output --partial 'store=0'
+  # Called in the current shell (not `run`), the local routing flag must not escape.
+  box_status plainbox >/dev/null
+  [ "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" = 0 ]
+}
+
+# Regression: gc only ever listed the user store, so account-store images could
+# never be reclaimed. It must sweep both and remove each orphan in its own store.
+@test "gc sweeps the account store and removes orphans in the right store" {
+  mk_meta acctbox 'account=1' 'engine=podman' 'image=localhost/isopod-base:kept'
+  detect_engine() { ENGINE=podman; }
+  is_linux() { return 0; } # exercise the Linux-only account sweep on any host
+  account_exists() { return 0; }
+  account_uid() { printf 4242; }
+  account_runtime_dir() { printf '%s' "$TEST_TMP"; }
+  engine() {
+    case "$1" in
+      images)
+        if [ "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" = 1 ]; then
+          printf 'localhost/isopod-base:orphanacct\n'
+        else
+          printf 'localhost/isopod-base:orphanuser\n'
+        fi
+        ;;
+      rmi) printf 'store=%s %s\n' "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" "$2" >>"$TEST_TMP/rmi.log" ;;
+    esac
+  }
+  run cmd_gc --force
+  assert_success
+  assert_output --partial 'orphanuser'
+  assert_output --partial 'orphanacct'
+  assert_output --partial '(account store)'
+  grep -q 'store=0 localhost/isopod-base:orphanuser' "$TEST_TMP/rmi.log"
+  grep -q 'store=1 localhost/isopod-base:orphanacct' "$TEST_TMP/rmi.log"
+}
+
+# A set-up account with no live runtime dir cannot be reached; gc must skip it
+# (rather than die mid-sweep in engine()) and say the store was not swept.
+@test "gc skips the account store with a warning when its runtime dir is absent" {
+  mk_meta acctbox 'account=1' 'engine=podman'
+  detect_engine() { ENGINE=podman; }
+  is_linux() { return 0; }
+  account_exists() { return 0; }
+  account_uid() { printf 4242; }
+  account_runtime_dir() { printf '%s/nope' "$TEST_TMP"; }
+  engine() {
+    case "$1" in
+      images) printf 'localhost/isopod-base:orphanuser\n' ;;
+      rmi) : ;;
+    esac
+  }
+  run cmd_gc --force
+  assert_success
+  assert_output --partial 'was not swept'
+}
+
+# Defence in depth: a corrupted/hand-edited meta value must not reach the
+# root-loaded ruleset — account_host_allow_elements drops any spec that no longer
+# validates, keeping the good ones.
+@test "account_host_allow_elements skips a malformed stored spec" {
+  mk_meta acctbox 'account=1' 'guest_egress_allow=10.0.0.5,not-an-ip,192.168.1.0/24'
+  run account_host_allow_elements
+  assert_success
+  assert_output --partial '10.0.0.5'
+  assert_output --partial '192.168.1.0/24'
+  refute_output --partial 'not-an-ip'
+}
+
+# ---- full-repo review fixes --------------------------------------------------
+
+# L1: a `..` segment must be rejected so the workspace-leak guard cannot be
+# bypassed by a path that resolves back into the workspace.
+@test "valid_secret_path rejects .. traversal but accepts a normal path" {
+  run valid_secret_path /run/secrets/token
+  assert_success
+  run valid_secret_path /run/secrets/../../home/dev/workspace/tok
+  assert_failure
+  run valid_secret_path /run/secrets/..
+  assert_failure
+  # A filename that merely contains dots is still fine.
+  run valid_secret_path /run/secrets/my..key
+  assert_success
+}
+
+# L2: a real key swap (same type, different blob) is flagged; a partial scan
+# (a type present in only one file) is NOT a change.
+@test "host_key_changed flags a swapped key but tolerates a partial scan" {
+  local a b
+  a="$(mktemp)" b="$(mktemp)"
+  printf '[127.0.0.1]:22 ssh-ed25519 AAAAoriginal\n[127.0.0.1]:22 ecdsa-sha2 AAAAecdsa\n' >"$a"
+  # Same material -> not changed.
+  cp "$a" "$b"
+  run host_key_changed "$a" "$b"
+  assert_failure
+  # ed25519 blob differs -> changed.
+  printf '[127.0.0.1]:22 ssh-ed25519 AAAAdifferent\n' >"$b"
+  run host_key_changed "$a" "$b"
+  assert_success
+  # Only a subset scanned (ecdsa slow, absent) but ed25519 matches -> not changed.
+  printf '[127.0.0.1]:22 ssh-ed25519 AAAAoriginal\n' >"$b"
+  run host_key_changed "$a" "$b"
+  assert_failure
+  rm -f "$a" "$b"
+}
+
+# L3: require_box must reject a traversal name before any path is derived from it.
+@test "require_box refuses a traversal name" {
+  run require_box '../../etc'
+  assert_failure
+  assert_output --partial 'invalid sandbox name'
+}
+
+# L8: an empty/failed `docker info` must read as "cannot confirm rootful" so a
+# rootless docker is never mistaken for rootful (which would build an open box).
+@test "egress_can_enforce treats empty docker info as not-enforceable" {
+  make_stub docker 0 ""
+  run egress_can_enforce docker
+  assert_failure
 }

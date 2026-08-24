@@ -26,12 +26,20 @@
 
 # Private / link-local / metadata / CGNAT destinations a box may not reach.
 # 169.254.169.254 is cloud metadata; 100.64/10 is CGNAT.
-table <isopod_lan> const { 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 }
+table <isopod_lan> const { 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 192.0.0/24, 198.18/15 }
 
-# 1. The box's OWN subnet (its gateway + same-subnet peers) must stay reachable,
-#    or the box loses its default route / DNS. "quick" = first match wins, so this
-#    precedes the LAN block below (the box subnet is itself inside 192.168/16).
-pass  in quick inet from $ISOPOD_PF_SUBNET to $ISOPOD_PF_SUBNET
+# 1. Box -> the vmnet gateway (the Mac host itself, INCLUDING its resolver, which
+#    forwards to your internal/VPN resolvers) and box -> sibling boxes: drop NEW
+#    flows, mirroring the Linux "input" chain in egress-host.nft. Without this a
+#    blanket same-subnet pass let a box query the host resolver for internal-DNS
+#    recon and reach any Mac service bound to the gateway. The box still reaches
+#    the internet THROUGH the gateway (rule 3, "to any" matches the remote IP, not
+#    the gateway IP), and its DNS is the pinned public resolver, so routing/DNS are
+#    unaffected; DHCP to the gateway is kept so the box can still get its lease.
+#    "quick" = first match wins, so this precedes the LAN block below.
+#    NOTE: needs validation on a real Apple container / vmnet setup.
+pass       in quick inet proto udp from $ISOPOD_PF_SUBNET to $ISOPOD_PF_SUBNET port { 67, 68 } keep state
+block drop in quick inet     from $ISOPOD_PF_SUBNET to $ISOPOD_PF_SUBNET
 
 # 2. Box -> the real LAN / link-local / metadata / CGNAT: dropped. Your Mac keeps
 #    its own LAN access (this matches only the box subnet as source).

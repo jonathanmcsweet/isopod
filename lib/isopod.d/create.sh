@@ -6,9 +6,10 @@
 # ---------------------------------------------------------------------------
 cmd_create() {
   local name="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
-  local memory="" cpus="" no_sudo=0 engine_opt="" dockerfile_opt="" image_opt=0
+  local memory="" cpus="" sudo_opt=0 no_root_key=0 engine_opt="" dockerfile_opt="" image_opt=0
   local container_opt=0 dev_tools=0 harden_opt="" runtime_opt=""
-  local disk_opt="" nested=0
+  local disk_opt="" nested=0 guest_egress_opt="" account_opt=0
+  local -a lan_allow_opts=() host_port_opts=()
   local -a repos=() copies=() exposes=() secrets=()
 
   while [ $# -gt 0 ]; do
@@ -66,8 +67,20 @@ cmd_create() {
         port="$2"
         shift 2
         ;;
+      --sudo)
+        sudo_opt=1
+        shift
+        ;;
+      # Maximum lockdown: no in-box sudo AND no administrative key, so the box has
+      # no root path from anywhere. Nothing can be installed into it after create.
+      --no-root-key)
+        no_root_key=1
+        shift
+        ;;
+      # Retained so existing scripts and muscle memory keep working: sudo is off
+      # by default now, so this is a no-op rather than an error.
       --no-sudo)
-        no_sudo=1
+        sudo_opt=0
         shift
         ;;
       --container)
@@ -93,6 +106,22 @@ cmd_create() {
       --harden)
         harden_opt="$2"
         shift 2
+        ;;
+      --guest-egress)
+        guest_egress_opt="$2"
+        shift 2
+        ;;
+      --lan-allow)
+        lan_allow_opts+=("$2")
+        shift 2
+        ;;
+      --host-port)
+        host_port_opts+=("$2")
+        shift 2
+        ;;
+      --account)
+        account_opt=1
+        shift
         ;;
       -h | --help)
         usage
@@ -189,6 +218,20 @@ cmd_create() {
 
   detect_engine "$engine_opt"
 
+  # --account: run this box under the sandbox account so the host firewall keyed
+  # on that account's uid is its egress boundary — one that survives guest root.
+  # account_create_preflight validates the preconditions visible without root and
+  # dies with a clear fix if the account is not set up. Turning on engine routing
+  # HERE means the base-image build and the container run both go through the
+  # account and land in its store; account=1 in meta makes every later command
+  # (start/stop/rm/…) route the same way via open_box.
+  if [ "$account_opt" = 1 ]; then
+    account_create_preflight "$ENGINE"
+    # Read by engine() in engine.sh (another module, linted separately).
+    # shellcheck disable=SC2034
+    ISOPOD_ENGINE_AS_ACCOUNT=1
+  fi
+
   # Resolve the effective runtime (microVM by default, --container to opt out) and
   # egress mode (allow-list by default, degrades gracefully) BEFORE the microVM
   # memory sizing and the preflights below, which both read the resolved values.
@@ -237,6 +280,21 @@ cmd_create() {
 
   info "Generating dedicated SSH keypair for this box..."
   ssh-keygen -t ed25519 -N '' -C "isopod-$name" -f "$(box_dir "$name")/id_ed25519" -q
+  # A SECOND keypair, for administrative access as root. It exists so a box does
+  # not need in-box privilege escalation to be administrable: the box user has no
+  # sudo by default, and root is reached over SSH with a key that lives only on
+  # the host (see `isopod root-shell`). Nothing inside the box can escalate to it
+  # — there is no password to capture and no setuid path to abuse — which is what
+  # a compromised agent running as the box user would otherwise go after. It is
+  # also the only root channel a microVM box has: the engine cannot exec into a
+  # guest, so `isopod install` depends on this key there.
+  if [ "$no_root_key" -eq 0 ]; then
+    ssh-keygen -t ed25519 -N '' -C "isopod-$name-root" -f "$(box_dir "$name")/id_ed25519_root" -q
+  else
+    warn "--no-root-key: this box will have NO root access path at all — no in-box sudo
+     (unless --sudo) and no administrative key. 'isopod root-shell' and 'isopod install'
+     will not work on it; system packages must be baked in with --dockerfile."
+  fi
 
   # publish sshd on a loopback-only host port; random free port unless --port
   local publish="127.0.0.1::$BOX_SSHD_PORT"
@@ -249,10 +307,16 @@ cmd_create() {
     info "microVM runtime active — defaulting --memory to $memory (override with --memory)"
   fi
 
-  # Passwordless sudo on by default (1), off with --no-sudo (0). The box
-  # entrypoint applies this from the run env; see build_run_args.
+  # Sudo is OFF by default (0) and opted back into with --sudo (1). A box exists
+  # to contain code that is not trusted, and passwordless sudo hands that code
+  # the box's root account for the asking — so the default has to be the closed
+  # one. Administration does not need it: root is reachable over SSH with the
+  # host-held key generated above (`isopod root-shell`), which nothing in the box
+  # can reach. --sudo is for hands-on boxes where you want in-box `sudo apt` and
+  # accept that anything running as the box user inherits it. The box entrypoint
+  # applies this from the run env; see build_run_args.
   local BOX_SUDO
-  [ "$no_sudo" -eq 0 ] && BOX_SUDO=1 || BOX_SUDO=0
+  [ "$sudo_opt" -eq 1 ] && BOX_SUDO=1 || BOX_SUDO=0
   # Kernel-hardening profile: 'default' (on for every box) or 'off'. 'strict' is
   # reserved for a future release. build_run_args turns this into the microVM
   # guest-sysctl env; container boxes keep the engine defaults regardless.
@@ -263,6 +327,45 @@ cmd_create() {
     *) die "invalid --harden '$harden' (use: default | off)" ;;
   esac
   local BOX_HARDEN="$harden"
+  # Guest egress isolation (microVM boxes, and only when host-side egress is not
+  # doing the job — see build_run_args). On by default: with krun + passt the guest
+  # is handed the host's own LAN identity, so a box with no rules is a machine on
+  # your network. 'off' opts out.
+  local BOX_GUEST_EGRESS="${guest_egress_opt:-on}"
+  case "$BOX_GUEST_EGRESS" in
+    on | off) ;;
+    *) die "invalid --guest-egress '$BOX_GUEST_EGRESS' (use: on | off)" ;;
+  esac
+  # Private-space addresses this box may still reach (--lan-allow, repeatable).
+  # Validated here so a typo fails at create time rather than silently producing a
+  # box that cannot reach the service it was created for.
+  local BOX_GUEST_EGRESS_ALLOW="" _la
+  for _la in ${lan_allow_opts+"${lan_allow_opts[@]}"}; do
+    lan_allow_valid "$_la" || die "invalid --lan-allow '$_la'
+     Use an address or range, with an optional single port:
+       10.20.30.40        10.20.0.0/16        10.20.30.40:5432
+       fd00::1            fd00::/8            [fd00::1]:5432"
+    BOX_GUEST_EGRESS_ALLOW="$BOX_GUEST_EGRESS_ALLOW${BOX_GUEST_EGRESS_ALLOW:+,}$_la"
+  done
+  [ -n "$BOX_GUEST_EGRESS_ALLOW" ] && [ "$BOX_GUEST_EGRESS" = off ] &&
+    warn "--lan-allow has no effect with --guest-egress off (nothing is being filtered)"
+  # Host services this box can reach at its own loopback (--host-port,
+  # repeatable). Validated here so a bad spec fails before the box is built, and
+  # checked for box-port collisions because one tunnel carries them all.
+  local BOX_HOST_PORTS="" _hp _hp_rc _hp_boxp
+  local -a _hp_seen=()
+  for _hp in ${host_port_opts+"${host_port_opts[@]}"}; do
+    _hp_rc=0
+    _hp_boxp="$(host_port_parse "$_hp")" || _hp_rc=$?
+    [ "$_hp_rc" = 0 ] || die "$(host_port_invalid_msg "$_hp" "$_hp_rc")"
+    _hp_boxp="${_hp_boxp%% *}"
+    for _s in ${_hp_seen+"${_hp_seen[@]}"}; do
+      [ "$_s" = "$_hp_boxp" ] &&
+        die "--host-port $_hp reuses box port $_hp_boxp; one box port can carry one forward"
+    done
+    _hp_seen+=("$_hp_boxp")
+    BOX_HOST_PORTS="$BOX_HOST_PORTS${BOX_HOST_PORTS:+,}$_hp"
+  done
   # Data volume + nested-container wiring for build_run_args (which turns these
   # into the entrypoint's boot env) and the meta below.
   local BOX_DISK="$DISK_SPEC"
@@ -284,7 +387,7 @@ cmd_create() {
   build_run_args "$name" "$tag" "$publish" "$memory" "$cpus" "${EXPOSE_SPECS[@]:-}"
 
   info "Starting container ($ENGINE)..."
-  "$ENGINE" "${RUN_ARGS[@]}" >/dev/null
+  engine "${RUN_ARGS[@]}" >/dev/null
 
   # Apple `container` boxes have no published loopback port — they are reached at
   # their own vmnet IP (box_ssh_addr resolves it live), so there is no host port to
@@ -297,16 +400,34 @@ cmd_create() {
     printf 'engine=%s\n' "$ENGINE"
     printf 'image=%s\n' "$tag"
     printf 'base=%s\n' "$base"
+    # Build provenance, so `isopod upgrade` can tell whether the box is running
+    # the image the current isopod would build. image= drifts (reconfigure repoints
+    # it at a snapshot of the container layer), so the ORIGINAL base tag is recorded
+    # separately and left alone. The tag is a content hash of the Dockerfile,
+    # entrypoint and sysctl baseline, so comparing it catches every change to what
+    # a box is built from. dev= is recorded because it is part of that hash.
+    printf 'base_image=%s\n' "$tag"
+    printf 'built_version=%s\n' "$ISOPOD_VERSION"
+    printf 'dev=%s\n' "$dev_tools"
     printf 'color=%s\n' "$hex"
     printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'sudo=%s\n' "$BOX_SUDO"
     printf 'harden=%s\n' "$BOX_HARDEN"
+    printf 'guest_egress=%s\n' "$BOX_GUEST_EGRESS"
+    [ -n "$BOX_GUEST_EGRESS_ALLOW" ] &&
+      printf 'guest_egress_allow=%s\n' "$BOX_GUEST_EGRESS_ALLOW"
+    [ -n "$BOX_HOST_PORTS" ] && printf 'host_ports=%s\n' "$BOX_HOST_PORTS"
     # Record the effective runtime so reconfigure reproduces the box's isolation
     # tier rather than re-defaulting. "container" == plain Tier 1 (no runtime).
     printf 'runtime=%s\n' "$(active_runtime 2>/dev/null | grep . || printf container)"
     # Effective egress mode (post-resolve), so `start` can re-verify the host
     # firewall is still enforcing it — a reboot / firewalld reload can drop it.
     printf 'egress=%s\n' "$(active_egress)"
+    # Whether egress was asked for and could NOT be enforced (rootless engine, no
+    # host firewall). resolve_egress computes this and used to discard it after one
+    # warning at create — which is exactly how a box ends up running open while its
+    # owner believes it is isolated. Recorded so info/list/doctor can keep saying so.
+    printf 'egress_degraded=%s\n' "${ISOPOD_EGRESS_DEGRADED:-0}"
     printf 'port=%s\n' "$hostport"
     printf 'memory=%s\n' "$memory"
     printf 'cpus=%s\n' "$cpus"
@@ -317,19 +438,20 @@ cmd_create() {
     printf 'secrets=%s\n' "$BOX_SECRETS"
     printf 'disk=%s\n' "$BOX_DISK"
     printf 'nested=%s\n' "$BOX_NESTED"
+    [ "$account_opt" = 1 ] && printf 'account=1\n'
   } >"$(box_dir "$name")/meta"
   write_box_config "$name"
 
   # The box entrypoint has already applied the sudo policy and authorized key
   # from the run env (see build_run_args / share/Dockerfile), so the box is
   # reachable over SSH without any host-side `exec`.
-  local ctr
-  ctr=$(ctr_name "$name")
-
   ensure_ssh_include
   write_ssh_include
   info "Pinning the box's SSH host key..."
-  scan_host_key "$name" || die "sshd in the container never came up (check: $ENGINE logs $ctr)"
+  # The rollback prints the box's last output before removing it, so point at that
+  # rather than at a log the rollback is about to delete.
+  scan_host_key "$name" ||
+    die "sshd in the container never came up — the box's own output is shown below."
   wait_for_ssh "$name" || die "could not authenticate to the box over SSH"
 
   # populate the workspace (over SSH, so it works under any runtime)
@@ -363,6 +485,16 @@ cmd_create() {
   # populated). Disarm rollback so the remaining cosmetic step can't undo it.
   # shellcheck disable=SC2034  # read by on_exit (util.sh)
   CREATE_ROLLBACK_NAME=""
+
+  # Open the --host-port forwards now that sshd is up and authenticated. After the
+  # rollback is disarmed on purpose: a forward that cannot open (a port already
+  # taken in the box) is worth a warning, not the loss of a working box. The `if`
+  # plus `|| true` matters — a bare `[ ... ] && host_port_sync` would let `set -e`
+  # abort create when the tunnel fails, since the function is the command after
+  # the final `&&`; the box would be up but create would exit before its banner.
+  if [ -n "$BOX_HOST_PORTS" ]; then
+    host_port_sync "$name" || true
+  fi
 
   info "Applying window color $hex (this box only)..."
   apply_color "$name" "$hex" || warn "could not apply window color (the sandbox is fine without it)"

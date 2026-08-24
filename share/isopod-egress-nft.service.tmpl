@@ -16,7 +16,11 @@ Wants=network-pre.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=$ISOPOD_NFT_BIN -f $ISOPOD_EGRESS_STATE_DIR/egress.nft
+# Re-write the loaded-marker on boot so a non-root create can tell the rules are
+# in effect (the marker lives in /run and is cleared each boot).
+ExecStartPost=/bin/sh -c 'printf loaded > $ISOPOD_EGRESS_MARKER 2>/dev/null || true'
 ExecStop=$ISOPOD_NFT_BIN delete table inet isopod
+ExecStopPost=/bin/sh -c 'rm -f $ISOPOD_EGRESS_MARKER 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target

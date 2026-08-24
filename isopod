@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="2.17.5"
+ISOPOD_VERSION="3.7.8"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -51,6 +51,10 @@ ISOPOD_ENTRYPOINT="${ISOPOD_ENTRYPOINT:-$ISOPOD_SHARE/isopod-entrypoint}"
 # Guest sysctl baseline, COPYed into the base image alongside the entrypoint
 # (applied by the entrypoint on microVM boxes only). Hashed into the image tag.
 ISOPOD_SYSCTL_CONF="${ISOPOD_SYSCTL_CONF:-$ISOPOD_SHARE/hardening-sysctl.conf}"
+# Guest egress ruleset, COPYed into the base image and loaded by the entrypoint on
+# microVM boxes. Hashed into the image tag alongside the entrypoint, so editing it
+# forces a rebuild and marks existing boxes stale (see isopod upgrade).
+ISOPOD_GUEST_EGRESS_NFT="${ISOPOD_GUEST_EGRESS_NFT:-$ISOPOD_SHARE/egress-guest.nft}"
 # Shipped, read-only hardening baseline (do not edit — package upgrades replace
 # it). Advanced: point at a different baseline with ISOPOD_HARDENING_CONF.
 HARDENING_CONF="${ISOPOD_HARDENING_CONF:-$ISOPOD_DIR/security/hardening.conf}"
@@ -98,7 +102,7 @@ BOX_DISK_DEFAULT_MOUNT="/mnt/data"
 # image layers on the virtiofs filesystem a microVM box boots from (it cannot
 # carry the multiple uids/gids container storage needs), so layer extraction
 # fails with "setting up pivot dir: permission denied" until its storage sits on
-# a real block device. See docs/opt-in-security.md "Nested containers".
+# a real block device. See docs/security-model.md "Data volumes and nested containers".
 NESTED_STORAGE_MOUNT="/home/$CONTAINER_USER/.local/share/containers"
 NESTED_DISK_DEFAULT_SIZE="20g"
 # Default guest memory when a Tier 3 microVM runtime is active and the user gave
@@ -162,15 +166,29 @@ ISOPOD_EGRESS_ALLOWLIST="${ISOPOD_EGRESS_ALLOWLIST:-$ISOPOD_DIR/security/egress-
 # Host state written by `egress apply` (root; apply already needs it): the
 # rendered proxy config + filter, and the access log tailed by `egress log`.
 ISOPOD_EGRESS_STATE_DIR="${ISOPOD_EGRESS_STATE_DIR:-/etc/isopod/egress}"
+# Root writes this world-readable marker when it loads the host egress rules, and
+# the boot unit re-writes it. It lives in /run (cleared each boot) so its presence
+# tracks "loaded this boot". A non-root create cannot read nft to confirm the
+# firewall, so an ABSENT marker lets it warn honestly instead of assuming loaded.
+ISOPOD_EGRESS_MARKER="${ISOPOD_EGRESS_MARKER:-/run/isopod-egress-loaded}"
 ISOPOD_EGRESS_PROXY_LOG_DIR="${ISOPOD_EGRESS_PROXY_LOG_DIR:-/var/log/isopod}"
 ISOPOD_EGRESS_PROXY_LOG="${ISOPOD_EGRESS_PROXY_LOG:-$ISOPOD_EGRESS_PROXY_LOG_DIR/egress-proxy.log}"
+
+# Sandbox account (isopod account …): the opt-in hard egress boundary — boxes
+# run under this dedicated unprivileged account and host nftables rules keyed on
+# its uid drop private-space traffic. 'sandbox' matches docs/spike-sandbox-account.md,
+# so a host that ran the spike adopts its account instead of growing a second one.
+ISOPOD_ACCOUNT="${ISOPOD_ACCOUNT:-sandbox}"
+# Host state written by account setup (root): the rendered ruleset the boot unit loads.
+ISOPOD_ACCOUNT_STATE_DIR="${ISOPOD_ACCOUNT_STATE_DIR:-/etc/isopod/account}"
+ISOPOD_ACCOUNT_NFT_UNIT="isopod-account-nft.service"
 
 # ---------------------------------------------------------------------------
 # function modules — sourced from lib/isopod.d/ (order: util first, so die()
 # exists for everything after it). Each defines functions and their globals
 # only; no module runs code at source time.
 # ---------------------------------------------------------------------------
-for _mod in util engine ssh color hardening egress json runargs secret create transfer lifecycle install admin; do
+for _mod in util engine ssh color hardening egress hostport account json runargs secret create transfer lifecycle install admin; do
   if [ ! -f "$ISOPOD_LIB/isopod.d/$_mod.sh" ]; then
     # raw printf, not die: die() itself lives in the first module
     printf 'error: missing module: %s (is your isopod install complete?)\n' \
@@ -199,6 +217,9 @@ main() {
     info) cmd_info "$@" ;;
     code | open) cmd_code "$@" ;;
     shell | sh) cmd_shell "$@" ;;
+    root-shell | rootsh) cmd_root_shell "$@" ;;
+    upgrade) cmd_upgrade "$@" ;;
+    migrate) cmd_migrate "$@" ;;
     start) cmd_start "$@" ;;
     stop) cmd_stop "$@" ;;
     reconfigure | reconfig) cmd_reconfigure "$@" ;;
@@ -211,6 +232,8 @@ main() {
     rm | remove | delete) cmd_rm "$@" ;;
     gc) cmd_gc "$@" ;;
     egress) cmd_egress "$@" ;;
+    host-port | hostport) cmd_host_port "$@" ;;
+    account) cmd_account "$@" ;;
     secret) cmd_secret "$@" ;;
     doctor) cmd_doctor "$@" ;;
     version | --version | -v) printf 'isopod %s\n' "$ISOPOD_VERSION" ;;

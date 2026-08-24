@@ -28,7 +28,13 @@ valid_secret_name() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]{0,63}$ ]]; }
 # Absolute path, restricted charset. Excluding ':' ',' whitespace and shell
 # metacharacters keeps the meta encoding (NAME:path,NAME:path) and the remote
 # install command unambiguous — same invariant style as render_tmpl's note.
-valid_secret_path() { [[ "$1" =~ ^/[A-Za-z0-9._/+-]+$ ]]; }
+# A `..` segment is rejected: the charset alone allows it, and the workspace-leak
+# guard is a literal prefix match, so `/run/secrets/../../home/dev/workspace/x`
+# would pass the guard yet resolve INTO the workspace and be exported.
+valid_secret_path() {
+  [[ "$1" =~ ^/[A-Za-z0-9._/+-]+$ ]] || return 1
+  case "$1" in */../* | */..) return 1 ;; esac
+}
 
 # The index records which names isopod manages (never values): `secret ls`
 # cannot enumerate a macOS keychain cleanly, so set/rm maintain this list.

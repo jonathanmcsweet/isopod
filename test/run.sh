@@ -35,7 +35,7 @@ fail() {
 # --- lint -------------------------------------------------------------------
 step "shellcheck"
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -S warning isopod lib/isopod.d/*.sh share/isopod-entrypoint lib/find_box_repo.sh install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh test/distro-install.sh verify-host-isolation.sh
+  shellcheck -S warning isopod lib/isopod.d/*.sh share/isopod-entrypoint lib/find_box_repo.sh lib/guest_egress_allow.sh install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh test/distro-install.sh verify-host-isolation.sh
   printf '%sshellcheck clean%s\n' "$c_grn" "$c_rst"
 else
   printf '%sshellcheck not installed — skipping (install it for full coverage)%s\n' "$c_yel" "$c_rst"
@@ -44,7 +44,7 @@ fi
 step "shfmt"
 # Keep flags in sync with .pre-commit-config.yaml and .editorconfig (-i 2 -ci).
 # Pure bash/sh only — shfmt can't parse .bats or the zsh completion.
-SHFMT_FILES="isopod lib/isopod.d/*.sh share/isopod-entrypoint lib/find_box_repo.sh install.sh verify-host-isolation.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh test/distro-install.sh test/helper.bash completions/isopod.bash"
+SHFMT_FILES="isopod lib/isopod.d/*.sh share/isopod-entrypoint lib/find_box_repo.sh lib/guest_egress_allow.sh install.sh verify-host-isolation.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh test/distro-install.sh test/helper.bash completions/isopod.bash"
 if command -v shfmt >/dev/null 2>&1; then
   # shellcheck disable=SC2086
   if ! shfmt -i 2 -ci -d $SHFMT_FILES; then

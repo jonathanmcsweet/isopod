@@ -62,9 +62,11 @@ cmd_export() {
   info "Copying $WORKSPACE out of the box to $dest ..."
   # Stream the workspace out as a tar archive (preserves mtimes/symlinks). The
   # box may be compromised, so treat its archive as untrusted on the host: drop
-  # `-p` (don't honor box-controlled mode bits, incl. setuid/setgid) and force
-  # ownership to the extracting user with --no-same-owner. Modern GNU tar also
-  # refuses absolute paths / `..`; bsdtar (macOS) differs, so we stay explicit.
+  # `-p` and pass --no-same-permissions explicitly (don't honor box-controlled
+  # mode bits, incl. setuid/setgid — `-p` is the DEFAULT for a root extract, so
+  # relying on its absence is not enough), and force ownership to the extracting
+  # user with --no-same-owner. Modern GNU tar also refuses absolute paths / `..`;
+  # bsdtar (macOS) differs, so we stay explicit.
   #
   # tar runs inside the LIVE box, so a file can change size/mtime between stat
   # and read (node_modules, a build dir, a lockfile). GNU tar then prints
@@ -76,8 +78,13 @@ cmd_export() {
   mkdir -p "$dest"
   local -a rc
   set +e
-  box_tar_out "$name" "$WORKSPACE" ${tarx[@]+"${tarx[@]}"} 2> >(grep -v 'file changed as we read it' >&2) |
-    tar -C "$dest" --no-same-owner -xf -
+  # Both tar stderrs carry box-controlled filenames (tar embeds the offending
+  # name in diagnostics like 'socket ignored'), so strip control bytes on the way
+  # to the host terminal — the same ANSI/OSC-injection defense as the git-identity
+  # prints, on the archive channel.
+  box_tar_out "$name" "$WORKSPACE" ${tarx[@]+"${tarx[@]}"} \
+    2> >(grep -v 'file changed as we read it' | sanitize_stream >&2) |
+    tar -C "$dest" --no-same-owner --no-same-permissions -xf - 2> >(sanitize_stream >&2)
   rc=("${PIPESTATUS[@]}")
   set -e
   if [ "${rc[1]}" -ne 0 ] || [ "${rc[0]}" -gt 1 ]; then
@@ -145,9 +152,10 @@ cmd_fetch() {
       # No repo, or more than one — enumerate what's there so the user can pick.
       local repolist
       repolist=$(box_ssh "$name" -- WORKSPACE="$WORKSPACE" LIST_ALL=1 sh -s 2>/dev/null <"$finder") || repolist=""
+      # $repolist is box-controlled text going straight to the host terminal.
       [ -n "$repolist" ] &&
         die "more than one repo in the box under $WORKSPACE — pick one with --path <in-box-repo>:
-$(printf '%s\n' "$repolist" | sed 's/^/    /')"
+$(printf '%s\n' "$(sanitize "$repolist")" | sed 's/^/    /')"
       die "no git repo found in the box under $WORKSPACE — pass --path <in-box-repo>"
     fi
   fi
@@ -175,7 +183,9 @@ $(printf '%s\n' "$repolist" | sed 's/^/    /')"
       "+refs/heads/*:refs/remotes/$name/*" ||
       die "git fetch from the box over SSH failed (is '$name' running? try: isopod start $name)"
     info "Done. Box branches are now available as:"
-    git -C "$target" branch -r --list "$name/*" | sed 's/^/    /'
+    # Branch names originate in the box, so strip control characters on the way out.
+    git -C "$target" branch -r --list "$name/*" |
+      LC_ALL=C tr -d '\000-\010\013-\037\177' | sed 's/^/    /'
     printf '\nCheck one out with:\n  git -C %s switch -c <branch> %s/<branch>\n' "$top" "$name"
   else
     # Target is not a git repo: drop a portable bundle for manual use — the one
@@ -187,16 +197,36 @@ $(printf '%s\n' "$repolist" | sed 's/^/    /')"
     [ "$out" = "." ] && out="./isopod-$name.bundle"
     [ -d "$out" ] && out="${out%/}/isopod-$name.bundle"
     [ -e "$out" ] && die "destination already exists: $out (remove it or pick another path)"
-    info "Bundling $repo inside the box..."
+    info "Bundling $(sanitize "$repo") inside the box..."
     # HEAD is included so `git clone <bundle>` checks out the box's current
     # branch instead of failing to resolve a remote HEAD.
     box_ssh "$name" -- git -C "$repo" bundle create - HEAD --branches --tags >"$out" || {
       rm -f "$out"
-      die "git bundle failed in the box (does $repo have any commits?)"
+      die "git bundle failed in the box (does $(sanitize "$repo") have any commits?)"
     }
     info "'$target' is not a git repo — wrote a bundle instead: $out"
     printf '\nUse it from any clone:\n  git -C /path/to/clone fetch %s "refs/heads/*:refs/remotes/%s/*"\nor create a fresh repo from it:\n  git clone %s my-%s\n' "$out" "$name" "$out" "$name"
   fi
+}
+
+# Identity fields that are safe to write into a git mailmap. A mailmap is
+# line-oriented and field-delimited by '<' '>', so any value placed in one must
+# carry neither a line break nor an angle bracket, or it can forge additional
+# rewrite rules. Deliberately permissive about the rest of the character set —
+# the job here is structural safety, not RFC 5322 conformance, and rejecting a
+# legitimate-but-unusual address would be its own bug.
+valid_ident_email() { # valid_ident_email <value>
+  case "$1" in
+    '' | *[$'\n\r<>']* | *' '*) return 1 ;;
+  esac
+  [ "$1" != "${1#*@}" ] # must contain an '@' to be an address at all
+}
+# Same structural rule for the NAME half, which may contain spaces.
+valid_ident_name() { # valid_ident_name <value>
+  case "$1" in
+    *[$'\n\r<>']*) return 1 ;;
+  esac
+  return 0
 }
 
 # Split an identity token into a name line and an email line (in that order).
@@ -262,7 +292,27 @@ remap_to_mailmap() {
 # commits whose existing identity matches --old-email (optionally --old-name)
 # are touched; commit messages and author/committer DATES are preserved. The
 # rewrite is scoped to the box's refs, so the host's own branches are untouched.
-# Prefers `git filter-repo`; falls back to the built-in `git filter-branch`.
+# Prefers `git filter-repo`; falls back to a python3 fast-export rewrite.
+
+# Can `git filter-repo` actually run here? Its presence on PATH is not proof: it
+# is a Python program that imports the git_filter_repo module, and a split
+# install — pip and the distro package disagreeing about which interpreter owns
+# the module — leaves the command present with the import broken. Every run then
+# dies with ModuleNotFoundError. Probe it the same way _runtime_healthy probes a
+# half-installed kata, so a broken install falls through to the python3 path
+# below (which needs no extra tooling) instead of failing the rewrite outright.
+# --version loads the module without touching the repo; -h is the fallback for
+# versions predating it. Dispatching through git (rather than calling the binary)
+# also finds an install that lives in git's exec path rather than on PATH. The
+# repo argument is optional so `isopod doctor`, which runs from wherever the user
+# happens to be, can ask the same question.
+filter_repo_usable() { # filter_repo_usable [repo-toplevel]
+  local -a g=(git)
+  [ -n "${1:-}" ] && g=(git -C "$1")
+  "${g[@]}" filter-repo --version >/dev/null 2>&1 ||
+    "${g[@]}" filter-repo -h >/dev/null 2>&1
+}
+
 cmd_remap() {
   local name="" target="" new_name="" new_email="" old_email="" old_name="" remap_file="" force=0
   while [ $# -gt 0 ]; do
@@ -378,10 +428,29 @@ cmd_remap() {
         # confirmation prompt below reads from.
         old_email=$(box_ssh "$name" -n -- \
           git -C "$WORKSPACE" config --get user.email 2>/dev/null | tr -d '\r') || true
-        [ -n "$old_email" ] && info "Detected box identity from '$name': <$old_email>"
+        # This value comes FROM the box, and it is about to be written into a git
+        # mailmap the host then executes. A mailmap is line-oriented, so a value
+        # carrying a newline injects extra rewrite rules; '<' and '>' would let it
+        # forge the field structure of the line. Refuse rather than sanitize, so a
+        # box can never silently steer a rewrite it was not asked for. An EMPTY
+        # value is not an attack — it just means the box has no identity set — so
+        # leave that to the "could not detect" message below.
+        [ -z "$old_email" ] || valid_ident_email "$old_email" ||
+          die "box '$name' reported an unusable git email — refusing to build a rewrite rule from it.
+     Pass the identity yourself: isopod remap $name --old-email <e>"
+        [ -n "$old_email" ] && info "Detected box identity from '$name': <$(sanitize "$old_email")>"
       fi
       [ -n "$old_email" ] || die "could not detect the box's email — pass --old-email <e> (the identity to rewrite FROM)"
     fi
+
+    # Structural check on every field that lands in the mailmap. old_email is the
+    # box-sourced one (already checked above when auto-detected); the rest come
+    # from flags, env or the host's git config, where a stray newline is a
+    # mistake rather than an attack — but it would corrupt the mailmap either way.
+    valid_ident_email "$old_email" || die "invalid --old-email '$old_email' (no line breaks, spaces or angle brackets)"
+    valid_ident_email "$new_email" || die "invalid --email '$new_email' (no line breaks, spaces or angle brackets)"
+    valid_ident_name "$new_name" || die "invalid --name '$new_name' (no line breaks or angle brackets)"
+    valid_ident_name "$old_name" || die "invalid --old-name '$old_name' (no line breaks or angle brackets)"
 
     mm=$(mktemp "${TMPDIR:-/tmp}/isopod-remap-XXXXXX")
     mm_tmp=1
@@ -391,9 +460,9 @@ cmd_remap() {
       printf '%s <%s> <%s>\n' "$new_name" "$new_email" "$old_email" >"$mm"
     fi
 
-    info "Rewriting commits by <$old_email>${old_name:+ / \"$old_name\"} on:"
+    info "Rewriting commits by <$(sanitize "$old_email")>${old_name:+ / \"$(sanitize "$old_name")\"} on:"
     printf '    %s\n' "${boxrefs[@]}"
-    info "            to: \"$new_name\" <$new_email>  (in $top)"
+    info "            to: \"$(sanitize "$new_name")\" <$(sanitize "$new_email")>  (in $top)"
   fi
 
   if [ "$force" -ne 1 ]; then
@@ -414,7 +483,7 @@ cmd_remap() {
   done
   info "Backed up original refs under refs/remap-backup/ (delete when satisfied)."
 
-  if have git-filter-repo || git -C "$top" filter-repo -h >/dev/null 2>&1; then
+  if filter_repo_usable "$top"; then
     # Preferred path: filter-repo applies the mailmap directly.
     # --refs scopes the rewrite (implies --partial: other refs/origin are kept).
     if ! git -C "$top" filter-repo --force --partial --mailmap "$mm" --refs "${boxrefs[@]}"; then
@@ -449,7 +518,12 @@ cmd_remap() {
   [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
 
   info "Done. Rewritten box branches:"
+  # authorname/authoremail come from box-authored commits, so strip control
+  # characters on the way out — the same filter the branch list at the top of
+  # cmd_fetch uses. A ref whose identity did not match the rewrite still prints
+  # here, carrying whatever escape sequences the box put in the commit.
   git -C "$top" for-each-ref \
-    --format='    %(refname:short)  %(authorname) <%(authoremail:trim)>' "${boxrefs[@]}"
+    --format='    %(refname:short)  %(authorname) <%(authoremail:trim)>' "${boxrefs[@]}" |
+    LC_ALL=C tr -d '\000-\010\013-\037\177'
   printf '\nCheck the result, then drop the backups when happy:\n  git -C %s for-each-ref refs/remap-backup/\n  git -C %s update-ref -d <each backup ref>\n' "$top" "$top"
 }

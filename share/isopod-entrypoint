@@ -43,12 +43,34 @@ fi
 # Authorized key. Append-if-absent, so reboots and reconfigure stay idempotent
 # and never overwrite a key the user added inside the box.
 if [ -n "${ISOPOD_AUTHORIZED_KEY:-}" ]; then
+  # The box user owns their home and controls it between boots. A symlink left at
+  # .ssh or authorized_keys makes these root-run install/touch/chown/chmod follow
+  # it and operate on a root-owned target (CWE-59): point .ssh at /etc, or
+  # authorized_keys at /etc/shadow, and a routine restart hands the box user
+  # ownership of that target, i.e. a path to root on a no-sudo box. No box process
+  # runs during boot, so removing any symlink first is race-free.
+  if [ -L "$iso_h/.ssh" ]; then rm -f "$iso_h/.ssh"; fi
   install -d -m 700 -o "$iso_u" -g "$iso_u" "$iso_h/.ssh"
+  if [ -L "$iso_h/.ssh/authorized_keys" ]; then rm -f "$iso_h/.ssh/authorized_keys"; fi
   touch "$iso_h/.ssh/authorized_keys"
   grep -qxF "$ISOPOD_AUTHORIZED_KEY" "$iso_h/.ssh/authorized_keys" ||
     printf '%s\n' "$ISOPOD_AUTHORIZED_KEY" >>"$iso_h/.ssh/authorized_keys"
   chown "$iso_u:$iso_u" "$iso_h/.ssh/authorized_keys"
   chmod 600 "$iso_h/.ssh/authorized_keys"
+fi
+
+# Administrative root key. The host holds the private half and never puts it in
+# the box, so this grants nothing to anything running here — it only lets the
+# host come IN as root (`isopod root-shell`). That is what makes a no-sudo box
+# administrable without giving the box user a path to root. Append-if-absent,
+# matching the user key above, so reboots stay idempotent.
+if [ -n "${ISOPOD_ROOT_AUTHORIZED_KEY:-}" ]; then
+  install -d -m 700 -o root -g root /root/.ssh
+  touch /root/.ssh/authorized_keys
+  grep -qxF "$ISOPOD_ROOT_AUTHORIZED_KEY" /root/.ssh/authorized_keys ||
+    printf '%s\n' "$ISOPOD_ROOT_AUTHORIZED_KEY" >>/root/.ssh/authorized_keys
+  chown root:root /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
 fi
 
 # Sudo policy. Set by create only (1 = passwordless, 0 = none); left untouched
@@ -58,6 +80,22 @@ if [ "${ISOPOD_SUDO:-}" = "1" ]; then
   chmod 440 "/etc/sudoers.d/$iso_u"
 elif [ "${ISOPOD_SUDO:-}" = "0" ]; then
   rm -f "/etc/sudoers.d/$iso_u"
+fi
+
+# Keep sudo's setuid bit in step with the policy. The image ships a setuid-root
+# sudo for every box, but a no-sudo box has no sudoers entry, so that binary is
+# pure standing escalation surface: a sudo LPE (Baron Samedit class) would be
+# root-in-box, the exact path --no-sudo removes. Strip the bit when there is no
+# policy, restore it when there is. Keyed on the policy FILE, not ISOPOD_SUDO, so
+# it stays correct on reconfigure boots where ISOPOD_SUDO is not re-passed. This
+# also covers engines (Apple container) whose run flags lack no-new-privileges.
+_iso_sudo="$(command -v sudo 2>/dev/null || true)"
+if [ -n "$_iso_sudo" ]; then
+  if [ -f "/etc/sudoers.d/$iso_u" ]; then
+    chmod u+s "$_iso_sudo" 2>/dev/null || true
+  else
+    chmod u-s "$_iso_sudo" 2>/dev/null || true
+  fi
 fi
 
 # Name resolution note (allow-list egress only). isopod runs an allow-list box
@@ -82,6 +120,10 @@ fi
 # and do not exist in docker. Runs on every boot — the tmpfs starts empty.
 if [ -d /run/secrets ]; then
   chown "$iso_u:$iso_u" /run/secrets
+  # Normalize the mode: the podman/docker path mounts this tmpfs mode 0700, but
+  # Apple container's --tmpfs takes no options and defaults to 1777 (world
+  # read/write), which would expose injected secrets to any other uid in the box.
+  chmod 700 /run/secrets
 fi
 
 # Data volume (isopod create --disk). ISOPOD_DISK is "SIZE:MOUNTPOINT". The
@@ -109,6 +151,14 @@ if [ -n "${ISOPOD_DISK:-}" ]; then
     fi
   fi
   if [ -f "$iso_disk_img" ]; then
+    # Refuse a symlinked mountpoint: the box user could point a box-writable
+    # mountpoint at a root-owned dir so root's mount/chown here follows it (CWE-59,
+    # same class as the .ssh guard above). No box process runs at boot, so this
+    # check is race-free.
+    if [ -L "$iso_disk_mount" ]; then
+      rm -f "$iso_disk_mount"
+      mkdir -p "$iso_disk_mount"
+    fi
     if mount -o loop "$iso_disk_img" "$iso_disk_mount" 2>/dev/null; then
       chown "$iso_u:$iso_u" "$iso_disk_mount"
     else
@@ -145,6 +195,273 @@ if [ -n "${ISOPOD_HARDEN:-}" ] && [ "$ISOPOD_HARDEN" != off ] &&
   done </etc/isopod/hardening-sysctl.conf
 fi
 
-unset ISOPOD_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN ISOPOD_DISK ISOPOD_NESTED ISOPOD_DNS_VIA_PROXY
+# Guest egress isolation (microVM boxes only — a container box's entrypoint has no
+# CAP_NET_ADMIN, and isopod never sets ISOPOD_GUEST_EGRESS for one).
+#
+# This block FAILS CLOSED, deliberately breaking the "nothing here is fatal" rule
+# the rest of this script follows. Everything above degrades to a warning because
+# a half-configured box is better than an unreachable one. Egress is the opposite:
+# a box that was asked to be network-isolated and silently came up without it is
+# the exact failure that made this necessary. So if the rules cannot be applied,
+# sshd does not start — and since sshd is the only way in, no workload runs and
+# nothing can reach the network. Read the reason with `$ENGINE logs`.
+if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
+  iso_egress_fail() {
+    echo "isopod: FATAL: guest egress isolation was requested but could not be applied:" >&2
+    echo "isopod:   $1" >&2
+    echo "isopod: refusing to start sshd — a box that cannot enforce its network policy" >&2
+    echo "isopod:   must not come up as if it could. Recreate with guest egress off:" >&2
+    echo "isopod:   isopod create <name> --guest-egress off   (or set it in hardening.conf)" >&2
+    exit 1
+  }
+  [ -f /etc/isopod/egress-guest.nft ] || iso_egress_fail "/etc/isopod/egress-guest.nft is missing"
+  command -v nft >/dev/null 2>&1 || iso_egress_fail "the nft binary is not installed in this box"
+
+  # Default gateway from the kernel's own routing table — no iproute2 needed, and
+  # POSIX awk only (mawk is Debian's default and has no strtonum).
+  iso_gw=$(awk '
+    function hex(s,   i,c,d,n) {
+      n = 0
+      for (i = 1; i <= length(s); i++) {
+        c = toupper(substr(s, i, 1)); d = index("0123456789ABCDEF", c) - 1
+        if (d < 0) return -1
+        n = n * 16 + d
+      }
+      return n
+    }
+    $2 == "00000000" && $8 == "00000000" {
+      g = $3
+      printf "%d.%d.%d.%d\n", hex(substr(g,7,2)), hex(substr(g,5,2)), hex(substr(g,3,2)), hex(substr(g,1,2))
+      exit
+    }' /proc/net/route 2>/dev/null)
+  case "$iso_gw" in
+    [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;;
+    *) iso_egress_fail "could not determine the default gateway from /proc/net/route" ;;
+  esac
+
+  # The box's own resolvers, exempted on port 53 by the ruleset (see
+  # egress-guest.nft). Read straight from resolv.conf so whatever the engine hands
+  # the guest keeps working — a VPN resolver on a CGNAT or link-local address
+  # included, which is the case the pinned-public-resolver design got wrong.
+  #
+  # Each address is re-validated here before it reaches the ruleset. resolv.conf is
+  # engine-generated, not user input, but this text is about to become firewall
+  # rules: anything that is not a bare IPv4 or IPv6 literal is dropped rather than
+  # substituted, so a malformed line can never inject a rule.
+  iso_ns_rules=$(awk '
+    $1 != "nameserver" || $2 == "" { next }
+    {
+      ip = $2
+      if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+        split(ip, o, ".")
+        for (i = 1; i <= 4; i++) if (o[i] + 0 > 255) next
+        printf "    ip daddr %s udp dport 53 accept\n", ip
+        printf "    ip daddr %s tcp dport 53 accept\n", ip
+        next
+      }
+      if (ip ~ /^[0-9a-fA-F:]+$/ && ip ~ /:/) {
+        printf "    ip6 daddr %s udp dport 53 accept\n", ip
+        printf "    ip6 daddr %s tcp dport 53 accept\n", ip
+      }
+    }' /etc/resolv.conf 2>/dev/null)
+
+  # No usable resolver at all: fall back to the configured public one, which is
+  # better than nothing but will not work on a network that forces local DNS.
+  if [ -z "$iso_ns_rules" ] && [ -n "${ISOPOD_GUEST_EGRESS_DNS:-}" ]; then
+    printf 'nameserver %s\n' "$ISOPOD_GUEST_EGRESS_DNS" >/etc/resolv.conf 2>/dev/null ||
+      iso_egress_fail "could not pin the resolver to $ISOPOD_GUEST_EGRESS_DNS"
+    echo "isopod: guest egress: no resolver in /etc/resolv.conf — pinned $ISOPOD_GUEST_EGRESS_DNS." >&2
+    echo "isopod:   If your network forces local DNS (a VPN in lockdown mode does), this box" >&2
+    echo "isopod:   will not resolve names; recreate it with --guest-egress off." >&2
+  fi
+
+  # Private-space addresses this box may reach anyway (isopod egress lan-allow),
+  # as a comma-separated list. Accepted forms, per entry:
+  #
+  #   10.20.30.40        10.20.0.0/16        an address or a range
+  #   10.20.30.40:5432   10.20.0.0/16:5432   the same, one TCP/UDP port only
+  #   fd00::1            fd00::/8            IPv6, with [fd00::1]:5432 for a port
+  #
+  # The host validates these before they are stored; they are validated again here
+  # for the same reason the resolvers are — this text becomes firewall rules, so an
+  # entry that is not a bare literal is dropped rather than substituted. A rejected
+  # entry is skipped, not fatal: a typo should cost the user that one exemption,
+  # not leave them with a box that never starts sshd.
+  iso_allow_rules=$(awk -v specs="${ISOPOD_GUEST_EGRESS_ALLOW:-}" '
+    function bad4(a,   o, i, n) {
+      n = split(a, o, ".")
+      if (n != 4) return 1
+      for (i = 1; i <= 4; i++) {
+        if (o[i] !~ /^[0-9][0-9]?[0-9]?$/) return 1
+        if (o[i] + 0 > 255) return 1
+      }
+      return 0
+    }
+    function badpfx(p, max) {
+      if (p !~ /^[0-9][0-9]?[0-9]?$/) return 1
+      return (p + 0 > max)
+    }
+    function badport(p) {
+      if (p !~ /^[0-9][0-9]?[0-9]?[0-9]?[0-9]?$/) return 1
+      return (p + 0 < 1 || p + 0 > 65535)
+    }
+    function h4(g) { return (g ~ /^[0-9a-fA-F][0-9a-fA-F]?[0-9a-fA-F]?[0-9a-fA-F]?$/) }
+    # Strict IPv6 literal check, matching the host valid_ip6: at most one "::",
+    # eight groups without it (fewer with it), each group 1-4 hex digits, no
+    # embedded IPv4. A loose "hex and colons" test passes a malformed literal that
+    # nft then rejects, which takes EVERY exemption down with it (the whole allow
+    # layer fails to load) instead of skipping just this one, the way bad4 does for
+    # IPv4. Interval quantifiers ({1,4}) are avoided for the same awk-portability
+    # reason as bad4/badport.
+    function bad6(a,   c, idx, left, right, ln, rn, la, ra, parts, nseg, i) {
+      if (a ~ /:::/) return 1
+      if (index(a, ".") > 0) return 1
+      c = gsub(/::/, "::", a)
+      if (c > 1) return 1
+      if (c == 1) {
+        idx = index(a, "::")
+        left = substr(a, 1, idx - 1)
+        right = substr(a, idx + 2)
+        ln = (left == "" ? 0 : split(left, la, ":"))
+        rn = (right == "" ? 0 : split(right, ra, ":"))
+        if (ln + rn > 7) return 1
+        for (i = 1; i <= ln; i++) if (!h4(la[i])) return 1
+        for (i = 1; i <= rn; i++) if (!h4(ra[i])) return 1
+        return 0
+      }
+      nseg = split(a, parts, ":")
+      if (nseg != 8) return 1
+      for (i = 1; i <= nseg; i++) if (!h4(parts[i])) return 1
+      return 0
+    }
+    # Tagged with a comment so `isopod egress lan-allow` can find and replace
+    # exactly these rules later, without touching anything else in the chain.
+    function emit(kw, a, p,   tag) {
+      tag = "comment \"isopod-lan-allow\""
+      if (p == "") { printf "    %s daddr %s accept %s\n", kw, a, tag; return }
+      printf "    %s daddr %s tcp dport %s accept %s\n", kw, a, p, tag
+      printf "    %s daddr %s udp dport %s accept %s\n", kw, a, p, tag
+    }
+    BEGIN {
+      n = split(specs, s, ",")
+      for (i = 1; i <= n; i++) {
+        spec = s[i]
+        gsub(/^[ \t]+/, "", spec); gsub(/[ \t]+$/, "", spec)
+        if (spec == "") continue
+        addr = ""; port = ""; fam = 0
+        if (substr(spec, 1, 1) == "[") {
+          # Bracketed IPv6 with a port: [addr]:port, brackets required so the
+          # port colon cannot be confused with the address separators.
+          c = index(spec, "]")
+          if (c < 3) continue
+          rest = substr(spec, c + 1)
+          if (substr(rest, 1, 1) != ":") continue
+          port = substr(rest, 2)
+          addr = substr(spec, 2, c - 2)
+          fam = 6
+        } else {
+          t = spec
+          if (gsub(/:/, ":", t) >= 2) {
+            # Two or more colons is IPv6; a bare IPv6 cannot carry a port.
+            addr = spec; fam = 6
+          } else if (index(spec, ":") > 0) {
+            c = index(spec, ":")
+            port = substr(spec, c + 1)
+            addr = substr(spec, 1, c - 1)
+            fam = 4
+          } else {
+            addr = spec; fam = 4
+          }
+        }
+        c = index(addr, "/")
+        if (c > 0) { base = substr(addr, 1, c - 1); pfx = substr(addr, c + 1) }
+        else { base = addr; pfx = "" }
+        if (base == "") continue
+        if (port != "" && badport(port)) continue
+        if (fam == 4) {
+          if (bad4(base)) continue
+          if (pfx != "" && badpfx(pfx, 32)) continue
+          emit("ip", addr, port)
+        } else {
+          if (bad6(base)) continue
+          if (pfx != "" && badpfx(pfx, 128)) continue
+          emit("ip6", addr, port)
+        }
+      }
+    }' </dev/null)
+
+  # Placeholders are matched anchored, alone on their own line. An unanchored match
+  # also hits the header comment that names them, which put the generated rules
+  # above `table ... {` — invalid nft, so the box failed closed and never started
+  # sshd.
+  iso_log4='    ip daddr @private4 limit rate 10/minute log prefix "isopod-egress-drop "'
+  iso_log6='    ip6 daddr @private6 limit rate 10/minute log prefix "isopod-egress-drop "'
+  iso_render_nft() { # iso_render_nft <0|1 logging> <0|1 allow>
+    # rules/allow are multi-line; pass them through the environment (ENVIRON), not
+    # -v, since BSD awk (macOS, where the render test replays this) rejects a
+    # newline in a -v value. gw/logging/log4/log6 are single-line, so -v is fine.
+    ISO_RULES="$iso_ns_rules" \
+      ISO_ALLOW="$([ "$2" = 1 ] && printf '%s' "$iso_allow_rules")" \
+      awk -v gw="$iso_gw" -v logging="$1" -v log4="$iso_log4" -v log6="$iso_log6" '
+      /^@RESOLVERS@$/ { if (ENVIRON["ISO_RULES"] != "") print ENVIRON["ISO_RULES"]; next }
+      /^@ALLOW@$/     { if (ENVIRON["ISO_ALLOW"] != "") print ENVIRON["ISO_ALLOW"]; next }
+      /^@LOG4@$/      { if (logging == "1") print log4; next }
+      /^@LOG6@$/      { if (logging == "1") print log6; next }
+      { gsub(/@GATEWAY@/, gw); print }
+    ' /etc/isopod/egress-guest.nft >/run/isopod-egress.nft
+  }
+
+  # Try, in order of preference:
+  #   1. logging on,  exemptions in   — the normal case
+  #   2. logging off, exemptions in   — this kernel cannot log (nf_log_syslog)
+  #   3. logging on,  exemptions out  — a bad lan-allow entry; logging still works
+  #   4. logging off, exemptions out  — both layers failed
+  # The base ruleset (gateway + resolvers + private-range drops) is known good, so
+  # only the two optional layers can make nft reject it. Neither must be able to
+  # brick the box: logging is a diagnostic, and a bad exemption should cost the
+  # user that one address, not leave them with a box that never starts sshd (the
+  # host validates specs, so a bad entry means a hand-edited meta or a gap).
+  # Rung 3 matters for the diagnosis too: without it, a bad exemption on a
+  # log-capable kernel would land on the last rung and be reported as "this
+  # kernel cannot log" — the wrong cause, and a needless loss of lan-denied.
+  iso_egress_dropped_allow=0
+  iso_egress_nolog=0
+  iso_load_ok=0
+  if iso_render_nft 1 1 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_load_ok=1
+  elif iso_render_nft 0 1 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_load_ok=1 iso_egress_nolog=1
+  elif iso_render_nft 1 0 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_load_ok=1 iso_egress_dropped_allow=1
+  elif iso_render_nft 0 0 && nft -f /run/isopod-egress.nft 2>/run/isopod-egress.err; then
+    iso_load_ok=1 iso_egress_nolog=1 iso_egress_dropped_allow=1
+  fi
+  [ "$iso_load_ok" = 1 ] ||
+    iso_egress_fail "nft rejected the ruleset: $(cat /run/isopod-egress.err 2>/dev/null)"
+  if [ "$iso_egress_dropped_allow" = 1 ]; then
+    echo "isopod: guest egress: nft rejected the lan-allow exemptions, so the box started" >&2
+    echo "isopod:   WITHOUT them: ${ISOPOD_GUEST_EGRESS_ALLOW:-}" >&2
+    echo "isopod:   Fix the address and re-add it: isopod egress lan-allow <box> ..." >&2
+    iso_allow_rules=""
+  fi
+  if [ "$iso_egress_nolog" = 1 ]; then
+    echo "isopod: guest egress: this kernel cannot log dropped packets, so" >&2
+    echo "isopod:   'isopod egress lan-denied' will show nothing. Filtering is unaffected." >&2
+  fi
+  # Confirm it is actually in the kernel rather than trusting nft's exit status.
+  nft list table inet isopod_egress >/dev/null 2>&1 ||
+    iso_egress_fail "the ruleset did not load into the kernel"
+  [ -n "$iso_ns_rules" ] &&
+    echo "isopod: guest egress: DNS allowed to$(awk '/ip6? daddr/ && !seen[$3]++ { printf " %s", $3 }' /run/isopod-egress.nft) (port 53 only)" >&2
+
+  [ -n "$iso_allow_rules" ] &&
+    echo "isopod: guest egress: also allowed$(printf '%s\n' "$iso_allow_rules" | awk '!seen[$3]++ { printf " %s", $3 }')" >&2
+
+  echo "isopod: guest egress isolation active (private ranges blocked; gateway $iso_gw allowed)" >&2
+fi
+
+unset ISOPOD_AUTHORIZED_KEY ISOPOD_ROOT_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN
+unset ISOPOD_DISK ISOPOD_NESTED ISOPOD_DNS_VIA_PROXY ISOPOD_GUEST_EGRESS ISOPOD_GUEST_EGRESS_DNS
+unset ISOPOD_GUEST_EGRESS_ALLOW
 mkdir -p /run/sshd
 exec /usr/sbin/sshd -D -e
