@@ -1,4 +1,8 @@
 usage: isopod egress [status|apply|observe|persist|unpersist|allow <domain>|allowlist|log [-f]|denied|rules]
+       isopod egress lan-allow <box> [--rm] [<addr>[/<prefix>][:<port>]]
+       isopod egress lan-denied <box> [count]
+
+  host-side (all boxes):
   status     mode, network, and proxy/firewall state (--json for machine-readable output)
   apply      load the host firewall; for allow-list also (re)start the filtering proxy
   persist    install a systemd unit that re-applies the firewall on boot
@@ -10,3 +14,18 @@ usage: isopod egress [status|apply|observe|persist|unpersist|allow <domain>|allo
   log        tail the proxy access log (-f to follow)
   denied     show hostnames the proxy refused (candidates to allow; --json available)
   rules      print the rendered nftables ruleset that apply would load
+
+  per box (microVM boxes with guest egress on):
+  lan-allow  let one box reach an address in private space — an internal registry,
+             a git server, a database on the LAN. With no address, list the entries.
+             Applies to a running box right away; --rm removes an entry.
+  lan-denied show what the box tried to reach and was blocked from, as candidates
+             for lan-allow
+
+Names already resolve inside a box, so allowing the address is usually all that is
+needed — existing tools keep working with the hostnames they already have.
+
+  isopod egress lan-allow devbox 10.20.30.40         one host
+  isopod egress lan-allow devbox 10.20.0.0/16        a range
+  isopod egress lan-allow devbox 10.20.30.40:5432    one host, one port
+  isopod egress lan-allow devbox [fd00::1]:5432      IPv6 needs brackets with a port

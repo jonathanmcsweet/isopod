@@ -24,6 +24,8 @@ _isopod() {
     'info:Show connection details for a sandbox'
     'code:Open the sandbox in VSCodium (or another IDE)'
     'shell:Open a shell inside the sandbox'
+    'root-shell:Administrative root shell (host-held key)'
+    'upgrade:Rebuild the box onto the current image'
     'start:Start a stopped sandbox'
     'stop:Stop a running sandbox'
     'export:Copy the workspace out of the sandbox'
@@ -31,7 +33,10 @@ _isopod() {
     'remap:Rewrite a box commit identity after fetch'
     'copy-in:Copy more host folders into the sandbox'
     'rm:Delete a sandbox (container + keys)'
+    'migrate:Rebuild a box onto or off the sandbox account'
     'egress:Manage the network egress firewall'
+    'host-port:Reach a host service from inside a box'
+    'account:Sandbox account — opt-in hard egress boundary'
     'secret:Manage secrets injected into boxes'
     'doctor:Check host prerequisites'
     'help:Show help'
@@ -58,7 +63,13 @@ _isopod() {
             '--cpus[cpu limit]:cpus:' \
             '--port[fixed host SSH port]:port:' \
             '*--secret[secret to inject, NAME or NAME\:path]:secret:' \
-            '--no-sudo[do not grant in-box passwordless sudo]' \
+            '--sudo[grant in-box passwordless sudo (off by default)]' \
+            '--no-sudo[no-op; sudo is off by default]' \
+            '--no-root-key[no administrative root key either (no root path at all)]' \
+            '--guest-egress[in-box network isolation: on|off (default on)]:mode:(on off)' \
+            '*--lan-allow[let the box reach one private address]:addr:' \
+            '*--host-port[reach a host service from the box: PORT or BOXPORT:HOSTPORT]:spec:' \
+            '--account[run the box under the sandbox account (hard egress boundary)]' \
             '--container[run as a plain container instead of the default microVM]' \
             '--dev[add the dev/test toolchain (nested engines, lint/test tools)]' \
             '--disk[box-local data volume, SIZE or SIZE\:MOUNTPOINT (microVM boxes only)]:disk:' \
@@ -87,12 +98,21 @@ _isopod() {
           _arguments '--path[in-box repo path]:path:' '1:sandbox:_isopod_boxes'
           ;;
         egress)
-          _arguments '1:action:(status apply observe persist unpersist allow log denied rules)'
+          _arguments '1:action:(status apply observe persist unpersist allow log denied rules lan-allow lan-denied)'
           ;;
         secret)
           _arguments '1:action:(set ls rm)'
           ;;
-        info|shell|start|stop|export|copy-in)
+        host-port|hostport)
+          _arguments '1:action:(add rm ls)' '2:sandbox:_isopod_boxes'
+          ;;
+        account)
+          _arguments '1:action:(setup status teardown rules)'
+          ;;
+        migrate)
+          _arguments '--account[move onto the sandbox account]' '--no-account[move off it]' '--force[skip confirmation]' '1:sandbox:_isopod_boxes'
+          ;;
+        info|shell|root-shell|upgrade|start|stop|export|copy-in)
           _arguments '1:sandbox:_isopod_boxes'
           ;;
       esac

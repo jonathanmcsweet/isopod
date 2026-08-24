@@ -19,6 +19,85 @@ die() {
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Strict IPv6 literal check (no zone id, no prefix; embedded-IPv4 forms like
+# ::ffff:1.2.3.4 are deliberately rejected — use the IPv4 spec instead). Returns
+# 0 for a valid address only. This matters because the address becomes an nft
+# rule: nft rejects a malformed literal and rejects the ENTIRE ruleset with it,
+# so a value that a loose "hex and colons" check waves through does not fail on
+# its own — it takes the whole guest firewall down and, in the box, leaves it
+# with no sshd. This host-side check is the gate; the box does not re-derive it.
+# The entrypoint keeps a looser shape check and DEGRADES if nft still rejects
+# the result (drops the exemptions, boots anyway), and the in-box helper runs
+# the rendered rules through `nft -c` before touching the live chain — the real
+# parser, stronger than any regex.
+valid_ip6() { # valid_ip6 <addr>
+  local a="$1" left right dc=0 side rest g n=0
+  case "$a" in
+    "" | *[!0-9A-Fa-f:]* | *:::*) return 1 ;;
+  esac
+  left="$a" right=""
+  # Split on the single permitted "::". A second one is invalid.
+  case "$a" in
+    *::*)
+      dc=1
+      left="${a%%::*}"
+      right="${a#*::}"
+      case "$right" in *::*) return 1 ;; esac
+      ;;
+  esac
+  for side in "$left" "$right"; do
+    [ -z "$side" ] && continue
+    # A leading/trailing colon here would be a stray single colon (the "::" was
+    # already removed), which is malformed.
+    case "$side" in :* | *:) return 1 ;; esac
+    rest="$side"
+    while :; do
+      case "$rest" in
+        *:*)
+          g="${rest%%:*}"
+          rest="${rest#*:}"
+          ;;
+        *)
+          g="$rest"
+          rest=""
+          ;;
+      esac
+      case "$g" in "" | *[!0-9A-Fa-f]*) return 1 ;; esac
+      [ "${#g}" -le 4 ] || return 1
+      n=$((n + 1))
+      [ -z "$rest" ] && break
+    done
+  done
+  # "::" stands in for one or more all-zero groups, so the explicit groups must
+  # leave room (<=7); without it, exactly 8 groups are required.
+  if [ "$dc" = 1 ]; then
+    [ "$n" -le 7 ] || return 1
+  else
+    [ "$n" -eq 8 ] || return 1
+  fi
+  return 0
+}
+
+# Strip terminal control characters from text that came OUT of a box, before the
+# host prints it. A box is assumed compromised, so anything it emits — a git
+# identity, a repo path, a branch name — can carry escape sequences that rewrite
+# the host's terminal: forging a success line, hiding an error, or driving
+# clipboard/window operations on terminals that enable them. Every ANSI, OSC and
+# CSI sequence begins with ESC (0x1b), so dropping the C0 controls and DEL
+# defuses all of them; tab and newline are kept so multi-line listings still
+# format. 8-bit C1 introducers (0x80-0x9f) are deliberately NOT stripped: in a
+# UTF-8 locale those bytes are continuation bytes of ordinary characters, and
+# removing them would corrupt legitimate non-ASCII text for no gain — terminals
+# in UTF-8 mode do not act on them.
+sanitize() { # sanitize <string...> -> the same text with control characters removed
+  printf '%s' "$*" | LC_ALL=C tr -d '\000-\010\013-\037\177'
+}
+
+# Stream form of sanitize: strip the same control characters from stdin to stdout.
+# For box-originated output that arrives as a stream (a tar's stderr, a log tail)
+# rather than an argument, where buffering it into a string would be wrong.
+sanitize_stream() { LC_ALL=C tr -d '\000-\010\013-\037\177'; }
+
 # Host OS family isopod is running ON — NOT where boxes run. On macOS the
 # container engine runs boxes inside its own Linux VM (podman machine / Docker
 # Desktop), so the host that runs the `isopod` script and the
@@ -77,21 +156,44 @@ ${body}EOF"
 # generated ssh_config and per-box meta files), so two concurrent invocations
 # can't corrupt them or pick colliding ports/colors. We use an atomic `mkdir`
 # rather than flock(1) because mkdir is atomic on every platform isopod runs on
-# (Linux, macOS). A lock left behind by a crashed process is
-# reclaimed via a POSIX `kill -0` liveness check.
+# (Linux, macOS). A lock left behind by a dead or killed process is reclaimed
+# automatically (see lock_owner_live), so a stale lock never needs a manual rm.
 LOCK_DIR=""
+# A lock is still held only if its recorded pid is alive AND is the same process
+# instance that took it. `kill -0` alone misfires on a busy host: after the holder
+# exits, its pid gets recycled onto an unrelated process that `kill -0` reads as
+# live, wedging every later command. The recorded start time (ps lstart, on Linux
+# and macOS) tells a reused pid apart from the original holder.
+lock_owner_live() { # lock_owner_live <lockdir> <pid>
+  local lock="$1" pid="$2" born now
+  kill -0 "$pid" 2>/dev/null || return 1
+  born=$(cat "$lock/born" 2>/dev/null || true)
+  [ -n "$born" ] || return 0 # no recorded start: assume live, don't stomp a holder
+  now=$(ps -p "$pid" -o lstart= 2>/dev/null || true)
+  [ -z "$now" ] || [ "$born" = "$now" ] # same start -> live; different -> pid reused
+}
 acquire_lock() {
   [ -n "$LOCK_DIR" ] && return 0 # already held by this process
   mkdir -p "$CONFIG_DIR"
-  local lock="$CONFIG_DIR/.lock" tries=0 owner
+  local lock="$CONFIG_DIR/.lock" tries=0 pidless=0 owner
   while ! mkdir "$lock" 2>/dev/null; do
-    # A racer that reads pid in the brief window after the owner's mkdir but
-    # before it writes pid (below) sees an empty owner: it does NOT reclaim
-    # (the [ -n "$owner" ] guard), it just spins and retries — benign.
     owner=$(cat "$lock/pid" 2>/dev/null || true)
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$lock"
-      continue # previous owner is gone — reclaim it
+    if [ -z "$owner" ]; then
+      # A holder writes its pid right after mkdir, so a lock still pidless after a
+      # short grace was abandoned mid-acquire (killed in that window) — reclaim it.
+      # The grace avoids stomping that sub-millisecond gap in a live holder.
+      pidless=$((pidless + 1))
+      [ "$pidless" -ge 5 ] && {
+        rm -rf "$lock"
+        pidless=0
+        continue
+      }
+    elif ! lock_owner_live "$lock" "$owner"; then
+      rm -rf "$lock" # holder is gone (dead pid, or its pid was reused elsewhere)
+      pidless=0
+      continue
+    else
+      pidless=0
     fi
     tries=$((tries + 1))
     [ "$tries" -ge 100 ] && die "another isopod command holds the lock ($lock).
@@ -100,6 +202,7 @@ acquire_lock() {
   done
   LOCK_DIR="$lock"
   printf '%s\n' "$$" >"$lock/pid" 2>/dev/null || true
+  ps -p "$$" -o lstart= 2>/dev/null >"$lock/born" || true
 }
 release_lock() {
   [ -n "$LOCK_DIR" ] || return 0
@@ -116,7 +219,19 @@ on_exit() {
   if [ -n "$CREATE_ROLLBACK_NAME" ]; then
     warn "create failed — rolling back partial sandbox '$CREATE_ROLLBACK_NAME'"
     if [ -n "${ENGINE:-}" ]; then
-      "$ENGINE" rm -f "$(ctr_name "$CREATE_ROLLBACK_NAME")" >/dev/null 2>&1 || true
+      # Print the box's own output BEFORE destroying it. The failure above may well
+      # have said "check: $ENGINE logs <ctr>" — advice the next line makes
+      # impossible, which is how a box that failed closed for a stated reason
+      # (a rejected ruleset, a missing file) became a create that failed for no
+      # visible reason at all. Box-controlled text, so it is sanitized on the way
+      # out; failures here are ignored because rollback must still happen.
+      local ctrlog
+      ctrlog="$(engine logs "$(ctr_name "$CREATE_ROLLBACK_NAME")" 2>&1 | tail -20)" || ctrlog=""
+      if [ -n "$ctrlog" ]; then
+        printf 'Last output from the box before rollback:\n' >&2
+        printf '%s\n' "$(sanitize "$ctrlog")" | sed 's/^/    /' >&2
+      fi
+      engine rm -f "$(ctr_name "$CREATE_ROLLBACK_NAME")" >/dev/null 2>&1 || true
     fi
     rm -rf "$(box_dir "$CREATE_ROLLBACK_NAME")"
     write_ssh_include 2>/dev/null || true

@@ -84,8 +84,35 @@ test/run.sh              # lint + formatting + stubbed bats + interactive
 RUN_LIVE=1 test/run.sh   # also runs live tests against real podman/docker
 ```
 
-Run `test/run.sh` and keep it green before committing. See the
-[Testing section of the README](../README.md#testing) for the CI layout.
+The suite lives under `test/`, using [bats-core](https://github.com/bats-core/bats-core)
+and pexpect for the interactive prompts. Run `test/run.sh` and keep it green
+before committing; `RUN_LIVE=1` adds the end-to-end tests against a real
+podman/docker.
+
+CI runs on both GitLab and GitHub with the same core jobs — lint (shellcheck +
+bash syntax + python), test (stubbed + interactive, runs anywhere), and a manual
+`live-isolation` job that needs a podman-capable runner. GitHub additionally runs
+`macos` (BSD-userland lint + test), `brew-formula` (installs isopod through the
+Homebrew tap formula built from the checkout), and `distro-install` (runs
+`install.sh` for real on Fedora, immutable Fedora, Ubuntu, Arch, and Gentoo
+images); job names differ slightly between the two systems, but the roles match.
+
+Run one distro check locally against any image:
+
+```sh
+docker run --rm -v "$PWD:/src:ro" -w /src archlinux:latest \
+  bash test/distro-install.sh pacman     # expected package-manager hint
+```
+
+- **GitLab CI/CD** (`.gitlab-ci.yml`) should run identically under
+  [`gitlab-ci-local`](https://github.com/firecow/gitlab-ci-local) for debugging
+  pipelines on your own machine before pushing.
+- **GitHub Actions** (`.github/workflows/ci.yml`) runs locally with
+  [`act`](https://github.com/nektos/act): `act -j lint`, `act -j test`. The
+  `live-isolation` job needs container-in-container and is gated to manual
+  dispatch, so run it the native way instead: `RUN_LIVE=1 test/run.sh`. Bare `act`
+  also tries `macos`/`brew-formula`, which aren't expected to work under `act`'s
+  runner. (An `.actrc` pins a runner image with the tooling the jobs expect.)
 
 ## Repo conventions
 

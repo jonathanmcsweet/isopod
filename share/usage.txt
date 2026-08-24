@@ -6,10 +6,14 @@ Usage:
   isopod info <name> [--json]         Show connection details for a sandbox
   isopod code <name> [--app APP]      Open the sandbox in a new VSCodium window (or APP)
   isopod shell <name> [-- cmd...]     Open a shell (or run cmd) inside the sandbox
+  isopod root-shell <name> [-- cmd]   Administrative root shell (host-held key)
+                                      --print-ssh-config emits an IDE entry for it
+  isopod upgrade <name> [--in-place]  Rebuild the box onto the current image
   isopod start <name>                 Start a stopped sandbox
   isopod stop <name>                  Stop a running sandbox
   isopod config <name>                Show a box's editable config (config.yaml)
   isopod reconfigure <name> [opts]    Apply new run settings to an existing box
+  isopod migrate <name> --account     Rebuild a box onto (or off) the sandbox account
   isopod export <name> [dest]         Copy the workspace OUT (--exclude PAT, --gitignore)
   isopod fetch <name> [target-dir]    Pull the box's git history into a host repo
   isopod remap <name> [target-dir]    Rewrite a box's commit identity after fetch
@@ -18,6 +22,9 @@ Usage:
   isopod rm <name> [--force]          Delete a sandbox (container + keys + snapshots)
   isopod gc [--dry-run] [--force]     Remove isopod images no box still references
   isopod egress [status|apply|allow …]  Manage the network egress firewall/proxy
+  isopod host-port <add|rm|ls> <box>    Reach a host service from inside a box
+  isopod account [setup|status|...]     Sandbox account: opt-in hard egress boundary
+                                        that survives guest root (rootless engine)
   isopod secret [set|ls|rm] <NAME>    Manage secrets injected into boxes
   isopod doctor                       Check host prerequisites
   isopod help                         Show this help
@@ -58,7 +65,53 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         a server on the box's :3000 reachable at localhost:3001.
   --memory <size>       Memory limit, e.g. 4g
   --cpus <n>            CPU limit, e.g. 2
-  --no-sudo             Do not give the in-box user passwordless sudo
+  --sudo                Give the in-box user passwordless sudo. OFF by default:
+                        anything running as the box user would inherit it,
+                        including an agent. Administer a box without it using
+                        'isopod root-shell <name>', which logs in as root with a
+                        key only the host holds. (--no-sudo is still accepted and
+                        is now a no-op, since that is the default.)
+  --no-root-key         Do not generate the administrative root key either. The
+                        box then has NO root path at all: no 'isopod root-shell'
+                        and no 'isopod install'. Maximum lockdown — bake every
+                        system package in with --dockerfile.
+  --guest-egress <on|off>
+                        In-box network isolation (microVM boxes). ON by default:
+                        with krun+passt the guest is handed the HOST's own LAN
+                        identity, so without it the box is a machine on your
+                        network. Blocks private/LAN/CGNAT/link-local destinations;
+                        public internet is unaffected. The box's own resolvers stay
+                        reachable on port 53 only, so DNS keeps working even when
+                        they sit in a blocked range (a VPN's resolver usually does)
+                        — the box can resolve names, including internal ones, but
+                        cannot otherwise reach anything in private space.
+                        Need one internal service anyway? Use --lan-allow rather
+                        than turning this off.
+                        Skipped when host-side egress is active (that is stronger
+                        and its proxy lives on a private address). Defence in
+                        depth: it runs in the guest, so guest root could remove
+                        it — the box user has no sudo or CAP_NET_ADMIN by default.
+  --lan-allow <addr>    Let this box reach one address in private space anyway —
+                        an internal registry, a git server, a database on the LAN
+                        (repeatable). Names already resolve inside a box, so
+                        allowing the address is usually all that is needed.
+                        'ADDR', 'ADDR/PREFIX' or either with ':PORT'; IPv6 needs
+                        brackets with a port, e.g. '[fd00::1]:5432'. Add or remove
+                        them later with 'isopod egress lan-allow <box> [--rm]',
+                        which applies to a running box right away.
+  --account             Run the box under the sandbox account, so the host
+                        firewall keyed on that account is its egress boundary —
+                        one that survives guest root, unlike --guest-egress.
+                        Needs a one-time 'sudo isopod account setup' first.
+                        Linux + podman only. See 'isopod account'.
+  --host-port <spec>    Make a service on YOUR HOST reachable inside the box
+                        (repeatable) — the opposite direction to --expose. A bare
+                        'PORT' gives the box the host's 127.0.0.1:PORT at the same
+                        port, so nothing in the box needs reconfiguring;
+                        'BOXPORT:HOSTPORT' and 'BOXPORT:TARGET:PORT' also work,
+                        with the target resolved and connected FROM your host (so
+                        an internal name behind your VPN works too). Box port must
+                        be >= 1024. Manage later with 'isopod host-port'.
   --harden <level>      Kernel-hardening profile: 'default' (on for every box —
                         reduced-surface guest sysctls on microVM boxes) or 'off'.
                         'strict' is reserved for a future release.
@@ -103,6 +156,9 @@ Reconfiguring a box (change run settings without starting over):
   and installed packages), then recreates the container with the new settings.
 
 Options for reconfigure (or edit config.yaml; each accepts '--opt value' and '--opt=value'):
+  --guest-egress <on|off>  Switch in-box network isolation on an existing box.
+                        Turning it ON requires an image that ships the ruleset —
+                        run 'isopod upgrade <name>' first if the box is stale.
   --expose <spec>       Replace the box's forwarded ports (repeatable; same form
                         as create's --expose)
   --memory <size>       New memory limit, e.g. 8g (blank clears it)
@@ -147,6 +203,9 @@ Network egress isolation (host-enforced; an in-box agent cannot turn it off):
                         (stops data exfiltration to arbitrary destinations).
   Subcommands:  status, apply (load firewall + start proxy), observe (build the
   allow-list from real traffic), allow <domain>, log [-f], denied, rules.
+  Per box:  lan-allow <box> [--rm] <addr>  let one box reach a private address
+            lan-denied <box>               what it tried to reach and was blocked
+            from (candidates to allow). Needs guest egress on.
 
 Secrets (host-stored, injected per box):
   'isopod secret set NAME' stores a value (stdin or hidden prompt — never argv)

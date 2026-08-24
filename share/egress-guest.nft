@@ -1,0 +1,107 @@
+# isopod guest egress ruleset — loaded INSIDE a microVM box by the entrypoint.
+#
+# Blocks the box from reaching private address space: your LAN, CGNAT/overlay
+# ranges (Tailscale and friends), link-local, and cloud metadata. Public internet
+# is untouched, so an agent's API calls keep working.
+#
+# WHY THIS IS NEEDED AT ALL: with krun + passt the guest is handed the HOST's own
+# LAN identity — a real address on your subnet and your real router as its default
+# gateway. It is not behind a private NAT. Without these rules the box is simply a
+# machine on your network.
+#
+# WHY THE GATEWAY IS EXEMPT: passt also maps the HOST onto that same gateway
+# address, so inbound SSH from the host arrives from it. At the IP layer the host
+# and the router are the same address and cannot be told apart. Dropping it would
+# cut isopod's own control channel and lock the box, so it is accepted — the one
+# private address the box can still reach. passt's --no-map-gw would separate the
+# two and let this exemption go away; see docs.
+#
+# This is defence in depth, not a hard boundary: it runs in the guest, so guest
+# root can remove it. The box user has no sudo and no CAP_NET_ADMIN by default,
+# which is what makes it hold against the workload it is containing.
+#
+# The entrypoint substitutes these before loading: @GATEWAY@ from /proc/net/route,
+# @RESOLVERS@ from /etc/resolv.conf, @ALLOW@ from the box's lan-allow list, and
+# @LOG4@/@LOG6@ with the logging rules below (or with nothing, if this kernel has
+# no log support). Not a render_tmpl template: this file is consumed by nft inside
+# the box, never evaluated as a shell heredoc on the host.
+
+table inet isopod_egress {
+  # Declared once and referenced twice, by the log rule and the drop rule, so the
+  # two can never fall out of step. Sets must appear before the chain that uses
+  # them: nft reads this file top to bottom.
+  set private4 {
+    type ipv4_addr
+    flags interval
+    elements = {
+      10.0.0.0/8,
+      172.16.0.0/12,
+      192.168.0.0/16,
+      100.64.0.0/10,
+      169.254.0.0/16,
+      192.0.0.0/24,
+      198.18.0.0/15
+    }
+  }
+
+  set private6 {
+    type ipv6_addr
+    flags interval
+    elements = {
+      fc00::/7,
+      fe80::/10
+    }
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+
+    # Loopback and already-approved flows first, so nothing below can strand an
+    # established connection (including the SSH session isopod is talking over).
+    oif "lo" accept
+    ct state established,related accept
+
+    # The host control path. See the note above: this is also the LAN router.
+    ip daddr @GATEWAY@ accept
+
+    # The box's own resolvers, port 53 only.
+    #
+    # An earlier design pinned a public resolver instead and blocked these
+    # outright, reasoning that an internal resolver is a reconnaissance channel no
+    # address filter sees. That reasoning still holds, but it assumed a public
+    # resolver is always reachable, and it is not: on a host behind a VPN in
+    # lockdown mode every packet outside the tunnel is dropped, so 1.1.1.1 never
+    # answers. Worse, a VPN's own resolver commonly sits in 100.64.0.0/10 or
+    # 169.254.0.0/16 — the very ranges below — so the rules blocked the only DNS
+    # the box could ever have used, and it resolved nothing at all.
+    #
+    # Narrow exemption instead: these exact addresses, UDP/TCP 53, nothing else.
+    # The box can resolve names, including internal ones, and still cannot open a
+    # connection to anything else in private space.
+@RESOLVERS@
+    # Addresses this box is allowed to reach in private space, from
+    # `isopod egress lan-allow`. Empty unless the user added one. This is the
+    # supported way to reach an internal service — an internal registry, a private
+    # git server, a database on the LAN — without turning the whole ruleset off.
+    #
+    # Names already resolve inside the box (see the resolver exemption above), so
+    # allowing the address is usually all that is needed: existing tooling keeps
+    # working with the hostnames it already has.
+@ALLOW@
+    # Log what gets dropped, then drop it, as two rules over one set.
+    #
+    # `limit` stops rule evaluation once the rate is exceeded, so it must not
+    # share a rule with the drop — over the rate, the packet would fall past a
+    # combined rule and be accepted. Kept separate, the log rule carries no
+    # verdict and evaluation always continues to the drop below it.
+    #
+    # The rate cap is what makes this safe to leave on: a box in a retry loop
+    # writes a few lines a minute, not a full ring buffer. `isopod egress
+    # lan-denied <box>` reads them back and names the address to allow.
+@LOG4@
+    ip daddr @private4 counter drop
+
+@LOG6@
+    ip6 daddr @private6 counter drop
+  }
+}

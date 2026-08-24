@@ -99,6 +99,6 @@ Two runtimes give boxes such a subnet:
 
 ## Reference
 
-See [docs/opt-in-security.md](opt-in-security.md#macos-the-engine-vm-is-already-the-boundary)
+See [docs/security-model.md](security-model.md#macos-the-engine-vm-is-already-the-boundary)
 for the user-facing setup steps, and `test/macos-egress-check.sh` to validate a
 Mac before applying.

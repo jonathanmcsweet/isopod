@@ -5,7 +5,7 @@ there — often a throwaway like `dev@<container>`. `isopod remap` rewrites thos
 commits to your real name/email after you've pulled them onto the host,
 while preserving commit messages and author/committer dates.
 
-It complements [`isopod fetch`](../README.md#getting-work-back-out-export-vs-fetch),
+It complements [`isopod fetch`](getting-work-out.md#fetch-pull-only-git-history),
 which brings the container's history onto the host as remote-tracking refs.
 
 ## Prerequisite: fetch first

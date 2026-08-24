@@ -50,6 +50,13 @@ write_ssh_include() {
       hostkeyalias=""
       # shellcheck disable=SC2034
       [ "$(box_engine "$name")" = container ] && hostkeyalias="  HostKeyAlias $(ctr_name "$name")"
+      # No root entry is emitted here on purpose. The box's root account is
+      # reachable with `isopod root-shell`, but putting it in the managed include
+      # would give every box a ready-made root target for an IDE — and a
+      # root-privileged editor window opened on the workspace runs what the
+      # workspace tells it to (.vscode/tasks.json 'runOn: folderOpen', extension
+      # activation), which on an agent-run box hands the agent root. Print the
+      # block deliberately with `isopod root-shell <name> --print-ssh-config`.
       render_tmpl ssh-entry.txt
     done
   } >"$tmp"
@@ -69,7 +76,7 @@ meta_set_port() { # meta_set_port <name> <port>
 
 resolve_port() { # resolve_port <name> -> echoes current host port for the box sshd
   local out
-  out=$("$ENGINE" port "$(ctr_name "$1")" "$BOX_SSHD_PORT/tcp" 2>/dev/null | head -1) || return 1
+  out=$(engine port "$(ctr_name "$1")" "$BOX_SSHD_PORT/tcp" 2>/dev/null | head -1) || return 1
   printf '%s' "${out##*:}"
 }
 
@@ -127,7 +134,17 @@ box_status() { # box_status <name>
       sed -nE 's/.*"state"[[:space:]]*:[[:space:]]*"([a-zA-Z]+)".*/\1/p' | head -n1 |
       grep . # non-zero when no state line was found (missing box)
   else
-    "${eng:-$ENGINE}" inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null
+    # Route through engine() so an --account box is inspected in the sandbox
+    # account's store, not the caller's. A direct `podman inspect` runs as the
+    # invoking user and never sees the account's container, so every status check
+    # would read "not running". A LOCAL routing flag (and a local ENGINE pinned to
+    # the box's own engine) keeps this from leaking to callers that iterate boxes
+    # (list, ssh include, gc).
+    # ISOPOD_ENGINE_AS_ACCOUNT is read by engine() (engine.sh, linted separately).
+    # shellcheck disable=SC2034
+    local ISOPOD_ENGINE_AS_ACCOUNT ENGINE="${eng:-$ENGINE}"
+    engine_ctx_for_box "$name"
+    engine inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null
   fi
 }
 
@@ -147,6 +164,25 @@ refresh_port() { # refresh stored port + ssh config if the mapping changed
     meta_set_port "$name" "$port"
     write_ssh_include
   fi
+}
+
+# A real host-key change vs a partial scan. ssh-keyscan -T can return a SUBSET of
+# the host's key types when one is slow to answer; a full-set comparison then
+# false-flags that as a swap and trains users to disable the check. Compare only
+# the key types present in BOTH files: an attacker on the port lacks the box's
+# private key, so any blob offered for a shared type differs and is still caught,
+# while a merely-absent type is not treated as a change. The ssh connection's own
+# StrictHostKeyChecking is the ultimate gate; this is the early, friendly signal.
+host_key_changed() { # host_key_changed <pinned-known_hosts> <fresh-scan>
+  local t b
+  declare -A pinned=()
+  while read -r t b; do [ -n "$t" ] && pinned["$t"]="$b"; done \
+    < <(awk 'NF>=3 {print $2, $3}' "$1")
+  while read -r t b; do
+    [ -n "$t" ] || continue
+    [ -n "${pinned[$t]:-}" ] && [ "${pinned[$t]}" != "$b" ] && return 0
+  done < <(awk 'NF>=3 {print $2, $3}' "$2")
+  return 1
 }
 
 # Pin the box's SSH host key. This is trust-on-first-use: the very first scan
@@ -170,8 +206,7 @@ scan_host_key() { # scan_host_key <name>
       ssh-keyscan -p "$port" -T 3 "$host" 2>/dev/null >"$tmp" && [ -s "$tmp" ]; then
       # Compare only the key material (type + blob), not the leading [host]:port
       # field, which legitimately changes when the box gets a new published port.
-      if [ -s "$kh" ] &&
-        [ "$(awk '{print $2, $3}' "$kh" | sort -u)" != "$(awk '{print $2, $3}' "$tmp" | sort -u)" ]; then
+      if [ -s "$kh" ] && host_key_changed "$kh" "$tmp"; then
         # A box's key is fixed at first boot and persists across start/stop/
         # reconfigure, and a recreated box gets a fresh (empty) known_hosts, so an
         # already-pinned box should never present a different key. If one does, the
@@ -259,6 +294,58 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
     -o StrictHostKeyChecking=yes \
     -o ForwardAgent=no -o ForwardX11=no \
     "${hkalias[@]}" "${opts[@]}" "$CONTAINER_USER@$host" "${rcmd[@]}"
+}
+
+# Connect to a box as root, using the administrative key the host generated for
+# it at create time. Same transport and host-key pinning as box_ssh — only the
+# login user and identity differ. This is the ONLY way into a box's root account:
+# the private key lives on the host, sshd takes root by key only, and the box
+# user has no sudo by default, so nothing running in the box can reach it.
+#
+# Boxes created before the root key existed have no id_ed25519_root; say so
+# plainly rather than failing as an opaque SSH permission error.
+root_ssh() { # root_ssh <name> [ssh-options...] [-- remote command...]
+  local name="$1"
+  shift
+  local key
+  key="$(box_dir "$name")/id_ed25519_root"
+  [ -f "$key" ] ||
+    die "box '$name' has no administrative root key — it predates 'isopod root-shell'.
+     Rebuild it onto the current image to get one: isopod upgrade $name"
+  local host port
+  IFS=' ' read -r host port < <(box_ssh_addr "$name") ||
+    die "could not resolve SSH address for box '$name'"
+  local -a hkalias=()
+  [ "$(box_engine "$name")" = container ] && hkalias=(-o "HostKeyAlias=$(ctr_name "$name")")
+  local -a opts=() rcmd=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --)
+        shift
+        rcmd=("$@")
+        break
+        ;;
+      -o)
+        opts+=("$1" "$2")
+        shift 2
+        ;;
+      -*)
+        opts+=("$1")
+        shift
+        ;;
+      *)
+        rcmd=("$@")
+        break
+        ;;
+    esac
+  done
+  ssh -p "$port" \
+    -i "$key" \
+    -o IdentitiesOnly=yes \
+    -o UserKnownHostsFile="$(box_dir "$name")/known_hosts" \
+    -o StrictHostKeyChecking=yes \
+    -o ForwardAgent=no -o ForwardX11=no \
+    "${hkalias[@]}" "${opts[@]}" "root@$host" "${rcmd[@]}"
 }
 
 # Stream a tar archive between host and box over SSH. File transfer uses tar

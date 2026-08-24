@@ -30,7 +30,7 @@ shellcheck:
   stage: lint
   script:
     - apt-get update -qq && apt-get install -y -qq shellcheck
-    - shellcheck -S warning isopod lib/isopod.d/*.sh install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh test/distro-install.sh verify-host-isolation.sh
+    - shellcheck -S warning isopod lib/isopod.d/*.sh share/isopod-entrypoint lib/find_box_repo.sh lib/guest_egress_allow.sh install.sh test/run.sh test/packaging.sh test/egress-render.sh test/brew-formula.sh test/distro-install.sh verify-host-isolation.sh
     - bash -n isopod lib/isopod.d/*.sh install.sh verify-host-isolation.sh
     # lint the discrete python helpers under lib/
     - apt-get install -y -qq python3 python3-pyflakes

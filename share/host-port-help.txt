@@ -1,0 +1,32 @@
+usage: isopod host-port <add|rm|ls> <box> [spec]
+
+Make a service on YOUR HOST reachable from inside a box. This is the opposite
+direction to --expose, which publishes a box port to the host.
+
+  add   forward a host service to the box, and open it now
+  rm    remove a forward
+  ls    show a box's forwards and whether they are live
+
+Specs:
+  5432                  the box reaches your host's 127.0.0.1:5432 at its own
+                        127.0.0.1:5432 — same port, nothing to reconfigure
+  8080:5432             box 127.0.0.1:8080 -> host 127.0.0.1:5432
+  8080:10.20.30.40:443  box 127.0.0.1:8080 -> that address, reached FROM your host
+  8080:[fd00::1]:443    the same, IPv6 target
+
+The target is resolved and connected from your host, so an internal name your
+host can see works even when the box has no route to it — a split-tunnel VPN
+included. Nothing about the box's firewall changes: the forward rides inside the
+SSH connection isopod already holds.
+
+The box-side port must be 1024 or above. sshd opens it as the box user, which
+cannot bind a privileged port — use 8443:443 rather than 443.
+
+Forwards are stored per box and reopened by 'isopod start'. One ssh process
+carries all of a box's forwards, so adding or removing one restarts the others.
+
+  isopod host-port add devbox 5432             a local Postgres
+  isopod host-port add devbox 11434            a local Ollama
+  isopod host-port add devbox 8080:gitlab.corp.internal:443
+  isopod host-port ls devbox
+  isopod host-port rm devbox 5432

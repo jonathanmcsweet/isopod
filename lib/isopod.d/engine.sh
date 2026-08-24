@@ -91,7 +91,52 @@ ctr_name() { printf 'isopod-%s' "$1"; }
 box_dir() { printf '%s/%s' "$BOXES_DIR" "$1"; }
 
 require_box() {
+  # Validate before deriving any path from the name. create validates on the way
+  # in, but every other command reaches box_dir/meta/rm through here, so a
+  # traversal name (isopod rm '../../dir') must be refused here, not just trusted
+  # to be an existing directory.
+  valid_name "$1" || die "invalid sandbox name: '$1' (letters, digits, . _ - only)"
   [ -d "$(box_dir "$1")" ] || die "no such sandbox: '$1' (see: isopod list)"
+}
+
+# Whether engine invocations for the current box must run AS the sandbox account.
+# An account box's container and images live only in that account's rootless
+# store, so every engine op for it — run, start, inspect, rm, build, commit —
+# has to run as the account or it simply would not see them. Set per box by
+# open_box (from meta) and by cmd_create (from --account); 0 for every other box,
+# so a normal box is completely unaffected.
+ISOPOD_ENGINE_AS_ACCOUNT=0
+
+# Run the container engine, as the sandbox account when the current box uses it.
+# This is the ONE chokepoint: every "$ENGINE" invocation goes through here, so
+# routing is a single decision rather than 50 scattered ones. A non-account box
+# (the default) takes the direct path, byte-for-byte the old behaviour.
+engine() { # engine <engine-args...>
+  if [ "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" != 1 ]; then
+    "$ENGINE" "$@"
+    return
+  fi
+  local uid
+  uid="$(id -u "$ISOPOD_ACCOUNT" 2>/dev/null)" ||
+    die "box uses the sandbox account, but it does not exist — run: sudo isopod account setup"
+  [ -d "/run/user/$uid" ] ||
+    die "the sandbox account has no runtime directory (/run/user/$uid) — run: sudo isopod account setup"
+  # cd to / first: sudo -u inherits the caller's working directory, which is
+  # normally a project dir under the user's home the account cannot enter, and
+  # podman would fail with 'cannot chdir' before it even starts (spike note).
+  # XDG_RUNTIME_DIR is passed via sudo's SETENV (granted in the sudoers file) so
+  # rootless podman finds the account's runtime directory.
+  (cd / && exec sudo -n -u "$ISOPOD_ACCOUNT" "XDG_RUNTIME_DIR=/run/user/$uid" "$ENGINE" "$@")
+}
+
+# Set the account-routing flag for a box from its meta. Called by open_box, so
+# every box-context command routes correctly with no per-command wiring.
+engine_ctx_for_box() { # engine_ctx_for_box <name>
+  if [ "$(meta_get "$1" account 2>/dev/null || true)" = 1 ]; then
+    ISOPOD_ENGINE_AS_ACCOUNT=1
+  else
+    ISOPOD_ENGINE_AS_ACCOUNT=0
+  fi
 }
 
 # Common command entry: assert the box exists and select the engine it was
@@ -100,6 +145,7 @@ require_box() {
 open_box() { # open_box <name>
   require_box "$1"
   detect_engine "$(meta_get "$1" engine || true)"
+  engine_ctx_for_box "$1"
 }
 
 meta_get() { # meta_get <name> <key>
@@ -117,6 +163,15 @@ meta_set() { # meta_set <name> <key> <value> — replace or append a meta line
   tmp="$(mktemp "${TMPDIR:-/tmp}/isopod-meta-XXXXXX")"
   grep -v "^$2=" "$f" 2>/dev/null >"$tmp" || true
   printf '%s=%s\n' "$2" "$3" >>"$tmp"
+  mv "$tmp" "$f"
+}
+
+meta_del() { # meta_del <name> <key> — drop a meta line (no-op if absent)
+  local f tmp
+  f="$(box_dir "$1")/meta"
+  [ -f "$f" ] || return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/isopod-meta-XXXXXX")"
+  grep -v "^$2=" "$f" 2>/dev/null >"$tmp" || true
   mv "$tmp" "$f"
 }
 
@@ -264,19 +319,20 @@ valid_ifname() { # valid_ifname <name> -> a Linux netdev name (<=15 chars, safe 
 # on its own
 # (IMAGE_LAYER_VERSION remains only as a manual force-rebuild override).
 image_exists() { # image_exists <tag>
-  "$ENGINE" image exists "$1" 2>/dev/null || "$ENGINE" image inspect "$1" >/dev/null 2>&1
+  engine image exists "$1" 2>/dev/null || engine image inspect "$1" >/dev/null 2>&1
 }
 
 image_tag_for() { # image_tag_for <base-image> [dev-tools 0|1] [nested 0|1]
   [ -f "$ISOPOD_DOCKERFILE" ] || die "missing Dockerfile: $ISOPOD_DOCKERFILE"
   [ -f "$ISOPOD_ENTRYPOINT" ] || die "missing entrypoint: $ISOPOD_ENTRYPOINT"
   [ -f "$ISOPOD_SYSCTL_CONF" ] || die "missing sysctl baseline: $ISOPOD_SYSCTL_CONF"
+  [ -f "$ISOPOD_GUEST_EGRESS_NFT" ] || die "missing guest egress ruleset: $ISOPOD_GUEST_EGRESS_NFT"
   local dev="${2:-0}" nested="${3:-0}" hash
   # The dev-tools and nested flags are part of the cache key: the lean, --dev and
   # --nested-containers images are built from the same Dockerfile but differ, so
   # they must not share a tag.
   hash=$({
-    cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT" "$ISOPOD_SYSCTL_CONF"
+    cat "$ISOPOD_DOCKERFILE" "$ISOPOD_ENTRYPOINT" "$ISOPOD_SYSCTL_CONF" "$ISOPOD_GUEST_EGRESS_NFT"
     printf '%s\0%s\0%s\0%s\0%s' "$1" "$CONTAINER_USER" "$IMAGE_LAYER_VERSION" "$dev" "$nested"
   } | sha_hex)
   printf 'localhost/isopod-base:%s' "$hash"
@@ -307,14 +363,28 @@ build_image() { # build_image <base-image> [dev-tools 0|1] [nested 0|1] -> echoe
   # engine copy the Dockerfile in and point -f at it; podman/docker read it from
   # share/ directly. Strip any trailing slash on TMPDIR to avoid the '//'.
   local ctx tmpbase="${TMPDIR:-/tmp}" dockerfile="$ISOPOD_DOCKERFILE"
+  # An --account build runs AS the sandbox account, which must traverse to and
+  # read the context. A TMPDIR under a 0700 home is not traversable by another
+  # user, so opening the context alone (chmod below) is not enough — the account
+  # cannot even reach it. For account builds base the context on world-traversable
+  # /tmp (sticky) instead; the context is three package files, so /tmp space is a
+  # non-issue. Non-account builds honour TMPDIR unchanged.
+  [ "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" = 1 ] && tmpbase=/tmp
   ctx=$(mktemp -d "${tmpbase%/}/isopod-ctx-XXXXXX")
   cp "$ISOPOD_ENTRYPOINT" "$ctx/isopod-entrypoint"
   cp "$ISOPOD_SYSCTL_CONF" "$ctx/hardening-sysctl.conf"
+  cp "$ISOPOD_GUEST_EGRESS_NFT" "$ctx/egress-guest.nft"
   if [ "$ENGINE" = container ]; then
     cp "$ISOPOD_DOCKERFILE" "$ctx/Dockerfile"
     dockerfile="$ctx/Dockerfile"
   fi
-  if ! "$ENGINE" build "${extra_build[@]}" \
+  # For an account box the build runs AS the sandbox account, which cannot read a
+  # mktemp dir left at its default 0700 owned by the invoking user — podman would
+  # fail resolving the context before it starts. Open the dir and its files to
+  # read/traverse; the contents (Dockerfile, entrypoint, sysctl/nft baselines)
+  # ship in the package and hold nothing secret. Non-account builds are untouched.
+  [ "${ISOPOD_ENGINE_AS_ACCOUNT:-0}" = 1 ] && chmod -R a+rX "$ctx"
+  if ! engine build "${extra_build[@]}" \
     --build-arg "ISOPOD_BASE=$base" --build-arg "ISOPOD_USER=$CONTAINER_USER" \
     --build-arg "ISOPOD_SSHD_PORT=$BOX_SSHD_PORT" --build-arg "ISOPOD_DEV_TOOLS=$dev" \
     --build-arg "ISOPOD_NESTED=$nested" \
@@ -360,7 +430,7 @@ build_user_image() { # build_user_image <dockerfile-path> -> echoes tag
   info "Building image from $df (context: $ctx, one-time)..." >&2
   local -a extra_build=()
   mapfile -t extra_build < <(engine_build_extra)
-  if ! "$ENGINE" build "${extra_build[@]}" -t "$tag" -f "$df" "$ctx" >&2; then
+  if ! engine build "${extra_build[@]}" -t "$tag" -f "$df" "$ctx" >&2; then
     die "build of $df failed (see output above)"
   fi
   printf '%s' "$tag"

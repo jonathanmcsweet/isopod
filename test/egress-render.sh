@@ -147,9 +147,188 @@ nft_check() { # nft_check <label> <rendered ruleset>
 $err" ;;
   esac
 }
+# --- guest ruleset (loaded INSIDE a microVM box by the entrypoint) ----------
+# Rendered the same way share/isopod-entrypoint renders it: the gateway from
+# /proc/net/route, and one accept pair per resolver in /etc/resolv.conf. Checked
+# here because nothing else ever parsed it — a version of this file once placed
+# the generated rules above `table ... {`, which nft rejects, and the only symptom
+# was every microVM box failing closed with no sshd.
+guest_tmpl="$ROOT/share/egress-guest.nft"
+guest_ep="$ROOT/share/isopod-entrypoint"
+[ -f "$guest_tmpl" ] || fail "missing guest ruleset template: $guest_tmpl"
+[ -f "$guest_ep" ] || fail "missing entrypoint: $guest_ep"
+
+# All three awk programs are extracted from the entrypoint and run for real,
+# rather than reimplemented here — a copy would have kept passing while the
+# shipped program was broken, which is how the misplaced-rules bug reached a box.
+ns_prog="$(sed -n "/iso_ns_rules=\$(awk '/,/}' \/etc\/resolv.conf/p" "$guest_ep" |
+  sed "1s/.*awk '//; \$s/}'.*/}/")"
+[ -n "$ns_prog" ] || fail "could not extract the resolver-rule program from the entrypoint"
+allow_prog="$(sed -n "/iso_allow_rules=\$(awk -v specs=/,/}' <\/dev\/null)/p" "$guest_ep" |
+  sed "1s/.*awk -v specs=\"\${ISOPOD_GUEST_EGRESS_ALLOW:-}\" '//; \$s/' <\/dev\/null)//")"
+[ -n "$allow_prog" ] || fail "could not extract the lan-allow program from the entrypoint"
+render_prog="$(sed -n "/-v logging=\"\$1\" -v log4=/,/' \/etc\/isopod\/egress-guest.nft/p" "$guest_ep" |
+  sed "1s/.*-v log6=\"\$iso_log6\" '//; \$s/' \/etc\/isopod.*//")"
+[ -n "$render_prog" ] || fail "could not extract the ruleset render program from the entrypoint"
+# The log rules are shipped as shell strings; use those, not copies.
+log4="$(sed -n "s/^  iso_log4='\(.*\)'\$/\1/p" "$guest_ep")"
+log6="$(sed -n "s/^  iso_log6='\(.*\)'\$/\1/p" "$guest_ep")"
+[ -n "$log4" ] && [ -n "$log6" ] || fail "could not extract the drop-log rules from the entrypoint"
+
+# A resolv.conf shaped like the one a box inherits behind a VPN: two resolvers in
+# ranges the ruleset blocks, one on the gateway, and a malformed line that must
+# never become a rule.
+guest_rules="$(printf '%s\n' \
+  'search lan' \
+  'nameserver 169.254.1.1' \
+  'nameserver 100.64.0.12' \
+  'nameserver 192.168.1.1' \
+  'nameserver bogus;accept' | awk "$ns_prog")"
+[ -n "$guest_rules" ] || fail "the entrypoint's resolver program produced no rules"
+printf '%s\n' "$guest_rules" | grep -q 'bogus' &&
+  fail "a malformed nameserver reached the ruleset"
+ok "guest resolver rules generated from resolv.conf (malformed entries dropped)"
+
+# lan-allow specs, run through the shipped program. The malformed entries are the
+# point: this text becomes firewall rules, so anything that is not a bare literal
+# must be dropped rather than substituted.
+allow_rules="$(awk -v specs='10.20.30.40,10.20.0.0/16,10.20.30.40:5432,fd00::1,[fd00::1]:5432' \
+  "$allow_prog" </dev/null)"
+[ -n "$allow_rules" ] || fail "the entrypoint's lan-allow program produced no rules"
+for want in 'ip daddr 10.20.30.40 accept' 'ip daddr 10.20.0.0/16 accept' \
+  'ip daddr 10.20.30.40 tcp dport 5432 accept' 'ip6 daddr fd00::1 accept' \
+  'ip6 daddr fd00::1 udp dport 5432 accept'; do
+  printf '%s\n' "$allow_rules" | grep -q "$want" ||
+    fail "lan-allow program did not emit: $want"
+done
+printf '%s\n' "$allow_rules" | grep -qc 'isopod-lan-allow' >/dev/null ||
+  fail "lan-allow rules are not tagged (egress lan-allow could not manage them)"
+ok "lan-allow rules generated from specs (addresses, ranges, ports, IPv6)"
+
+for bad in '10.20.30.999' '10.20.30.40/33' '1.1.1.1; nft flush ruleset' 'accept' \
+  '10.0.0.1:0' '10.0.0.1:99999' 'zzz' '10.0.0.1 accept' \
+  '1:2:3:4:5:6:7:8:9' '12345::1' 'fd00:::1' 'gg00::1' 'fd00::1::2' 'fd00::/129'; do
+  out="$(awk -v specs="$bad" "$allow_prog" </dev/null)"
+  [ -z "$out" ] || fail "lan-allow program accepted a malformed spec '$bad': $out"
+done
+ok "lan-allow program rejects malformed specs (no rule injection)"
+
+# A malformed IPv6 entry must cost only itself: the valid entries around it still
+# emit, so one bad address cannot take the whole allow layer down (which is what a
+# ruleset nft rejects would do). This is the IPv6 counterpart of the per-entry
+# skip the IPv4 path already had.
+mixed="$(awk -v specs='fd00::1,1:2:3:4:5:6:7:8:9,10.0.0.5' "$allow_prog" </dev/null)"
+printf '%s\n' "$mixed" | grep -q 'ip6 daddr fd00::1 accept' ||
+  fail "a good IPv6 entry was dropped alongside a malformed sibling"
+printf '%s\n' "$mixed" | grep -q 'ip daddr 10.0.0.5 accept' ||
+  fail "a good IPv4 entry was dropped alongside a malformed IPv6 sibling"
+printf '%s\n' "$mixed" | grep -q '1:2:3:4:5:6:7:8:9' &&
+  fail "the malformed IPv6 entry was emitted instead of skipped"
+ok "a malformed IPv6 entry is skipped per-entry, keeping the valid ones"
+
+guest="$(ISO_RULES="$guest_rules" ISO_ALLOW="$allow_rules" \
+  awk -v gw="192.168.1.1" -v logging=1 -v log4="$log4" -v log6="$log6" "$render_prog" "$guest_tmpl")"
+
+printf '%s\n' "$guest" | grep -q '@GATEWAY@' &&
+  fail "guest ruleset still contains @GATEWAY@ after rendering"
+for ph in '^@RESOLVERS@$' '^@ALLOW@$' '^@LOG4@$' '^@LOG6@$'; do
+  printf '%s\n' "$guest" | grep -q "$ph" &&
+    fail "guest ruleset still contains the ${ph//[\^$]/} placeholder after rendering"
+done
+ok "guest ruleset renders (gateway, resolver, lan-allow and log placeholders consumed)"
+
+# Every rule must sit inside the table body. This is the exact shape of the bug
+# above: an unanchored placeholder match put rules in the header comment block.
+guest_head="$(printf '%s\n' "$guest" | sed -n '1,/^table inet isopod_egress/p')"
+printf '%s\n' "$guest_head" | grep -qE '^[[:space:]]+(ip|ip6) daddr' &&
+  fail "guest ruleset emits rule text before the table declaration"
+ok "guest ruleset puts every rule inside the table"
+
+# The resolver exemptions must precede the private-range drop, or they never match.
+gr_line="$(printf '%s\n' "$guest" | grep -n 'ip daddr 169\.254\.1\.1 udp' | head -1 | cut -d: -f1)"
+gd_line="$(printf '%s\n' "$guest" | grep -n 'counter drop' | head -1 | cut -d: -f1)"
+[ -n "$gr_line" ] && [ -n "$gd_line" ] && [ "$gr_line" -lt "$gd_line" ] ||
+  fail "guest ruleset orders the resolver exemptions after the drop (they would never match)"
+ok "guest ruleset exempts resolvers before the private-range drop"
+
+# The lan-allow exemptions must also precede the drop, for the same reason.
+ga_line="$(printf '%s\n' "$guest" | grep -n 'ip daddr 10\.20\.30\.40 accept' | head -1 | cut -d: -f1)"
+[ -n "$ga_line" ] && [ "$ga_line" -lt "$gd_line" ] ||
+  fail "guest ruleset orders the lan-allow exemptions after the drop (they would never match)"
+ok "guest ruleset exempts lan-allow addresses before the private-range drop"
+
+# `limit` stops rule evaluation once the rate is exceeded. If it ever shares a
+# rule with the drop, packets over the rate fall past it and are ACCEPTED — the
+# rate limiter would silently become a hole in the ruleset. They must stay apart.
+# Matches the verdict at end of line, not the word: the log prefix itself
+# contains "drop", so a substring test here would always fire.
+printf '%s\n' "$guest" | grep -E 'limit rate' | grep -qE '[[:space:]]drop$' &&
+  fail "a log rule carries the drop verdict — over the rate limit, traffic would be accepted"
+printf '%s\n' "$guest" | grep -q 'log prefix "isopod-egress-drop "' ||
+  fail "guest ruleset does not log dropped packets (egress lan-denied would show nothing)"
+# And the log must come before the drop, or it never runs.
+gl_line="$(printf '%s\n' "$guest" | grep -n 'limit rate' | head -1 | cut -d: -f1)"
+[ -n "$gl_line" ] && [ "$gl_line" -lt "$gd_line" ] ||
+  fail "guest ruleset logs after the drop (nothing would ever be logged)"
+ok "guest ruleset logs drops as a separate rule, ahead of the drop"
+
+# Rendering with nothing optional at all must still produce a loadable ruleset:
+# no resolvers, no lan-allow, and logging off (the fallback path for a kernel
+# with no log support, which must never be the reason a box fails closed).
+guest_empty="$(ISO_RULES="" ISO_ALLOW="" \
+  awk -v gw="192.168.1.1" -v logging=0 "$render_prog" "$guest_tmpl")"
+[ "$(printf '%s\n' "$guest_empty" | grep -c '{')" = "$(printf '%s\n' "$guest_empty" | grep -c '}')" ] ||
+  fail "guest ruleset has unbalanced braces when rendered with nothing optional"
+printf '%s\n' "$guest_empty" | grep -q 'limit rate' &&
+  fail "logging=0 still emitted a log rule"
+printf '%s\n' "$guest_empty" | grep -qE '^@(RESOLVERS|ALLOW|LOG4|LOG6)@$' &&
+  fail "a placeholder survived rendering with nothing optional"
+printf '%s\n' "$guest_empty" | grep -q 'counter drop' ||
+  fail "logging=0 dropped the drop rules as well"
+ok "guest ruleset is balanced and still drops with no resolvers, no lan-allow, no logging"
+
+# --- sandbox-account ruleset (loaded on the HOST by account setup) -----------
+# Rendered exactly as account_render_rules does (uid substitution), then checked
+# for the properties that make it safe: the early-accept scoping rule must come
+# first so other users' traffic is untouched, DNS and loopback must precede the
+# drops, and the uid placeholder must be consumed.
+acct_tmpl="$ROOT/share/egress-account.nft"
+[ -f "$acct_tmpl" ] || fail "missing account ruleset template: $acct_tmpl"
+# Render the empty-sets case the way account_render_rules does: uid substituted,
+# the lan-allow placeholders dropped to nothing (valid empty sets).
+acct="$(awk -v uid=4242 '
+  /^@LAN_ALLOW4@$/ { next }
+  /^@LAN_ALLOW6@$/ { next }
+  { gsub(/@ACCOUNT_UID@/, uid); print }' "$acct_tmpl")"
+printf '%s\n' "$acct" | grep -qE '@ACCOUNT_UID@|@LAN_ALLOW[46]@' &&
+  fail "account ruleset still contains a placeholder after rendering"
+# And the populated case: elements injected into both sets must still parse.
+acct_full="$(awk -v uid=4242 -v l4='    elements = { 10.20.30.40, 10.30.0.0/16 }' -v l6='    elements = { fd00::1 }' '
+  /^@LAN_ALLOW4@$/ { print l4; next }
+  /^@LAN_ALLOW6@$/ { print l6; next }
+  { gsub(/@ACCOUNT_UID@/, uid); print }' "$acct_tmpl")"
+printf '%s\n' "$acct_full" | grep -q 'elements = { 10.20.30.40' ||
+  fail "account ruleset did not inject the lan-allow elements"
+a_scope="$(printf '%s\n' "$acct" | grep -n 'meta skuid != 4242 accept' | head -1 | cut -d: -f1)"
+a_first="$(printf '%s\n' "$acct" | grep -nE '^\s+(oif|ct|udp|tcp|ip6? daddr|meta)' | head -1 | cut -d: -f1)"
+[ -n "$a_scope" ] || fail "account ruleset lost its uid-scoping rule"
+[ "$a_scope" = "$a_first" ] ||
+  fail "account ruleset: the uid-scoping accept is not the first rule — other users' traffic would be evaluated"
+a_dns="$(printf '%s\n' "$acct" | grep -n 'udp dport 53 accept' | head -1 | cut -d: -f1)"
+a_drop="$(printf '%s\n' "$acct" | grep -n 'counter drop' | head -1 | cut -d: -f1)"
+[ -n "$a_dns" ] && [ -n "$a_drop" ] && [ "$a_dns" -lt "$a_drop" ] ||
+  fail "account ruleset orders DNS after the drop (account DNS would die — the 3.1.3 lesson)"
+printf '%s\n' "$acct" | grep -q 'ip daddr @lan_allow4 accept' ||
+  fail "account ruleset has no lan_allow set hook (stage-4 lan-allow has nothing to add to)"
+ok "account ruleset renders (uid scoped first, DNS before drops, lan_allow sets present)"
+
 if command -v nft >/dev/null 2>&1; then
+  nft_check "account (empty sets)" "$acct"
+  nft_check "account (with lan-allow elements)" "$acct_full"
   nft_check "lan-deny" "$lan_deny"
   nft_check "allow-list" "$allow_list"
+  nft_check "guest (resolvers + lan-allow + logging)" "$guest"
+  nft_check "guest (nothing optional)" "$guest_empty"
 else
   skip "nft not installed — ruleset parse check skipped (render checks above still ran)"
 fi

@@ -13,7 +13,7 @@ _isopod() {
   cword="$COMP_CWORD"
   words=("${COMP_WORDS[@]}")
 
-  local cmds="create list info code shell start stop config reconfigure export fetch remap copy-in rm egress secret doctor help version"
+  local cmds="create list info code shell root-shell upgrade start stop config reconfigure migrate export fetch remap copy-in rm egress host-port account secret doctor help version"
   local colors="red orange amber green teal blue purple magenta gray grey"
   local apps="codium vscodium cursor windsurf code"
 
@@ -60,8 +60,8 @@ _isopod() {
   if [[ "$cur" == -* ]]; then
     local opts=""
     case "$sub" in
-      create) opts="--repo --branch --copy --color --image --dockerfile --expose --secret --engine --memory --cpus --port --no-sudo --container --dev --disk --nested-containers" ;;
-      reconfigure) opts="--expose --memory --cpus --color" ;;
+      create) opts="--repo --branch --copy --color --image --dockerfile --expose --secret --engine --memory --cpus --port --sudo --no-sudo --no-root-key --guest-egress --lan-allow --host-port --account --container --dev --disk --nested-containers" ;;
+      reconfigure) opts="--guest-egress --expose --memory --cpus --color" ;;
       code) opts="--app --reuse-window" ;;
       rm) opts="--force" ;;
       remap) opts="--name --email --old-email --old-name --remap-file --force" ;;
@@ -73,11 +73,28 @@ _isopod() {
 
   # First positional for most subcommands is an existing box name.
   case "$sub" in
-    info | code | shell | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
+    info | code | shell | root-shell | upgrade | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
       mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
       ;;
     egress)
-      mapfile -t COMPREPLY < <(compgen -W "status apply observe persist unpersist allow log denied rules" -- "$cur")
+      mapfile -t COMPREPLY < <(compgen -W "status apply observe persist unpersist allow log denied rules lan-allow lan-denied" -- "$cur")
+      ;;
+    account)
+      mapfile -t COMPREPLY < <(compgen -W "setup status teardown rules" -- "$cur")
+      ;;
+    migrate)
+      if [[ "$cur" == -* ]]; then
+        mapfile -t COMPREPLY < <(compgen -W "--account --no-account --force" -- "$cur")
+      else
+        mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
+      fi
+      ;;
+    host-port | hostport)
+      if [ "$cword" -eq 2 ]; then
+        mapfile -t COMPREPLY < <(compgen -W "add rm ls" -- "$cur")
+      else
+        mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
+      fi
       ;;
     secret)
       if [ "$cword" -eq 2 ]; then

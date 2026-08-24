@@ -38,17 +38,11 @@ and your existing box names.
 
 ### Manual installation
 
-Don't use Homebrew? Manual install steps by distro family — Debian (Ubuntu,
+Don't use Homebrew? Manual install steps by distro family: Debian (Ubuntu,
 Mint, Pop!_OS, Zorin, MX), Fedora, Fedora immutable (Silverblue, Kinoite,
-Bazzite), Arch (Manjaro, EndeavourOS, CachyOS), Gentoo — plus system-wide,
-macOS, and how to verify and update an install, live in
+Bazzite), Arch (Manjaro, EndeavourOS, CachyOS), Gentoo,
+and macOS. How to verify and update an install, live in
 **[docs/installation-and-platform.md](docs/installation-and-platform.md)**.
-Derivatives follow their parent family: isopod and `install.sh` read `ID` and
-then `ID_LIKE` from `/etc/os-release`.
-
-On Arch and Gentoo, add a rootless subuid/subgid range for your account before
-the first box — those distros don't create one (`install.sh` and `isopod doctor`
-print the fix).
 
 ## Quick start
 
@@ -86,42 +80,15 @@ isopod rm myproj                    # destroy container + its keys + ssh config 
 
 ## Getting work back out: `export` vs `fetch`
 
-Two ways out, for two situations. Both run over the box's SSH connection as a tar stream, so the box *must be running*.
+1. `isopod export <name> [dest]` copies the whole working tree including its `.git` to a fresh host directory
+2. `isopod fetch <name> [target]` brings only the committed git history across as remote-tracking refs. which is the one to prefer when the agent is untrusted since commit objects carry no hooks or editor task files. 
 
-When the agent is untrusted, prefer `fetch`: it transfers only commit objects, which cannot carry git hooks or editor task files. `export` copies the whole working tree including `.git`, so anything the agent planted there comes along — review an exported tree before running builds in it.
-
-- `isopod export <name> [dest]` copies the container's whole working tree (including its `.git`) to a fresh host directory. It will not write into an existing path so the export shape stays predictable.
-- `isopod fetch <name> [target-repo]` brings *only the committed git history* across (no file merges, no overwriting your working tree).
-
-  ```sh
-  cd ~/code/myproj          # an existing clone on your host
-  isopod fetch myproj        # target defaults to the current directory
-  ```
-
-  Under the hood it `git fetch`es straight from the container over its SSH remote. The container's branches appear as remote-tracking refs named `<name>/*` without touching your local branches. Check one out with:
-
-  ```sh
-  git switch -c fingerprint-hardening myproj/my-branch-name
-  ```
-
-  - `isopod fetch` finds the repo at the container's workspace automatically (or the single git subfolder inside it)
-  - pass `--path <in-container-repo>` if your layout is unusual.
-  - If the target isn't a git repo, it instead drops an `isopod-<name>.bundle` file and prints how to use it. Like `export`, it needs no network and no git remote.
-
-### Rewriting git logs
-
-Commits made inside a sandbox often carry a throwaway identity (`dev@<container>`). After a `fetch`, `isopod remap <name>` rewrites those commits to your real name/email, preserving messages and dates. The rewrite is scoped to the container's `<name>/*` refs (your own branches are never touched), only commits matching the old identity are changed, and the originals are backed up under `refs/remap-backup/`:
-
-```sh
-isopod remap myproj --name "Ada Lovelace" --email ada@example.com
-```
-
-The new identity defaults to your host `git config`. Identity resolution, multi-identity remap files, undo, and the rewrite backends are covered in **[docs/remap.md](docs/remap.md)**.
+After a `fetch`, `isopod remap <name>` rewrites throwaway container commit identities to your real name and email. The full mechanics, the `--path` and bundle options, and identity remap are in **[docs/getting-work-out.md](docs/getting-work-out.md)** and **[docs/remap.md](docs/remap.md)**.
 
 ## FAQ
 
 ### Why so much emphasis on VSCodium?
-Because I can reasonably evaluate VSCodium's code and extension security boundaries: it doesn't scan your host device for telemetry or fingerprinting data, and it doesn't expose host information to extensions when connected to a container. Proprietary IDEs may still collect host telemetry even while your code and AI agent are sandboxed in an isopod container.
+Because I can reasonably evaluate VSCodium's code and extension security boundaries: it doesn't scan your host device for telemetry or fingerprinting data, and it doesn't expose host information to extensions when connected to a container. Proprietary IDEs on the other hand, may still collect host telemetry even while your code and AI agent are sandboxed in an isopod container.
 
 ### Will you be explicitly supporting other open-source IDEs?
 Yes, provided I can reasonably verify they don't take telemetry from the host device and enforce boundaries that keep extensions from doing so also.
@@ -130,294 +97,61 @@ Yes, provided I can reasonably verify they don't take telemetry from the host de
 The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source [Open Remote – SSH extension](https://open-vsx.org/extension/jeanp413/open-remote-ssh) is mature, and the same isopod container works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
 
 ### Is my code safe from the AI vendor?
-Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs — that's how they work. Isopod limits the blast radius to the container's contents; it does not change what an agent does with those contents.
+Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs, that's a standard risk with AI vendors but can be mitigated in various ways. Isopod limits the blast radius to the container's contents to varying degrees; it does not change what an agent does with those contents.
 
 ### Can two IDEs attach to the same container?
-Yes — it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
+Yes, it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
 
-## The isolation model
+## Security model
 
-The container cannot see the host filesystem. Files cross the boundary in five ways:
+An isopod box puts your code and the agent behind several layers you can dial up as your threat model demands. The container cannot see your host filesystem: files only cross when you copy them in, clone a repo, or pull work back out, so a misbehaving agent has no live mount. 
 
-1. `--repo <url>` — a `git clone` executed *inside* the container.
-2. `--copy <path>` / `isopod copy-in` — a one-time **copy** of folders you name.
-3. `isopod export` to copy changes back to the host machine
-4. `isopod fetch` git history copied back to your local machine
-5. `git push` to your remote server
+Isopod also masks the host-revealing `/proc` and `/sys` paths that fingerprinting tools read, runs each box under a microVM with its own kernel when one is available, and can force all network egress through a host-side allow-list.
 
-A `--disk` data volume is not a sixth way: it is box-local storage (an image file in the box's own layer) and gives the box no access to the host filesystem — see [Data volumes](#data-volumes---disk).
-
-Copy-not-mount is an integrity control, not a confidentiality one. Nothing the agent writes reaches your host except through a transfer you invoke and can review. There is no live mount where it could plant git hooks, `Makefile` edits, or editor task files that your host tools would execute the next time you touch the directory. What you copy *in*, however, is fully readable by the agent; limiting where that can be sent is the job of [egress isolation](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list), not the copy model.
-
-We have some mitigations for a snooping AI agent fingerprinting your host machine from the container. It sees the container's hostname, a generic Linux environment, and the container's network identity — and isopod masks the host-revealing `/proc`/`/sys` paths that common tools read (boot UUIDs, board model, and the `lsblk`/`lspci`/`ip` views — see [Fingerprint hardening](#fingerprint-hardening)). Additional details:
-
-- SSH is bound to `127.0.0.1` only and uses a dedicated per-container ed25519 keypair. The container's host key is pinned on first use (trust-on-first-use); if an already-pinned box ever presents a different key, isopod refuses to connect rather than adopt it (override with `ISOPOD_ACCEPT_NEW_HOSTKEY=1` if you deliberately rebuilt it). Password auth and root login are disabled in the container's sshd.
-- SSH agent forwarding and X11 forwarding are explicitly disabled in the generated config, so an agent inside the container cannot borrow your SSH agent to authenticate as you elsewhere.
-- With rootless Podman (the recommended engine), even "root" inside the container is just your unprivileged user on the host, remapped.
-
-### What it does not fully protect against
-
-- **Network exfiltration of what's inside the container.** AI agents need network access (APIs, package installs), so the container has it unless you've created an offline container. Anything you copy into the container could be sent out by a misbehaving agent. Only put code/data in the container that you could tolerate leaking, and use narrowly-scoped credentials. To narrow this, [`egress allow-list`](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list) forces the box through a host-side filtering proxy that permits only allow-listed hostnames — it limits, but does not eliminate, exfiltration (a secret can still be sent *into* an allowed host). Reconnaissance in the *other* direction — a rogue agent scanning your **local network**, the host, or cloud metadata — can be blocked with host-enforced [network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny), while keeping published ports and public internet working.
-
-- **Every possible exploit an agent could theoretically take in your container.** By default the in-container user has **passwordless `sudo`** (so agents can `apt install` toolchains), which makes the agent effectively root *within the container*. Your host is still protected by the isolation model above, but anything inside the container is fully exposed to it. If you don't need the agent to have root, create the container with **`--no-sudo`** to drop that privilege — you can still add system packages from the host with [`isopod install`](#adding-a-system-package-without-a-rebuild-isopod-install), so lockdown isn't a dead end for dependencies. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` and `sudo` need them — see [Fingerprint hardening](#fingerprint-hardening).
-
-- **Unknown exploits.** There is no such thing as perfect security, and isopod can't prevent an exploit no one has discovered yet. It gives you a set of features to incrementally harden your sandbox, not a guarantee.
-
-- **Container escape for standard Podman / Docker containers** Containers share the host kernel. Rootless Podman makes escapes very hard, but a container is not a VM. For "agent might be actively malicious and sophisticated," use the microVM option. For "agent might do dumb destructive things or over-collect data" this is the right tool.
-
-- **Docker's daemon model.** With Docker (non-rootless), the daemon runs as root; a compromise of the daemon is a compromise of the host. Enable Docker rootless mode to avoid this.
-
-## Fingerprint hardening
-
-A standard podman / docker container shares the host's kernel and hardware, so by default a process inside can read a surprising amount about the host through `/proc` and `/sys` — far more than its own hostname. Isopod ships a hardening profile that closes the file-based leaks and supports an optional sandboxed runtime for the rest. The shipped defaults live in **[`security/hardening.conf`](security/hardening.conf)** — a read-only baseline you don't edit (package upgrades replace it). To customize, drop an override file at **`~/.config/isopod/hardening.conf`** that *layers* on top of the baseline with `mask` / `unmask` / `runtime` / `no-runtime` directives (so you keep getting new masks on upgrade), or toggle the runtime per-run with `ISOPOD_RUNTIME=runsc`.
-
-### What's implemented
-
-Every container masks the host-revealing paths below — the ones common discovery tools (`lsblk`, `lspci`, `ip`, DMI readers) actually read. Podman gets a single `--security-opt mask=…` covering files and directories. Docker gets an empty `tmpfs` per directory; it **cannot** mask `/proc` files — runc rejects bind mounts onto arbitrary `/proc` paths — so `/proc/cmdline` and `/proc/modules` stay readable on Docker (isopod warns at create). Use rootless podman or a Tier 2/3 runtime to close those on Docker.
-
-| Masked path | Data it obfuscates |
-|---|---|
-| `/proc/cmdline` *(podman)* | host boot args — **LUKS volume UUID, root-fs UUID, OS image / ostree hash** |
-| `/proc/modules` *(podman)* | loaded host kernel modules (VPNs like WireGuard, DisplayLink, Bluetooth…) |
-| `/sys/class/dmi`, `/sys/devices/virtual/dmi`, `/sys/firmware` | SMBIOS: **board model, vendor, BIOS version/date** |
-| `/sys/bus/pci` | the `lspci` view of host PCI topology (NVMe, Wi-Fi, USB4/Thunderbolt controllers) |
-| `/sys/bus/usb` | the tool-visible list of attached peripherals (keyboard, mouse, NIC, dongles) |
-| `/sys/class/net` | the box's own interface name/MAC (host NICs are already hidden by the box's netns) |
-| `/sys/block`, `/sys/class/block`, `/sys/class/nvme` | the `lsblk` view of disk models and factory serial numbers |
-| `/sys/class/hwmon`, `/sys/class/thermal`, `/sys/class/drm` | sensor/thermal/GPU identity (a board signature) |
-
-Verify from inside a container: after hardening, `cat /proc/cmdline` (podman) and `lsblk -o NAME,SERIAL` come back empty/blank.
-
-> **On Tier 1/2 these masks close the *alias* directories, not the whole device tree.** `/sys/devices/` is not namespaced, and only its DMI subtree is masked there — so a reader walking `/sys/devices/.../serial` or `/sys/devices/pci*/*/vendor` directly can still recover PCI/USB/disk identity (`grep -r . /sys/devices` disproves any "serials are hidden" reading). Masking the whole tree on those tiers is impractical: the container's `/sys` *is* the box's `/sys`, and tools in the box read `/sys/devices/system/cpu`.
->
-> **Under a Tier 3 microVM the whole tree is masked** (the `mask-microvm` directive), because the box reads its *guest's* sysfs and the container's copy exists only to be exported to that guest. Note carefully that the guest's synthetic `/sys` is **not** what protects you: crun exports the container's `/sys` to the guest as well, so without this mask a microVM box hands over host NVMe serials and PCI topology just as a plain container does. `verify-host-isolation.sh` probes the device tree directly so it can't be fooled by masking only the aliases.
-
-> **These masks apply under a Tier 3 microVM too.** It is tempting to skip them there — the guest has its own kernel and only virtual devices, so *its* `/proc` and `/sys` describe the guest. But the guest is not the only copy it can reach. crun's krun handler hands the guest the **container's** rootfs over virtio-fs (`krun_add_virtiofs2(ctx, tag, "/")`), and podman mounted the host's procfs and sysfs into that rootfs before handing it over. Root inside the box can read the container's copy through the export and recover `/proc/cmdline` (LUKS volume UUID, ostree deployment hash), `/proc/config.gz` (host kernel build config), `/sys/class/dmi/id/*` (board vendor and product name), and `/sys/block` (host disk devices). Masking costs the guest nothing — its own `/proc` and `/sys` are separate and untouched. The VM is a boundary for host *memory and kernel*; it is not, on its own, a boundary for host *identity* reachable through the exported rootfs.
-
-> isopod launches containers with `podman run`/`docker run`, not Compose, so the profile above is the live source of truth. If you prefer Compose, [`security/compose.yaml`](security/compose.yaml) expresses the same masks in `podman compose`/`docker compose` form as a reference — it is not executed by the CLI.
-
-> isopod deliberately does **not** add `--cap-drop=ALL`, `--read-only`, or `--security-opt no-new-privileges` here: the container runs `sshd` and gives agents passwordless `sudo apt install` for toolchains, all of which those flags would break. The isolation guarantees in [The isolation model](#the-isolation-model) (no mounts, loopback-only SSH, rootless userns) remain the primary boundary; the masks above are defense-in-depth against *fingerprinting* specifically.
-
-### Security defaults and how to adjust them
-See **[docs/opt-in-security.md](docs/opt-in-security.md)** for details and tuning:
-
-- **microVM by default** — `isopod create` runs the box in a per-box guest kernel behind a KVM boundary when a microVM runtime (kata preferred, else krun) and `/dev/kvm` are available. If not, it falls back to gVisor (`runsc`), then a plain container, with a warning. Pass **`--container`** to force a plain shared-kernel container.
-- **Network egress allow-list by default (`egress allow-list`)** — a host-side filtering proxy is the box's only route out and permits only allow-listed hostnames, to limit data exfiltration. When it can't be enforced (rootless engine, firewall/proxy not loaded) a default-on box degrades with a warning (allow-list → lan-deny → open). Turn it off with `ISOPOD_EGRESS=off` or `no-egress`.
-- **gVisor (`runsc`)** — the Tier 2 fallback / an explicit `runtime runsc`: a syscall-virtualizing runtime that hides CPU/kernel/boot identity while sharing the host kernel.
-- **Network egress isolation (`egress lan-deny`)** — the lighter mode / degrade target: a host firewall that stops a rogue agent from mapping your LAN, the host, cloud metadata, or internal DNS, while keeping published ports and public internet working.
-
-### What still can't be mitigated
-
-Even with every mask on, a **plain shared-kernel container cannot hide these** — the app reads them straight from the CPU or the shared kernel, with no file to mask:
-
-- **CPU identity** — model, family, stepping, **microcode**, feature flags, via the `CPUID` instruction. (Masking `/proc/cpuinfo` doesn't stop `CPUID` and breaks build tools, so isopod leaves it readable.)
-- **Kernel build string** — `uname -r` (a syscall, no file to mask) always returns the host kernel version; `/proc/version` adds the build host/toolchain string.
-- **Host RAM size** — `/proc/meminfo` (masking it breaks build tools and most memory-aware programs, so it's left readable).
-- **The `/sys` device tree** — PCI/USB/NVMe/disk identity under `/sys/devices/`. Not namespaced, so a plain container reads it directly, and on Tier 1/2 only its DMI subtree is masked (see the note above). A Tier 3 microVM box *does* close it.
-- **Host boot epoch / boot id** — `/proc/stat`'s `btime` and `/proc/sys/kernel/random/boot_id` are a single value per host boot, identical in every container on that host. (`btime` is left unmasked because masking `/proc/stat` breaks `top`/`htop` and most monitoring.)
-- **Timing side channels** — `RDTSC` and clock-skew fingerprints.
-
-A **Tier 2 runtime** (gVisor `runsc`) already presents a synthetic `/proc`/`/sys`, closing the device tree, `/proc/version`, and boot id. A **Tier 3 microVM runtime** (Kata or krun) also closes `uname`, RAM/CPU identity, and the timing channels — the box runs on its own guest kernel behind a hardware boundary. See [docs/opt-in-security.md](docs/opt-in-security.md#microvm-runtimes-kata-krun--tier-3).
-
-Two more, which depend on your egress mode rather than the runtime:
-
-- **Your DNS resolvers** — podman copies the host's `/etc/resolv.conf` into a box by default. isopod removes the **search domain** in every mode (it names your network and is never needed to resolve a public name), and handles the nameservers per egress mode: `allow-list` gives the box **no resolver at all** (the proxy resolves names, so the box never needed one — and a resolver would be a DNS path around the allow-list), `lan-deny` pins a public resolver, and with egress **off** your real nameservers stay visible. That last case is deliberate rather than an oversight: an open box can read them from its own route table anyway, so hiding the file would be cosmetic — enforcing egress is what closes it.
-- **Your LAN position** — with egress **off** the box gets an address on your LAN, so `/etc/hosts` discloses your subnet. Under `lan-deny` or `allow-list` the box sits on isopod's own fixed `10.88.7.0/24` bridge, which says nothing about your network.
-
-Rule of thumb: if your threat model is "a sophisticated, actively malicious agent," use a Tier 3 microVM runtime (or a full VM); isopod's container hardening targets "an agent that over-collects host data or does dumb destructive things."
-
-### Kernel attack-surface hardening (`--harden`)
-
-Beyond the fingerprint masks, isopod applies a small **kernel-hardening profile to every box by default** — a set of low-impact guest sysctls that shrink kernel attack surface without changing how development feels. Because these are guest-*kernel* settings, they take effect on **microVM boxes** (which have their own kernel). A plain container shares the host kernel, so isopod never sets sysctls there — that would change the host — and it keeps the engine's default seccomp/isolation instead.
-
-The default profile sets `kernel.kptr_restrict=2` (hide kernel pointers), `kernel.dmesg_restrict=1` (root-only `dmesg`), `net.core.bpf_jit_harden=2` (harden the eBPF JIT), and `kernel.kexec_load_disabled=1` (block loading a new kernel). These are deliberately conservative: they don't break nested containers, profiling, or normal builds. The heavier toggles that *would* affect those workflows — disabling unprivileged eBPF, io_uring, and user namespaces, or `lockdown` — are reserved for a future opt-in **`--harden strict`** profile.
-
-Turn the profile off with **`--harden off`**. The applied set lives in [`share/hardening-sysctl.conf`](share/hardening-sysctl.conf); the box entrypoint applies it best-effort at boot, skipping any key the guest kernel doesn't expose.
+A microVM runtime can hide things like CPU identity, the kernel build string, and host RAM, all of which can't be done with your standard podman or docker container. The full picture (the isolation model, the fingerprint masks, what still leaks, the runtime tiers, the egress modes, and the kernel-hardening profile) lives in **[docs/security-model.md](docs/security-model.md)**.
 
 ## Secrets
 
-Store a value once on the host, then hand it to specific boxes at create time:
-
-```sh
-isopod secret set NPM_TOKEN          # value from stdin or a hidden prompt — never argv
-isopod create myproj --secret NPM_TOKEN            # appears at /run/secrets/NPM_TOKEN
-isopod create other --secret NPM_TOKEN:/run/secrets/npmrc-token   # custom path
-```
-
-Values live in the OS keychain (`security` on macOS, `secret-tool` on Linux; 0600-file fallback) and are streamed over the box's SSH channel into a memory-backed tmpfs. As long as the target path stays under `/run/secrets` (the default), they never appear in image layers, container env, `inspect` output, `isopod export` tarballs, or `reconfigure` snapshots, and a stopped box holds no secrets (they're re-injected on `start`). A custom `--secret NAME:path` target *outside* `/run/secrets` loses that guarantee — it persists in the container layer and in `reconfigure` snapshots like any other file. Manage them with `isopod secret set|ls|rm`.
+Store a value once on the host with `isopod secret set NAME`, then hand it to a box at create time with `--secret NAME`, and it arrives at `/run/secrets/NAME` in a memory-backed tmpfs streamed over SSH. Values live in your OS keychain, and as long as the target stays under `/run/secrets`. They never land in image layers, container env, `inspect` output, export tarballs, or `reconfigure` snapshots. Managing them and the custom-path caveat are covered in **[docs/security-model.md#secrets](docs/security-model.md#secrets)**.
 
 ## Connecting each IDE
 
-**VSCodium (priority).** `isopod code <name>` checks for `jeanp413.open-remote-ssh`, installs it from Open VSX if needed, and launches `codium --new-window --folder-uri vscode-remote://ssh-remote+isopod-<name>/home/dev/workspace`. The first connection downloads the VSCodium server *into the container*. Extensions you install in that window (including AI agents like Cline, Continue, Roo, etc.) install and run in the container.
+**VSCodium** `isopod code <name>` checks for `jeanp413.open-remote-ssh`, installs it from Open VSX if needed, and launches `codium --new-window --folder-uri vscode-remote://ssh-remote+isopod-<name>/home/dev/workspace`. The first connection downloads the VSCodium server *into the container*. Extensions you install in that window install and run in the container.
 
 Each box gets its own window; pass `--reuse-window` to open it in the current one instead.
 
-**Cursor / Windsurf / VS Code.** `isopod code <name> --app cursor` (or `windsurf`, `code`). They use the same SSH host entry; their bundled Remote-SSH handles the rest. Note that Cursor's own cloud AI features run wherever Cursor sends them, but the agent's *tool execution* (shell commands, file edits) happens in the container.
+**Cursor / Windsurf / VS Code.** `isopod code <name> --app cursor` (or `windsurf`, `code`). They use the same SSH host entry; their bundled Remote-SSH handles the rest. Note that Cursor's own cloud AI features run wherever Cursor sends them, but the agent's tool execution (shell commands, file edits) happens in the container.
 
 **JetBrains.** Open JetBrains Gateway → SSH connection → pick host `isopod-<name>` (it reads your `~/.ssh/config`) → project directory `/home/dev/workspace`. The JetBrains backend IDE runs inside the container. Note the default image is slim; JetBrains backends want more: create with `--memory 6g` and run `isopod shell <name>` then `sudo apt install -y libxext6 libxrender1 libxtst6 libxi6 fontconfig` if the backend complains.
 
 ## Environment variables
 
-`ISOPOD_ENGINE` (`podman`|`docker`) — engine override. 
-`ISOPOD_CONFIG_DIR` — state location (default `~/.config/isopod`). 
-`ISOPOD_BUILD_ARGS` — extra args for `build` (e.g. `--network=host`, 
-`--build-arg http_proxy=...` behind corporate proxies). 
-`ISOPOD_RUN_ARGS` — extra args for `run` (e.g. `--network=none` for an offline container, `--userns=keep-id`, custom DNS).
-`ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata` or `krun`; needs `/dev/kvm`). A configured runtime that isn't registered with the engine fails `create` closed with a clear error. Setup, krun networking, and the `crun-vm` exclusion: [docs/opt-in-security.md](docs/opt-in-security.md).
-`ISOPOD_MICROVM_MEMORY` — default guest memory when a Tier 3 microVM runtime is active and no `--memory` is given (default `2g`). 
-`ISOPOD_MICROVM_ANNOTATIONS` — space-separated `krun.*` OCI annotations passed to a microVM guest (e.g. `krun.nested_virt=1`); Podman only. 
-`ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
+isopod reads a set of `ISOPOD_*` variables to override the engine, config location, build and run args, the sandboxed runtime, microVM sizing, and every egress parameter. The full table, including the egress and microVM overrides, is in **[docs/managing-boxes.md#environment-variables](docs/managing-boxes.md#environment-variables)**.
 
-`ISOPOD_SSH_WAIT_TRIES` — how many 1s attempts `create`/`start` make waiting for sshd before giving up (default `30`).
+## Customizing and managing a box
 
-[Network egress isolation](docs/opt-in-security.md#network-egress-isolation-egress-lan-deny) has its own overrides: `ISOPOD_EGRESS` (`lan-deny`|`allow-list`|off), `ISOPOD_EGRESS_NET`, `ISOPOD_EGRESS_SUBNET`, `ISOPOD_EGRESS_GATEWAY`, `ISOPOD_EGRESS_DNS`, `ISOPOD_EGRESS_RULESET` (the network/firewall parameters), and `ISOPOD_EGRESS_ALLOW_UNLOADED=1` to start a box even when the host firewall isn't loaded yet (otherwise `create` fails closed). The [`allow-list`](docs/opt-in-security.md#network-egress-allow-list-egress-allow-list) mode adds `ISOPOD_EGRESS_PROXY_PORT`, `ISOPOD_EGRESS_PROXY_BIN`, `ISOPOD_EGRESS_ALLOWLIST` (allow-list file), and `ISOPOD_EGRESS_ALLOWLIST_RULESET`. macOS adds a further set (`ISOPOD_EGRESS_BACKEND`, `ISOPOD_PF_SUBNET`, and the pf/LaunchDaemon paths) — see [docs/macos-host-egress.md](docs/macos-host-egress.md).
+Shape the base image with `--image` to swap in any Debian/Ubuntu base or `--dockerfile` to build your own toolchain in first. Add a forgotten system package to a running box from the host with `isopod install`, publish an in-box server to your host loopback with `--expose`, and change a box's ports, memory, or cpus after the fact with `isopod reconfigure`. 
 
-## Customizing the container
+A box can also carry its own scratch storage with `--disk` and run rootless containers inside itself with `--nested-containers`, both kept box-local rather than mounted from your host. See **[docs/managing-boxes.md](docs/managing-boxes.md)** for the image, install, port, and reconfigure detail, and the [data volumes and nested containers](docs/security-model.md#data-volumes---disk-and-nested-containers---nested-containers) section of the security model for how box-local storage stays off your host.
 
-The base image is defined by a standard Dockerfile, [`share/Dockerfile`](share/Dockerfile) — built identically by `docker build` and `podman build`. On top of whatever base you choose it adds sshd, git, common CLI tooling, the unprivileged in-container user, and passwordless sudo (drop sudo with `--no-sudo`). There are two ways to shape it:
+## Machine-readable output
 
-- **`--image <ref>`** swaps the base. Any Debian/Ubuntu-based image works (`--image ubuntu:24.04`), including one you built yourself from a Dockerfile and want to reuse across boxes.
-- **`--dockerfile <path>`** is the project-provisioning path: isopod builds your Dockerfile first, then layers sshd/git on top (i.e. your image becomes the base via `FROM`). This is how you bake in a toolchain (a JDK, Node, etc.) the industry-standard way, rather than a bespoke config format.
-
-```dockerfile
-# Dockerfile  — your project's toolchain
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends default-jdk maven
-```
-
-```sh
-isopod create api --repo https://github.com/me/api --dockerfile ./Dockerfile
-```
-
-Your Dockerfile must use a Debian/Ubuntu (`apt`) base, since isopod's layer installs sshd with `apt-get`. A trailing `USER` in your Dockerfile doesn't change the box's privilege model — isopod's layer resets to root (sshd must be PID 1 as root) and you log in as the unprivileged in-box user. **To limit privilege inside the box, use `--no-sudo`** (drops the in-box user's passwordless sudo), not the base image's `USER` — isopod's SSH model supersedes it. (isopod's real boundary is host isolation + rootless userns, not in-container rootlessness; see [The isolation model](#the-isolation-model).)
-
-Because the image is built before the container exists (and `--repo` clones *inside* the box afterward), the Dockerfile is a host-side file you point at — not something read from the cloned repo. For quick one-offs you can still install toolchains interactively with `isopod shell`.
-
-isopod runs box operations (clone, copy-in, export, fetch) over a non-interactive SSH command, which uses the system `PATH`, not the one your `~/.bashrc` builds. Install tools system-wide (in the Dockerfile, or with `sudo` in the box) so these operations can find them; a tool only on a shell-rc `PATH` is still available in `isopod shell`, just not to box operations.
-
-### Adding a system package without a rebuild (`isopod install`)
-
-Most dependencies don't need root: install language packages (`pip install --user`, `npm`, `cargo`) into your home directory from `isopod shell`. For the system packages that *do* need root — a `-dev` header, a CLI tool like `jq` — how you add them depends on the box's privilege posture:
-
-- **Default (sudo) box:** the in-box user has passwordless sudo, so `isopod shell <name> -- 'sudo apt-get update && sudo apt-get install -y jq'` just works.
-- **`--no-sudo` box:** the in-box user has no root, so the install comes from the host instead:
-
-```sh
-isopod install <name> jq ripgrep    # runs the box's package manager as root, from the host
-```
-
-`isopod install` runs the box's package manager (`apt-get`/`apk`/`dnf`) as root **through the container engine from the host** — the same trust boundary as [egress](#network-egress-isolation-egress-lan-deny) and [secrets](#secrets). Because it enters through the engine rather than sshd, the boxed (unprivileged) agent can't reach it: the box stays locked down, but you can still add a forgotten dependency without recreating it.
-
-**Why a host-mediated *named-package* install, rather than giving the agent sudo (or a root shell)?** In isopod's model the untrusted party is the agent running inside the box. Passwordless sudo hands *the agent* root for the whole session, not just you. And a root shell in the box — however you get it — can still be tricked into running agent-controlled code as root the moment you execute the project (a build, `npm install`, a `Makefile`) in the workspace the agent controls. Installing a *named package* through a host channel avoids both: the agent never gets root, and you're running the distro's package manager on a name **you** chose, not the box's code. It is the smaller, safer capability — so on a locked-down box, prefer `isopod install jq` over dropping into a root shell and building.
-
-Two caveats. Installs are **ephemeral** — a fresh `create` starts without them (`reconfigure` snapshots the box, so they survive *that*). For a dependency you always need, bake it into a [`--dockerfile`](#customizing-the-container) instead. And `isopod install` needs a **container** box: the engine can't exec into a microVM guest, so on a microVM runtime add the package with `--dockerfile` and recreate.
-
-### Reaching a server in the box (port forwarding)
-
-A dev server inside the box (say `pnpm run start` on `:3000`) isn't on your host by default. Publish it with **`--expose`**, which maps a container port to a `127.0.0.1` host port — the standard `podman/docker run -p`, loopback-only:
-
-```sh
-isopod create web --repo <url> --expose 3001:3000   # box :3000 -> localhost:3001
-isopod create web --repo <url> --expose 8080         # same port on both sides
-```
-
-Port mappings are set at create time (engine port mappings can't be added to a *running* container) and restored across stop/start. `isopod info <name>` lists them. To add or change ports later without starting over, use `isopod reconfigure` (below). In the VSCodium Remote-SSH window, ports a server opens are also auto-forwarded by the IDE.
-
-### Data volumes (`--disk`)
-
-`--disk` gives a box a dedicated filesystem separate from its container layer:
-
-```sh
-isopod create build --repo <url> --disk 20g              # ext4 at /mnt/data
-isopod create build --repo <url> --disk 50g:/srv/cache   # pick the mountpoint
-```
-
-This is **box-local storage, not a host mount.** isopod puts a sparse ext4 image inside the box's own container layer and the box's entrypoint loop-mounts it at boot. No host directory is exposed, so [the isolation model](#the-isolation-model) is unchanged — the guest kernel gets a block device backed by a file the box already owns, and the host side sees nothing it didn't already have.
-
-That is a deliberate choice over the obvious alternative. A host-backed volume (`podman -v`) would break copy-not-mount: it is exactly the live mount where an agent could plant git hooks, `Makefile` edits, or editor task files that your host tools would later execute. On a microVM box it is worse than that — libkrun exposes host directories over virtio-fs, and [its own documentation warns](https://github.com/containers/libkrun) that virtio-fs offers "no protection against the guest attempting to access other directories in the same filesystem, or even other filesystems in the host." So isopod does not offer one.
-
-Two limits follow from the design:
-
-- **microVM boxes only.** Attaching the image needs a loop device, which needs the box's own kernel; `--container` boxes are refused at create time rather than handed a box whose volume silently never mounted.
-- **A `--disk` box can't be `reconfigure`d.** `reconfigure` snapshots the container layer, and the volume's backing image lives in that layer — a 20g disk would make a 20g snapshot. Export your work and recreate instead.
-
-The volume survives `stop`/`start` and is destroyed with the box. It is *storage*, not a backup: `isopod export` still only reaches the workspace.
-
-### Running containers inside a box (`--nested-containers`)
-
-```sh
-isopod create ci --repo <url> --nested-containers        # 20g volume, or --disk 40g
-isopod shell ci -- podman run --rm docker.io/library/busybox echo hello
-```
-
-This installs rootless podman in the box and puts its storage on a `--disk` volume. The volume is not optional: **container storage cannot live on the filesystem a microVM box boots from.** A krun box's root is virtiofs, and virtiofs cannot carry the multiple uids/gids that containers/storage needs, so image-layer extraction fails with:
-
-```
-ApplyLayer ... setting up pivot dir: mkdir .../.pivot_root2168677766: permission denied
-```
-
-That failure is independent of the graph driver — `vfs`, `overlay`, and `fuse-overlayfs` all hit it — and it is not a version bug to wait out; upstream podman rejects putting storage on virtiofs for the same reason. Moving the graph root onto a real block device is the fix, and it also lets podman use `overlay` instead of the space-hungry `vfs` fallback. isopod additionally hands the box user `/dev/fuse` and `/dev/net/tun` (owner-only, mode `0600`), which rootless podman needs for storage and slirp4netns networking.
-
-A nested engine is real added attack surface *inside* the box, which is why it is opt-in. The boundary around the box is unchanged: the microVM is still the isolation edge, and nested containers run within it.
-
-### Changing a box after create (`reconfigure`)
-
-A container's run settings — ports, memory, cpus, fingerprint masks — can't be edited in place; the engine bakes them in at creation. So every box has a readable config you can change, and isopod re-applies it for you:
-
-```sh
-isopod config web                       # view the box's config.yaml
-isopod reconfigure web --expose 5173 --memory 8g   # or edit config.yaml, then:
-isopod reconfigure web
-```
-
-The config lives at `~/.config/isopod/boxes/<name>/config.yaml` — and it's written as a **real, valid Compose service** (engine-correct: podman gets `security_opt: mask=…`, docker gets `tmpfs` directory masks — it can't mask `/proc` files), so you can read, copy, or adapt it elsewhere. But **isopod owns and parses it; it does not launch boxes from it** — a working box also needs the per-box SSH key, pinned host key, and cloned workspace that Compose can't set up, so `docker compose up` on it gives a bare container. isopod reads a few fields back on `reconfigure` (`ports`, `mem_limit`, `cpus`, `x-isopod-color`); the rest is a managed reference.
-
-On `reconfigure`, isopod **snapshots the container to an image** (so your workspace *and* anything you `apt install`ed are preserved), then recreates it with the new settings, keeping the box's SSH key, host key, color, and ssh_config entry. The base image itself is that managed snapshot; to change the base, create a new box. (The Apple `container` engine has no image-commit primitive, so `reconfigure` isn't supported there — recreate the box instead. A box with a [`--disk` volume](#data-volumes---disk) is also excluded, because its backing image sits in the layer being snapshotted.)
-
-## Machine-readable output (`--json`)
-
-Three commands accept `--json` and print a single JSON document on stdout (no other text), for scripts and tools that drive isopod — such as the Podman Desktop dashboard extension:
-
-| Command | Output |
-| --- | --- |
-| `isopod list --json` | Array of box summaries: `name`, `status`, `ssh_host`, `port`, `color`, `engine` |
-| `isopod info <name> --json` | One box object: the summary fields plus `forwards`, `secrets` (names only), `workspace` |
-| `isopod egress status --json` | Egress state: `mode`, `firewall`, `network`, `subnet`, `dns`, `proxy` |
-
-`port` and `color` are `null` when unknown; `forwards` and `secrets` are empty arrays when unset. Fields may be added over time but are not renamed or removed; errors still exit non-zero with a message on stderr.
+`isopod list`, `isopod info <name>`, and `isopod egress status` each take `--json` and print one JSON document on stdout, for scripts and dashboards that drive isopod such as the Podman Desktop dashboard extension. The field-by-field schema is in **[docs/managing-boxes.md#machine-readable-output](docs/managing-boxes.md#machine-readable-output)**.
 
 ## Testing
 
-isopod ships a test suite under `test/` using [bats-core](https://github.com/bats-core/bats-core) and pexpect for interactive prompts.
-
-```sh
-test/run.sh              # lint + stubbed bats + interactive (no container engine)
-RUN_LIVE=1 test/run.sh   # also runs live end-to-end tests against real podman/docker
-```
-
-Contributing? Install the ShellCheck + shfmt [pre-commit hooks](docs/development.md) first (`pip install pre-commit && pre-commit install`) so linting and formatting run on every commit.
-
-CI runs on both GitLab and GitHub with the same core jobs — lint (shellcheck + bash syntax + python), test (stubbed + interactive, runs anywhere), and a manual `live-isolation` job that needs a podman-capable runner. GitHub additionally runs `macos` (BSD-userland lint + test), `brew-formula` (installs isopod through the Homebrew tap formula built from the checkout), and `distro-install` (runs `install.sh` for real on Fedora, immutable Fedora, Ubuntu, Arch, and Gentoo images); job names differ slightly between the two CI systems, but the roles match.
-
-Run one distro check locally against any image:
-
-```sh
-docker run --rm -v "$PWD:/src:ro" -w /src archlinux:latest \
-  bash test/distro-install.sh pacman     # expected package-manager hint
-```
-
-- **GitLab CI/CD** (`.gitlab-ci.yml`) — should run identically under [`gitlab-ci-local`](https://github.com/firecow/gitlab-ci-local) for debugging pipelines on your own machine before pushing.
-
-- **GitHub Actions** (`.github/workflows/ci.yml`) — run it locally with [`act`](https://github.com/nektos/act): `act -j lint`, `act -j test`. The `live-isolation` job needs container-in-container and is gated to manual dispatch, so run it the native way instead: `RUN_LIVE=1 test/run.sh`. Bare `act` also tries `macos`/`brew-formula`, which aren't expected to work under `act`'s runner. (An `.actrc` pins a runner image with the tooling the jobs expect.)
+`test/run.sh` runs lint, formatting, and the stubbed and interactive suites with no container engine, and `RUN_LIVE=1 test/run.sh` adds the live end-to-end tests against real podman/docker. Contributor setup, the pre-commit hooks, and the full CI layout are in **[docs/development.md](docs/development.md)**.
 
 ## Documentation
 
 More detailed docs live in [`docs/`](docs/):
 
-- **[Development guide](docs/development.md)** — dev setup, the ShellCheck + shfmt pre-commit hooks, formatting conventions, and running the tests.
-- **[Installation, platform notes & state layout](docs/installation-and-platform.md)** — manual install steps per platform, window colors, platform-specific notes, and how on-disk state is laid out.
+- **[Security model](docs/security-model.md)** — the isolation model, fingerprint masks, what still leaks, the sandboxed runtimes (gVisor, Kata, krun), the egress modes, data volumes, and secrets.
+- **[Managing and customizing a box](docs/managing-boxes.md)** — base image and `--dockerfile`, `isopod install`, port forwarding, `reconfigure`, JSON output, and environment variables.
+- **[Getting work back out](docs/getting-work-out.md)** — `export` vs `fetch`, and pulling git history onto the host.
 - **[Identity remap](docs/remap.md)** — rewriting the git identity on commits made inside a container after `fetch`, and how the new identity is resolved.
-- **[Opt-in security features](docs/opt-in-security.md)** — enabling the gVisor (`runsc`) syscall-virtualizing runtime, or a Tier 3 microVM runtime (Kata, krun).
+- **[Installation, platform notes & state layout](docs/installation-and-platform.md)** — manual install steps per platform, window colors, platform-specific notes, and how on-disk state is laid out.
+- **[Development guide](docs/development.md)** — dev setup, the ShellCheck + shfmt pre-commit hooks, formatting conventions, and running the tests.
 - **[macOS host-level egress](docs/macos-host-egress.md)** — why egress enforcement needs a different design on macOS, and how the host-`pf` backend works.
 - **[Releasing isopod](docs/RELEASING.md)** — how the version gate and Homebrew tap automation work.
 - **[VSCodium host-isolation audit](docs/isopod-vscodium-host-isolation-audit.md)** — code-level audit of what (if anything) crosses from host into the container.

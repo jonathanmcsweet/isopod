@@ -158,7 +158,7 @@ flatpak override --user --filesystem=$HOME/.ssh:ro \
 
 **macOS.** Containers run inside the `podman machine` (or Docker Desktop) Linux VM — a *real* VM boundary between the agent and your Mac. Published ports are forwarded to `127.0.0.1` on the Mac. One-time setup: `podman machine init && podman machine start`.
 
-Because that VM — not the Mac — is where boxes actually run, the egress firewall and Tier-3 virtualization work differently on macOS: `isopod egress apply` enforces inside the VM (or on the Mac itself via pf when boxes run under Apple `container`), and the engine VM already gives plain containers a hardware boundary. See [opt-in-security.md](opt-in-security.md#macos-the-engine-vm-is-already-the-boundary) and [macos-host-egress.md](macos-host-egress.md).
+Because that VM — not the Mac — is where boxes actually run, the egress firewall and Tier-3 virtualization work differently on macOS: `isopod egress apply` enforces inside the VM (or on the Mac itself via pf when boxes run under Apple `container`), and the engine VM already gives plain containers a hardware boundary. See [security-model.md](security-model.md#macos-the-engine-vm-is-already-the-boundary) and [macos-host-egress.md](macos-host-egress.md).
 
 ## How state is laid out
 
