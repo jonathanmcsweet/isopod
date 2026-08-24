@@ -3576,6 +3576,7 @@ ip daddr 1.2.3.4 accept'
 @test "gc sweeps the account store and removes orphans in the right store" {
   mk_meta acctbox 'account=1' 'engine=podman' 'image=localhost/isopod-base:kept'
   detect_engine() { ENGINE=podman; }
+  is_linux() { return 0; } # exercise the Linux-only account sweep on any host
   account_exists() { return 0; }
   account_uid() { printf 4242; }
   account_runtime_dir() { printf '%s' "$TEST_TMP"; }
@@ -3605,6 +3606,7 @@ ip daddr 1.2.3.4 accept'
 @test "gc skips the account store with a warning when its runtime dir is absent" {
   mk_meta acctbox 'account=1' 'engine=podman'
   detect_engine() { ENGINE=podman; }
+  is_linux() { return 0; }
   account_exists() { return 0; }
   account_uid() { printf 4242; }
   account_runtime_dir() { printf '%s/nope' "$TEST_TMP"; }
