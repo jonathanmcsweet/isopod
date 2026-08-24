@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # sourced by isopod — not executable on its own; defines the sandbox account.
 #
-# The account is the opt-in hard egress boundary (docs/spike-sandbox-account.md):
+# The account is the opt-in hard egress boundary (docs/security-model.md,
+# "Host-enforced egress on a rootless engine"):
 # boxes run under a dedicated unprivileged account, and host nftables rules keyed
 # on that account's uid (meta skuid, output hook) drop its traffic to private
 # address space. The rules live in the HOST kernel, so guest root cannot remove
