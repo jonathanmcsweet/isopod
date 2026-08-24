@@ -106,7 +106,9 @@ cmd_gc() {
   local -a victims=() stores=("0:user")
   # The account store is reachable only via podman as the account, and only once
   # it is set up with a live runtime dir (else engine() would die mid-sweep).
-  if [ "$ENGINE" = podman ] && account_exists; then
+  # Linux-only: the account is a Linux feature, so never consult it elsewhere (a
+  # same-named host user on macOS must not trigger the sweep or its warning).
+  if is_linux && [ "$ENGINE" = podman ] && account_exists; then
     acct_uid="$(account_uid 2>/dev/null || true)"
     if [ -n "$acct_uid" ] && [ -d "$(account_runtime_dir)" ]; then
       stores+=("1:account")

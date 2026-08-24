@@ -1867,6 +1867,7 @@ EOF
 }
 @test "gc --json lists unreferenced isopod images without removing" {
   detect_engine() { ENGINE=podman; }
+  account_exists() { return 1; } # no sandbox account in this test's world
   podman() {
     [ "$1" = images ] &&
       printf 'localhost/isopod-base:v1\nlocalhost/isopod-box-abc:v1\nlocalhost/isopod-user:keep\ndocker.io/library/alpine:latest\n'
@@ -1878,6 +1879,7 @@ EOF
 }
 @test "gc --json emits an empty array when nothing is unreferenced" {
   detect_engine() { ENGINE=podman; }
+  account_exists() { return 1; }
   podman() { [ "$1" = images ] && printf 'docker.io/library/alpine:latest\n'; }
   run cmd_gc --json
   assert_output '{"images":[]}'
@@ -3399,6 +3401,7 @@ ip daddr 1.2.3.4 accept'
 }
 
 @test "account_create_preflight requires podman" {
+  is_macos() { return 1; } # exercise the Linux path on any host runner
   account_exists() { return 0; }
   run account_create_preflight docker
   assert_failure
@@ -3406,6 +3409,7 @@ ip daddr 1.2.3.4 accept'
 }
 
 @test "account_create_preflight fails when the account is not set up" {
+  is_macos() { return 1; }
   account_exists() { return 1; }
   run account_create_preflight podman
   assert_failure

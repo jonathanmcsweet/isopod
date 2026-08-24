@@ -374,6 +374,8 @@ isopod create devbox --account # this box runs under the account, behind the uid
 
 `isopod account rules` prints the ruleset for inspection and `sudo isopod account teardown` removes the account and everything setup added. It needs Linux and podman, since it relies on subordinate ids, systemd linger, and nftables, none of which have a rootless-docker or macOS equivalent.
 
+**Why an account rather than a rootful engine?** A rootful podman would also put the firewall outside the box, but the engine parses complex, partly untrusted input like images, archives, and network setup, and under a rootful engine a bug anywhere in that path runs as root rather than as you. The account keeps the engine rootless and still lands any escape in a system account that owns nothing, buying the same host-side boundary without a root-run engine. Rootful is worth reconsidering only if boxes get hosted for untrusted third parties, per-box allow-list egress becomes a requirement, or the engine gains bridge networking for rootless microVMs.
+
 ### Limits
 
 - Blocks your **LAN/host/metadata/internal-DNS**, not exfiltration to arbitrary
