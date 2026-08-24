@@ -283,6 +283,15 @@ upgrade_in_place() { # upgrade_in_place <name>
 
 # Default path: build the current base image and move the workspace onto a fresh
 # container, keeping the box's identity (dir, keys, published port, meta).
+# The box's recorded guest-egress setting, defaulting to today's default (on) for
+# a box that predates the feature. The rebuild paths (rebase, migrate) use this so
+# an upgraded box gets the current LAN-block default instead of coming back open.
+box_guest_egress() { # box_guest_egress <name>
+  local v
+  v="$(meta_get "$1" guest_egress 2>/dev/null || true)"
+  [ -n "$v" ] && printf '%s\n' "$v" || printf 'on\n'
+}
+
 upgrade_rebase() { # upgrade_rebase <name> <force>
   local name="$1" force="$2"
   local base dev nested newtag oldimg port
@@ -359,7 +368,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   # (correct) fail-closed host-key check in scan_host_key.
   rm -f "$(box_dir "$name")/known_hosts"
 
-  local BOX_SUDO BOX_HARDEN BOX_DISK BOX_NESTED BOX_SECRETS
+  local BOX_SUDO BOX_HARDEN BOX_DISK BOX_NESTED BOX_SECRETS BOX_GUEST_EGRESS BOX_GUEST_EGRESS_ALLOW
   # Preserve the box's OWN sudo policy rather than applying today's default. An
   # upgrade is a rebuild, not a policy change, and silently removing sudo from a
   # box someone relies on would be a nasty surprise. A box with no recorded policy
@@ -374,6 +383,12 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
     BOX_DISK=""
     BOX_NESTED="$nested"
     BOX_SECRETS="$(meta_get "$name" secrets 2>/dev/null || true)"
+    # Unlike sudo, an absent guest-egress is not a preserved choice: the box
+    # predates the feature. Bring it to today's default (on) so the rebuild is not
+    # silently LAN-open and weaker than a fresh box; reconfigure --guest-egress off
+    # turns it back off. lan-allow entries are carried across too.
+    BOX_GUEST_EGRESS="$(box_guest_egress "$name")"
+    BOX_GUEST_EGRESS_ALLOW="$(meta_get "$name" guest_egress_allow 2>/dev/null || true)"
   }
   build_run_args "$name" "$newtag" "127.0.0.1:$port:$BOX_SSHD_PORT" \
     "$(meta_get "$name" memory || true)" "$(meta_get "$name" cpus || true)" "${EXPOSE_SPECS[@]:-}"
@@ -391,6 +406,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
   meta_set "$name" egress "$(active_egress)"
   meta_set "$name" egress_degraded "${ISOPOD_EGRESS_DEGRADED:-0}"
+  meta_set "$name" guest_egress "$BOX_GUEST_EGRESS"
   write_ssh_include
   scan_host_key "$name" >/dev/null || true
   wait_for_ssh "$name" || die "the rebuilt box did not accept SSH. Your workspace is safe at:
@@ -542,7 +558,7 @@ cmd_migrate() {
     BOX_DISK=""
     BOX_NESTED="$nested"
     BOX_SECRETS="$(meta_get "$name" secrets 2>/dev/null || true)"
-    BOX_GUEST_EGRESS="$(meta_get "$name" guest_egress 2>/dev/null || true)"
+    BOX_GUEST_EGRESS="$(box_guest_egress "$name")" # absent -> today's default (see box_guest_egress)
     BOX_GUEST_EGRESS_ALLOW="$(meta_get "$name" guest_egress_allow 2>/dev/null || true)"
     BOX_HOST_PORTS="$(meta_get "$name" host_ports 2>/dev/null || true)"
   }
@@ -570,6 +586,7 @@ cmd_migrate() {
   meta_set "$name" runtime "$(active_runtime 2>/dev/null | grep . || printf container)"
   meta_set "$name" egress "$(active_egress)"
   meta_set "$name" egress_degraded "${ISOPOD_EGRESS_DEGRADED:-0}"
+  meta_set "$name" guest_egress "$BOX_GUEST_EGRESS"
   write_ssh_include
   scan_host_key "$name" >/dev/null || true
   wait_for_ssh "$name" || die "the migrated box did not accept SSH. Your workspace is safe at:

@@ -1384,6 +1384,20 @@ seed_secret() { # seed_secret <name> <value>
   assert_output "$port"
 }
 
+# A box built before guest-egress existed has no such meta key. A rebase must
+# bring it to today's default (on), not rebuild it silently LAN-open.
+@test "upgrade re-applies the default guest-egress to a box that predates it" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal
+  grep -v '^guest_egress=' "$ISOPOD_CONFIG_DIR/boxes/demo/meta" >"$ISOPOD_CONFIG_DIR/boxes/demo/meta.tmp"
+  mv "$ISOPOD_CONFIG_DIR/boxes/demo/meta.tmp" "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run grep '^guest_egress=' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_failure # the key is gone: this now looks like a pre-feature box
+  run "$ISOPOD_ROOT/isopod" upgrade demo --yes
+  assert_success
+  run grep '^guest_egress=' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output "guest_egress=on"
+}
+
 # The workspace is streamed to a host-side archive BEFORE anything is destroyed.
 @test "upgrade copies the workspace out before replacing the container" {
   "$ISOPOD_ROOT/isopod" create demo --color teal
