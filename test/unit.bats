@@ -247,6 +247,22 @@ teardown() { isopod_teardown_env; }
   release_lock
 }
 
+@test "acquire_lock reclaims a pidless lock (killed mid-acquire), never wedging" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/.lock" # dir exists but no pid was ever written
+  acquire_lock                        # must reclaim after the grace, not spin to death
+  [ "$LOCK_DIR" = "$ISOPOD_CONFIG_DIR/.lock" ]
+  release_lock
+}
+
+@test "acquire_lock reclaims a lock whose pid was recycled onto another process" {
+  mkdir -p "$ISOPOD_CONFIG_DIR/.lock"
+  echo "$$" >"$ISOPOD_CONFIG_DIR/.lock/pid"                    # a LIVE pid...
+  echo "Thu Jan  1 00:00:00 1970" >"$ISOPOD_CONFIG_DIR/.lock/born" # ...but not its real start
+  acquire_lock                                                 # reused pid -> reclaim, not wedge
+  [ "$LOCK_DIR" = "$ISOPOD_CONFIG_DIR/.lock" ]
+  release_lock
+}
+
 # ---- hardening_run_args (baseline + user override layering) -------------------
 @test "hardening_run_args uses the shipped baseline when there is no override" {
   run hardening_run_args podman

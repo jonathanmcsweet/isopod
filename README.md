@@ -38,17 +38,11 @@ and your existing box names.
 
 ### Manual installation
 
-Don't use Homebrew? Manual install steps by distro family — Debian (Ubuntu,
+Don't use Homebrew? Manual install steps by distro family: Debian (Ubuntu,
 Mint, Pop!_OS, Zorin, MX), Fedora, Fedora immutable (Silverblue, Kinoite,
-Bazzite), Arch (Manjaro, EndeavourOS, CachyOS), Gentoo — plus system-wide,
-macOS, and how to verify and update an install, live in
+Bazzite), Arch (Manjaro, EndeavourOS, CachyOS), Gentoo,
+and macOS. How to verify and update an install, live in
 **[docs/installation-and-platform.md](docs/installation-and-platform.md)**.
-Derivatives follow their parent family: isopod and `install.sh` read `ID` and
-then `ID_LIKE` from `/etc/os-release`.
-
-On Arch and Gentoo, add a rootless subuid/subgid range for your account before
-the first box — those distros don't create one (`install.sh` and `isopod doctor`
-print the fix).
 
 ## Quick start
 
@@ -86,12 +80,15 @@ isopod rm myproj                    # destroy container + its keys + ssh config 
 
 ## Getting work back out: `export` vs `fetch`
 
-Two ways out, both running over the box's SSH connection so the box must be running. `isopod export <name> [dest]` copies the whole working tree including its `.git` to a fresh host directory, while `isopod fetch <name> [target]` brings only the committed git history across as remote-tracking refs, which is the one to prefer when the agent is untrusted since commit objects carry no hooks or editor task files. After a `fetch`, `isopod remap <name>` rewrites throwaway container commit identities to your real name and email. The full mechanics, the `--path` and bundle options, and identity remap are in **[docs/getting-work-out.md](docs/getting-work-out.md)** and **[docs/remap.md](docs/remap.md)**.
+1. `isopod export <name> [dest]` copies the whole working tree including its `.git` to a fresh host directory
+2. `isopod fetch <name> [target]` brings only the committed git history across as remote-tracking refs. which is the one to prefer when the agent is untrusted since commit objects carry no hooks or editor task files. 
+
+After a `fetch`, `isopod remap <name>` rewrites throwaway container commit identities to your real name and email. The full mechanics, the `--path` and bundle options, and identity remap are in **[docs/getting-work-out.md](docs/getting-work-out.md)** and **[docs/remap.md](docs/remap.md)**.
 
 ## FAQ
 
 ### Why so much emphasis on VSCodium?
-Because I can reasonably evaluate VSCodium's code and extension security boundaries: it doesn't scan your host device for telemetry or fingerprinting data, and it doesn't expose host information to extensions when connected to a container. Proprietary IDEs may still collect host telemetry even while your code and AI agent are sandboxed in an isopod container.
+Because I can reasonably evaluate VSCodium's code and extension security boundaries: it doesn't scan your host device for telemetry or fingerprinting data, and it doesn't expose host information to extensions when connected to a container. Proprietary IDEs on the other hand, may still collect host telemetry even while your code and AI agent are sandboxed in an isopod container.
 
 ### Will you be explicitly supporting other open-source IDEs?
 Yes, provided I can reasonably verify they don't take telemetry from the host device and enforce boundaries that keep extensions from doing so also.
@@ -100,26 +97,30 @@ Yes, provided I can reasonably verify they don't take telemetry from the host de
 The Dev Containers extension is Microsoft-proprietary and not licensed for VSCodium. The open-source [Open Remote – SSH extension](https://open-vsx.org/extension/jeanp413/open-remote-ssh) is mature, and the same isopod container works for VSCodium, Cursor, Windsurf, JetBrains, and plain terminals simultaneously.
 
 ### Is my code safe from the AI vendor?
-Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs — that's how they work. Isopod limits the blast radius to the container's contents; it does not change what an agent does with those contents.
+Whatever code is in the container is visible to agents you run in it, and they may transmit it to their APIs, that's a standard risk with AI vendors but can be mitigated in various ways. Isopod limits the blast radius to the container's contents to varying degrees; it does not change what an agent does with those contents.
 
 ### Can two IDEs attach to the same container?
-Yes — it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
+Yes, it's just SSH. You can have VSCodium and a terminal and JetBrains attached at once.
 
 ## Security model
 
-An isopod box puts your code and the agent behind several layers you can dial up as your threat model demands. The container cannot see your host filesystem: files only cross when you copy them in, clone a repo, or pull work back out, so a misbehaving agent has no live mount where it could plant git hooks or editor task files for your host tools to run later. Isopod also masks the host-revealing `/proc` and `/sys` paths that fingerprinting tools read, runs each box under a microVM with its own kernel when one is available, and can force all network egress through a host-side allow-list. A shared-kernel container still can't hide some things like CPU identity, the kernel build string, and host RAM, all of which close only under a microVM runtime. The full picture (the isolation model, the fingerprint masks, what still leaks, the runtime tiers, the egress modes, and the kernel-hardening profile) lives in **[docs/security-model.md](docs/security-model.md)**.
+An isopod box puts your code and the agent behind several layers you can dial up as your threat model demands. The container cannot see your host filesystem: files only cross when you copy them in, clone a repo, or pull work back out, so a misbehaving agent has no live mount. 
+
+Isopod also masks the host-revealing `/proc` and `/sys` paths that fingerprinting tools read, runs each box under a microVM with its own kernel when one is available, and can force all network egress through a host-side allow-list.
+
+A microVM runtime can hide things like CPU identity, the kernel build string, and host RAM, all of which can't be done with your standard podman or docker container. The full picture (the isolation model, the fingerprint masks, what still leaks, the runtime tiers, the egress modes, and the kernel-hardening profile) lives in **[docs/security-model.md](docs/security-model.md)**.
 
 ## Secrets
 
-Store a value once on the host with `isopod secret set NAME`, then hand it to a box at create time with `--secret NAME`, and it arrives at `/run/secrets/NAME` in a memory-backed tmpfs streamed over SSH. Values live in your OS keychain, and as long as the target stays under `/run/secrets` they never land in image layers, container env, `inspect` output, export tarballs, or `reconfigure` snapshots. Managing them and the custom-path caveat are covered in **[docs/security-model.md#secrets](docs/security-model.md#secrets)**.
+Store a value once on the host with `isopod secret set NAME`, then hand it to a box at create time with `--secret NAME`, and it arrives at `/run/secrets/NAME` in a memory-backed tmpfs streamed over SSH. Values live in your OS keychain, and as long as the target stays under `/run/secrets`. They never land in image layers, container env, `inspect` output, export tarballs, or `reconfigure` snapshots. Managing them and the custom-path caveat are covered in **[docs/security-model.md#secrets](docs/security-model.md#secrets)**.
 
 ## Connecting each IDE
 
-**VSCodium (priority).** `isopod code <name>` checks for `jeanp413.open-remote-ssh`, installs it from Open VSX if needed, and launches `codium --new-window --folder-uri vscode-remote://ssh-remote+isopod-<name>/home/dev/workspace`. The first connection downloads the VSCodium server *into the container*. Extensions you install in that window (including AI agents like Cline, Continue, Roo, etc.) install and run in the container.
+**VSCodium** `isopod code <name>` checks for `jeanp413.open-remote-ssh`, installs it from Open VSX if needed, and launches `codium --new-window --folder-uri vscode-remote://ssh-remote+isopod-<name>/home/dev/workspace`. The first connection downloads the VSCodium server *into the container*. Extensions you install in that window install and run in the container.
 
 Each box gets its own window; pass `--reuse-window` to open it in the current one instead.
 
-**Cursor / Windsurf / VS Code.** `isopod code <name> --app cursor` (or `windsurf`, `code`). They use the same SSH host entry; their bundled Remote-SSH handles the rest. Note that Cursor's own cloud AI features run wherever Cursor sends them, but the agent's *tool execution* (shell commands, file edits) happens in the container.
+**Cursor / Windsurf / VS Code.** `isopod code <name> --app cursor` (or `windsurf`, `code`). They use the same SSH host entry; their bundled Remote-SSH handles the rest. Note that Cursor's own cloud AI features run wherever Cursor sends them, but the agent's tool execution (shell commands, file edits) happens in the container.
 
 **JetBrains.** Open JetBrains Gateway → SSH connection → pick host `isopod-<name>` (it reads your `~/.ssh/config`) → project directory `/home/dev/workspace`. The JetBrains backend IDE runs inside the container. Note the default image is slim; JetBrains backends want more: create with `--memory 6g` and run `isopod shell <name>` then `sudo apt install -y libxext6 libxrender1 libxtst6 libxi6 fontconfig` if the backend complains.
 
@@ -129,7 +130,9 @@ isopod reads a set of `ISOPOD_*` variables to override the engine, config locati
 
 ## Customizing and managing a box
 
-Shape the base image with `--image` to swap in any Debian/Ubuntu base or `--dockerfile` to build your own toolchain in first, add a forgotten system package to a running box from the host with `isopod install`, publish an in-box server to your host loopback with `--expose`, and change a box's ports, memory, or cpus after the fact with `isopod reconfigure`. A box can also carry its own scratch storage with `--disk` and run rootless containers inside itself with `--nested-containers`, both kept box-local rather than mounted from your host. See **[docs/managing-boxes.md](docs/managing-boxes.md)** for the image, install, port, and reconfigure detail, and the [data volumes and nested containers](docs/security-model.md#data-volumes---disk-and-nested-containers---nested-containers) section of the security model for how box-local storage stays off your host.
+Shape the base image with `--image` to swap in any Debian/Ubuntu base or `--dockerfile` to build your own toolchain in first. Add a forgotten system package to a running box from the host with `isopod install`, publish an in-box server to your host loopback with `--expose`, and change a box's ports, memory, or cpus after the fact with `isopod reconfigure`. 
+
+A box can also carry its own scratch storage with `--disk` and run rootless containers inside itself with `--nested-containers`, both kept box-local rather than mounted from your host. See **[docs/managing-boxes.md](docs/managing-boxes.md)** for the image, install, port, and reconfigure detail, and the [data volumes and nested containers](docs/security-model.md#data-volumes---disk-and-nested-containers---nested-containers) section of the security model for how box-local storage stays off your host.
 
 ## Machine-readable output
 

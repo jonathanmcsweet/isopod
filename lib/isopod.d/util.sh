@@ -156,21 +156,44 @@ ${body}EOF"
 # generated ssh_config and per-box meta files), so two concurrent invocations
 # can't corrupt them or pick colliding ports/colors. We use an atomic `mkdir`
 # rather than flock(1) because mkdir is atomic on every platform isopod runs on
-# (Linux, macOS). A lock left behind by a crashed process is
-# reclaimed via a POSIX `kill -0` liveness check.
+# (Linux, macOS). A lock left behind by a dead or killed process is reclaimed
+# automatically (see lock_owner_live), so a stale lock never needs a manual rm.
 LOCK_DIR=""
+# A lock is still held only if its recorded pid is alive AND is the same process
+# instance that took it. `kill -0` alone misfires on a busy host: after the holder
+# exits, its pid gets recycled onto an unrelated process that `kill -0` reads as
+# live, wedging every later command. The recorded start time (ps lstart, on Linux
+# and macOS) tells a reused pid apart from the original holder.
+lock_owner_live() { # lock_owner_live <lockdir> <pid>
+  local lock="$1" pid="$2" born now
+  kill -0 "$pid" 2>/dev/null || return 1
+  born=$(cat "$lock/born" 2>/dev/null || true)
+  [ -n "$born" ] || return 0 # no recorded start: assume live, don't stomp a holder
+  now=$(ps -p "$pid" -o lstart= 2>/dev/null || true)
+  [ -z "$now" ] || [ "$born" = "$now" ] # same start -> live; different -> pid reused
+}
 acquire_lock() {
   [ -n "$LOCK_DIR" ] && return 0 # already held by this process
   mkdir -p "$CONFIG_DIR"
-  local lock="$CONFIG_DIR/.lock" tries=0 owner
+  local lock="$CONFIG_DIR/.lock" tries=0 pidless=0 owner
   while ! mkdir "$lock" 2>/dev/null; do
-    # A racer that reads pid in the brief window after the owner's mkdir but
-    # before it writes pid (below) sees an empty owner: it does NOT reclaim
-    # (the [ -n "$owner" ] guard), it just spins and retries — benign.
     owner=$(cat "$lock/pid" 2>/dev/null || true)
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$lock"
-      continue # previous owner is gone — reclaim it
+    if [ -z "$owner" ]; then
+      # A holder writes its pid right after mkdir, so a lock still pidless after a
+      # short grace was abandoned mid-acquire (killed in that window) — reclaim it.
+      # The grace avoids stomping that sub-millisecond gap in a live holder.
+      pidless=$((pidless + 1))
+      [ "$pidless" -ge 5 ] && {
+        rm -rf "$lock"
+        pidless=0
+        continue
+      }
+    elif ! lock_owner_live "$lock" "$owner"; then
+      rm -rf "$lock" # holder is gone (dead pid, or its pid was reused elsewhere)
+      pidless=0
+      continue
+    else
+      pidless=0
     fi
     tries=$((tries + 1))
     [ "$tries" -ge 100 ] && die "another isopod command holds the lock ($lock).
@@ -179,6 +202,7 @@ acquire_lock() {
   done
   LOCK_DIR="$lock"
   printf '%s\n' "$$" >"$lock/pid" 2>/dev/null || true
+  ps -p "$$" -o lstart= 2>/dev/null >"$lock/born" || true
 }
 release_lock() {
   [ -n "$LOCK_DIR" ] || return 0
