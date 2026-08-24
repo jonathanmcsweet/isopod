@@ -256,7 +256,9 @@ EOF
 @test "create makes a degraded OPEN network unmissable" {
   # The stubbed podman reports rootless, so default-on egress cannot be enforced
   # and resolve_egress degrades to an OPEN network. The create summary must say so.
-  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  # --container pins a non-microVM box: without it a host that CAN run a microVM
+  # (macOS CI) gets guest-egress and reports the in-box posture instead of OPEN.
+  run "$ISOPOD_ROOT/isopod" create demo --container --color teal
   assert_success
   assert_output --partial "Network: OPEN"
   assert_output --partial "could NOT be enforced"
