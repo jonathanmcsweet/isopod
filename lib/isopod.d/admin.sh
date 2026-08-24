@@ -332,15 +332,19 @@ cmd_doctor() {
         printf '            isopod shell/copy/export; for the IDE use kata (Tier 3 microVM) or --container.\n'
       fi
     else
-      printf '  [--]      sandboxed runtime: off (Tier 1 masks active; see security/hardening.conf)\n'
-      # Auto-detect sandboxed runtimes the user could enable for structural (not
-      # mask-based) fingerprint resistance. Tier 3 microVM (own kernel/DMI) is the
-      # strongest; Tier 2 (runsc) is a syscall sandbox on the shared kernel.
+      # No runtime is PINNED in hardening.conf, but that does not mean boxes run
+      # unsandboxed: create auto-selects the strongest runnable sandbox by default
+      # (a Tier 3 microVM when /dev/kvm and one are present, else gVisor, else a
+      # plain container with a warning). Report that, not a misleading "off".
       local avail
       avail="$(detect_sandboxed_runtimes)"
       if [ -n "$avail" ]; then
-        printf '  [--]      available to enable: %s — add e.g. `runtime %s` to hardening.conf\n' \
+        printf '  [ok]      sandboxed runtime: auto — create picks the strongest available by default\n'
+        printf '            (candidates: %s; pin one with `runtime %s` in hardening.conf)\n' \
           "$avail" "${avail%% *}"
+      else
+        printf '  [--]      sandboxed runtime: none available — boxes run as a plain Tier 1 container\n'
+        printf '            (fingerprint masks still apply). Install kata/krun (microVM) or runsc to harden.\n'
       fi
     fi
   else
