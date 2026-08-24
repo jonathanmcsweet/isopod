@@ -226,8 +226,8 @@ printf '%s\n' "$mixed" | grep -q '1:2:3:4:5:6:7:8:9' &&
   fail "the malformed IPv6 entry was emitted instead of skipped"
 ok "a malformed IPv6 entry is skipped per-entry, keeping the valid ones"
 
-guest="$(awk -v gw="192.168.1.1" -v rules="$guest_rules" -v allow="$allow_rules" \
-  -v logging=1 -v log4="$log4" -v log6="$log6" "$render_prog" "$guest_tmpl")"
+guest="$(ISO_RULES="$guest_rules" ISO_ALLOW="$allow_rules" \
+  awk -v gw="192.168.1.1" -v logging=1 -v log4="$log4" -v log6="$log6" "$render_prog" "$guest_tmpl")"
 
 printf '%s\n' "$guest" | grep -q '@GATEWAY@' &&
   fail "guest ruleset still contains @GATEWAY@ after rendering"
@@ -275,8 +275,8 @@ ok "guest ruleset logs drops as a separate rule, ahead of the drop"
 # Rendering with nothing optional at all must still produce a loadable ruleset:
 # no resolvers, no lan-allow, and logging off (the fallback path for a kernel
 # with no log support, which must never be the reason a box fails closed).
-guest_empty="$(awk -v gw="192.168.1.1" -v rules="" -v allow="" -v logging=0 \
-  "$render_prog" "$guest_tmpl")"
+guest_empty="$(ISO_RULES="" ISO_ALLOW="" \
+  awk -v gw="192.168.1.1" -v logging=0 "$render_prog" "$guest_tmpl")"
 [ "$(printf '%s\n' "$guest_empty" | grep -c '{')" = "$(printf '%s\n' "$guest_empty" | grep -c '}')" ] ||
   fail "guest ruleset has unbalanced braces when rendered with nothing optional"
 printf '%s\n' "$guest_empty" | grep -q 'limit rate' &&

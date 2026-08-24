@@ -2552,7 +2552,8 @@ _render_nft() { # _render_nft <gateway> <rules block> [allow block] [logging]
     echo "could not extract the render program from the entrypoint" >&2
     return 1
   }
-  awk -v gw="$1" -v rules="$2" -v allow="${3:-}" -v logging="${4:-0}" \
+  ISO_RULES="$2" ISO_ALLOW="${3:-}" \
+    awk -v gw="$1" -v logging="${4:-0}" \
     -v log4='    ip daddr @private4 limit rate 10/minute log prefix "isopod-egress-drop "' \
     -v log6='    ip6 daddr @private6 limit rate 10/minute log prefix "isopod-egress-drop "' \
     "$prog" "$ISOPOD_GUEST_EGRESS_NFT"

@@ -397,11 +397,14 @@ if [ "${ISOPOD_GUEST_EGRESS:-}" = "1" ]; then
   iso_log4='    ip daddr @private4 limit rate 10/minute log prefix "isopod-egress-drop "'
   iso_log6='    ip6 daddr @private6 limit rate 10/minute log prefix "isopod-egress-drop "'
   iso_render_nft() { # iso_render_nft <0|1 logging> <0|1 allow>
-    awk -v gw="$iso_gw" -v rules="$iso_ns_rules" \
-      -v allow="$([ "$2" = 1 ] && printf '%s' "$iso_allow_rules")" \
-      -v logging="$1" -v log4="$iso_log4" -v log6="$iso_log6" '
-      /^@RESOLVERS@$/ { if (rules != "") print rules; next }
-      /^@ALLOW@$/     { if (allow != "") print allow; next }
+    # rules/allow are multi-line; pass them through the environment (ENVIRON), not
+    # -v, since BSD awk (macOS, where the render test replays this) rejects a
+    # newline in a -v value. gw/logging/log4/log6 are single-line, so -v is fine.
+    ISO_RULES="$iso_ns_rules" \
+      ISO_ALLOW="$([ "$2" = 1 ] && printf '%s' "$iso_allow_rules")" \
+      awk -v gw="$iso_gw" -v logging="$1" -v log4="$iso_log4" -v log6="$iso_log6" '
+      /^@RESOLVERS@$/ { if (ENVIRON["ISO_RULES"] != "") print ENVIRON["ISO_RULES"]; next }
+      /^@ALLOW@$/     { if (ENVIRON["ISO_ALLOW"] != "") print ENVIRON["ISO_ALLOW"]; next }
       /^@LOG4@$/      { if (logging == "1") print log4; next }
       /^@LOG6@$/      { if (logging == "1") print log6; next }
       { gsub(/@GATEWAY@/, gw); print }
