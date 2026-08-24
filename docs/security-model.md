@@ -360,6 +360,20 @@ anyway without the LAN block actually in effect — set `ISOPOD_EGRESS_ALLOW_UNL
 (you'll get a warning instead of a hard stop). When the firewall's state can't be read
 without root, isopod can't confirm either way and warns rather than blocking.
 
+### Host-enforced egress on a rootless engine (the sandbox account)
+
+The rootful-engine requirement above is a wall if you run rootless podman and want to keep it that way, and the sandbox account is the way around it: a dedicated unprivileged system account whose boxes you launch with `sudo -u`, so their traffic carries that account's uid on the host, where an nftables ruleset keyed on that uid drops everything bound for private ranges. The drop lives on the host and keys on the uid, so it holds even against root inside the box, which is the boundary a rootless bridge cannot give you.
+
+Set it up once as root, then create boxes against it:
+
+```sh
+sudo isopod account setup      # account, subuids, linger, the uid-keyed nft rules + boot unit, and a sudoers grant for you
+isopod account status          # confirm the account, rules, and grant are all in place
+isopod create devbox --account # this box runs under the account, behind the uid-keyed drop
+```
+
+`isopod account rules` prints the ruleset for inspection and `sudo isopod account teardown` removes the account and everything setup added. It needs Linux and podman, since it relies on subordinate ids, systemd linger, and nftables, none of which have a rootless-docker or macOS equivalent.
+
 ### Limits
 
 - Blocks your **LAN/host/metadata/internal-DNS**, not exfiltration to arbitrary
