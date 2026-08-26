@@ -30,7 +30,14 @@ skip() {
 }
 hdr() { printf '\n=== %s ===\n' "$1"; }
 
-cleanup_box() { "$ISOPOD" rm "$1" --force >/dev/null 2>&1 || true; }
+# Every isopod call goes through this. Several commands ask for confirmation
+# (upgrade, remap, rm, gc), and this script sends their output to a log file, so a
+# prompt would be invisible and `read` would block the run forever. Closing stdin
+# makes any prompt fail fast instead of hanging; the commands that ask also get
+# their non-interactive flag explicitly below.
+iso() { "$ISOPOD" "$@" </dev/null; }
+
+cleanup_box() { iso rm "$1" --force >/dev/null 2>&1 || true; }
 cleanup_all() {
   local b
   for b in hv-offline hv-disk hv-nest hv-remap hv-upg; do cleanup_box "$b"; done
@@ -44,7 +51,7 @@ trap cleanup_all EXIT
 
 # --- capability probe --------------------------------------------------------
 hdr "Host capabilities"
-"$ISOPOD" doctor 2>&1 | sed 's/^/  /'
+iso doctor 2>&1 | sed 's/^/  /'
 HAS_KVM=0
 [ -e /dev/kvm ] && HAS_KVM=1
 printf '\n  /dev/kvm present: %s\n' "$([ "$HAS_KVM" = 1 ] && echo yes || echo no)"
@@ -63,17 +70,17 @@ fi
 
 # --- B. offline boxes (the newest code, least proven) ------------------------
 hdr "B. Offline box (--offline)"
-if "$ISOPOD" create hv-offline --offline >/tmp/hv-offline.log 2>&1; then
+if iso create hv-offline --offline >/tmp/hv-offline.log 2>&1; then
   ok "offline box created and reachable over SSH"
 
-  if "$ISOPOD" info hv-offline 2>/dev/null | grep -qi 'OFFLINE'; then
+  if iso info hv-offline 2>/dev/null | grep -qi 'OFFLINE'; then
     ok "info reports the OFFLINE posture"
   else
     bad "info does not report OFFLINE"
   fi
 
   # The box must not reach the internet.
-  if "$ISOPOD" shell hv-offline -- sh -c 'curl -sS -m 8 https://example.com >/dev/null 2>&1' 2>/dev/null; then
+  if iso shell hv-offline -- sh -c 'curl -sS -m 8 https://example.com >/dev/null 2>&1' 2>/dev/null; then
     bad "offline box REACHED the internet (this is the critical check)"
   else
     ok "offline box cannot reach the internet"
@@ -82,7 +89,7 @@ if "$ISOPOD" create hv-offline --offline >/tmp/hv-offline.log 2>&1; then
   # ...nor the LAN. Uses the host's default gateway as the target.
   GW="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
   if [ -n "${GW:-}" ]; then
-    if "$ISOPOD" shell hv-offline -- sh -c "ping -c1 -W2 $GW >/dev/null 2>&1" 2>/dev/null; then
+    if iso shell hv-offline -- sh -c "ping -c1 -W2 $GW >/dev/null 2>&1" 2>/dev/null; then
       bad "offline box REACHED the LAN gateway $GW"
     else
       ok "offline box cannot reach the LAN gateway"
@@ -94,12 +101,12 @@ if "$ISOPOD" create hv-offline --offline >/tmp/hv-offline.log 2>&1; then
   # Copy-in and export must still work: they ride the SSH channel, not the network.
   TMPD="$(mktemp -d)"
   echo hello >"$TMPD/f.txt"
-  if "$ISOPOD" copy-in hv-offline "$TMPD" >/dev/null 2>&1; then
+  if iso copy-in hv-offline "$TMPD" >/dev/null 2>&1; then
     ok "copy-in works on an offline box"
   else
     bad "copy-in failed on an offline box"
   fi
-  if "$ISOPOD" export hv-offline "$TMPD/out" >/dev/null 2>&1; then
+  if iso export hv-offline "$TMPD/out" >/dev/null 2>&1; then
     ok "export works on an offline box"
   else
     bad "export failed on an offline box"
@@ -107,8 +114,8 @@ if "$ISOPOD" create hv-offline --offline >/tmp/hv-offline.log 2>&1; then
   rm -rf "$TMPD"
 
   # The posture must survive a rebuild rather than silently regaining a network.
-  if "$ISOPOD" reconfigure hv-offline --memory 3g >/dev/null 2>&1; then
-    if "$ISOPOD" info hv-offline 2>/dev/null | grep -qi 'OFFLINE'; then
+  if iso reconfigure hv-offline --memory 3g >/dev/null 2>&1; then
+    if iso info hv-offline 2>/dev/null | grep -qi 'OFFLINE'; then
       ok "offline survives reconfigure"
     else
       bad "reconfigure LOST the offline posture"
@@ -125,19 +132,19 @@ hdr "C. Data volume mountpoint fix (--disk / --nested-containers)"
 if [ "$HAS_KVM" != 1 ]; then
   skip "microVM tests (no /dev/kvm on this host)"
 else
-  if "$ISOPOD" create hv-nest --nested-containers >/tmp/hv-nest.log 2>&1; then
+  if iso create hv-nest --nested-containers >/tmp/hv-nest.log 2>&1; then
     ok "nested-containers box created"
     # The attack: redirect an intermediate component of the mountpoint path.
-    "$ISOPOD" shell hv-nest -- sh -c 'rm -rf ~/.local/share && ln -s /etc ~/.local/share' >/dev/null 2>&1
-    "$ISOPOD" stop hv-nest >/dev/null 2>&1
-    if "$ISOPOD" start hv-nest >/tmp/hv-nest-restart.log 2>&1; then
+    iso shell hv-nest -- sh -c 'rm -rf ~/.local/share && ln -s /etc ~/.local/share' >/dev/null 2>&1
+    iso stop hv-nest >/dev/null 2>&1
+    if iso start hv-nest >/tmp/hv-nest-restart.log 2>&1; then
       ok "box still boots after the mountpoint was redirected"
-      if "$ISOPOD" shell hv-nest -- sh -c '[ -d /etc/containers ] && mountpoint -q /etc/containers' 2>/dev/null; then
+      if iso shell hv-nest -- sh -c '[ -d /etc/containers ] && mountpoint -q /etc/containers' 2>/dev/null; then
         bad "the redirect SUCCEEDED - /etc/containers is a mounted volume (fix not effective)"
       else
         ok "redirect refused - nothing was mounted over /etc"
       fi
-      if "$ISOPOD" shell hv-nest -- sh -c 'true' 2>/dev/null; then
+      if iso shell hv-nest -- sh -c 'true' 2>/dev/null; then
         ok "SSH still reachable after the refusal (fails safe, not closed)"
       else
         bad "box became unreachable after the refusal"
@@ -152,19 +159,19 @@ fi
 
 # --- D. identity rewrite (remap) --------------------------------------------
 hdr "D. Identity rewrite (isopod remap)"
-if "$ISOPOD" create hv-remap >/tmp/hv-remap.log 2>&1; then
-  "$ISOPOD" shell hv-remap -- sh -c '
+if iso create hv-remap >/tmp/hv-remap.log 2>&1; then
+  iso shell hv-remap -- sh -c '
     cd /home/dev/workspace && git init -q r && cd r &&
     git config user.email box@isopod && git config user.name "Box" &&
     echo x > a && git add a && git commit -qm one' >/dev/null 2>&1
   # A commit git accepts but the old rewriter skipped: an author with no name.
-  "$ISOPOD" shell hv-remap -- sh -c '
+  iso shell hv-remap -- sh -c '
     cd /home/dev/workspace/r &&
     T=$(git rev-parse HEAD^{tree}) && P=$(git rev-parse HEAD) &&
     C=$(printf "tree %s\nparent %s\nauthor <box@isopod> 1700000000 +0000\ncommitter <box@isopod> 1700000000 +0000\n\nnoname\n" "$T" "$P" | git hash-object --literally -t commit -w --stdin) &&
     git update-ref refs/heads/master "$C"' >/dev/null 2>&1
-  if "$ISOPOD" fetch hv-remap >/dev/null 2>&1 &&
-    "$ISOPOD" remap hv-remap --name "Real Name" --email real@example.com >/tmp/hv-remap-run.log 2>&1; then
+  if iso fetch hv-remap >/dev/null 2>&1 &&
+    iso remap hv-remap --force --name "Real Name" --email real@example.com >/tmp/hv-remap-run.log 2>&1; then
     ok "remap completed against a box with an unusual commit"
     if grep -rqi 'box@isopod' /tmp/hv-remap-run.log; then
       NOTES+=("check /tmp/hv-remap-run.log: box identity still mentioned")
@@ -178,12 +185,12 @@ fi
 
 # --- E. upgrade rebase (never exercised against a real engine) ---------------
 hdr "E. upgrade (rebase path)"
-if "$ISOPOD" create hv-upg >/tmp/hv-upg.log 2>&1; then
+if iso create hv-upg >/tmp/hv-upg.log 2>&1; then
   TMPD="$(mktemp -d)"
   echo keepme >"$TMPD/keep.txt"
-  "$ISOPOD" copy-in hv-upg "$TMPD" >/dev/null 2>&1
-  if "$ISOPOD" upgrade hv-upg >/tmp/hv-upg-run.log 2>&1; then
-    if "$ISOPOD" shell hv-upg -- sh -c 'find /home/dev/workspace -name keep.txt | grep -q .' 2>/dev/null; then
+  iso copy-in hv-upg "$TMPD" >/dev/null 2>&1
+  if iso upgrade hv-upg --yes >/tmp/hv-upg-run.log 2>&1; then
+    if iso shell hv-upg -- sh -c 'find /home/dev/workspace -name keep.txt | grep -q .' 2>/dev/null; then
       ok "upgrade preserved the workspace"
     else
       bad "upgrade LOST the workspace - see /tmp/hv-upg-run.log"
