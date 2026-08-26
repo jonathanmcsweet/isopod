@@ -73,7 +73,8 @@ _isopod() {
             '--container[run as a plain container instead of the default microVM]' \
             '--dev[add the dev/test toolchain (nested engines, lint/test tools)]' \
             '--disk[box-local data volume, SIZE or SIZE\:MOUNTPOINT (microVM boxes only)]:disk:' \
-            '--nested-containers[run containers inside the box (rootless podman + a --disk volume)]'
+            '--nested-containers[run containers inside the box (rootless podman + a --disk volume)]' \
+            '--offline[no route off the host: internal network, needs no host setup]'
           ;;
         code)
           _arguments \

@@ -87,8 +87,18 @@ Three commands accept `--json` and print a single JSON document on stdout (no ot
 `ISOPOD_ENGINE` (`podman`|`docker`) — engine override.
 `ISOPOD_CONFIG_DIR` — state location (default `~/.config/isopod`).
 `ISOPOD_BUILD_ARGS` — extra args for `build` (e.g. `--network=host`,
-`--build-arg http_proxy=...` behind corporate proxies).
-`ISOPOD_RUN_ARGS` — extra args for `run` (e.g. `--network=none` for an offline container, `--userns=keep-id`, custom DNS).
+`--build-arg http_proxy=...` behind corporate proxies). Host mounts into the
+build, and overrides of the build args isopod sets itself (`ISOPOD_BASE`,
+`ISOPOD_DEV_TOOLS`, `ISOPOD_NESTED`, …), are refused: those are hashed into the
+image cache tag, so overriding one caches a different image under the legitimate
+image's tag. Use `--image`, `--dev` or `--nested-containers` instead.
+`ISOPOD_RUN_ARGS` — extra args for `run` (e.g. custom DNS). For an offline box
+use `isopod create --offline` rather than a `--network` here, which isopod
+refuses since it already chose the box's network. Args that would undo the sandbox
+(`-v`, `--mount`, `--privileged`, `--userns`, `--pid`, `--cap-add`,
+`--security-opt`, `--network host`) are refused.
+`ISOPOD_ALLOW_UNSAFE_RUN_ARGS` — set to `1` to confirm you mean one of the
+refused args above, for the rare environment that genuinely needs it.
 `ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata` or `krun`; needs `/dev/kvm`). A configured runtime that isn't registered with the engine fails `create` closed with a clear error. Setup, krun networking, and the `crun-vm` exclusion: [docs/security-model.md](security-model.md).
 `ISOPOD_MICROVM_MEMORY` — default guest memory when a Tier 3 microVM runtime is active and no `--memory` is given (default `2g`).
 `ISOPOD_MICROVM_ANNOTATIONS` — space-separated `krun.*` OCI annotations passed to a microVM guest (e.g. `krun.nested_virt=1`); Podman only.

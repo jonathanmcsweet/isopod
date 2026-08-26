@@ -380,7 +380,7 @@ isopod create devbox --account # this box runs under the account, behind the uid
 
 - Blocks your **LAN/host/metadata/internal-DNS**, not exfiltration to arbitrary
   **public** IPs — the box still has public internet (that's what keeps `apt`/`pip`
-  working). For a fully offline box, use `ISOPOD_RUN_ARGS="--network=none"`.
+  working). For a fully offline box, use [`isopod create --offline`](#offline-boxes---offline).
 - The isopod network is **IPv4-only** so a box has no IPv6 route to slip around the
   v4 rules; if you make it dual-stack, also load the commented `ip6` rules in
   `security/egress-host.nft`.
@@ -455,6 +455,37 @@ as the box user, which cannot bind a privileged port — use `8443:443`), it is
 **TCP only**, and one ssh process carries all of a box's forwards, so adding or
 removing one briefly restarts the others. Forwards are reopened by `isopod start`
 and torn down by `isopod stop`.
+
+## Offline boxes (`--offline`)
+
+`isopod create <name> --offline` gives a box no route off the host. It is the only
+network boundary here that needs nothing set up first: no host firewall, no rootful
+engine, no `/dev/kvm`. On a stock rootless podman, where `lan-deny` and `allow-list`
+both degrade to an open network, this one still holds.
+
+```sh
+isopod create review --offline --copy ~/src/thing
+isopod host-port add review 11434          # optionally, one host service (a local Ollama)
+```
+
+**How it works.** The box goes on a dedicated **internal** engine network
+(`isopod-offline`, created on first use). It gets an interface, so the loopback SSH
+port isopod publishes still works and `code`, `shell`, `copy-in`, `export`, secrets
+and host-port forwards all behave normally, but the engine gives that bridge no
+route outward. Enforcement is the engine's, so in-box root cannot undo it, and
+`NET_RAW`/`NET_ADMIN` are dropped so the box cannot try to re-route around it.
+
+`--network none` would be the obvious way to spell this and is the wrong one: it
+leaves the box with only loopback, so the published SSH port has nothing to forward
+to and isopod, which brings a box up entirely over SSH, could never reach it.
+
+**What it rules out.** `--repo` needs a network to clone over, so pass `--copy`
+instead. `apt`, `pip` and any API the agent wants are all unreachable, which is the
+point. `--offline` turns any configured egress mode off, since there is no traffic
+left to filter. To let an offline box reach exactly one service on your machine,
+forward it with [`isopod host-port`](#reaching-a-service-on-your-host-host-port),
+which rides the SSH connection isopod already holds rather than giving the box a
+route.
 
 ## Network egress allow-list (`egress allow-list`)
 

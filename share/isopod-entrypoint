@@ -126,6 +126,38 @@ if [ -d /run/secrets ]; then
   chmod 700 /run/secrets
 fi
 
+# Create an absolute directory path one component at a time, refusing to follow a
+# symlink at any level, and refusing '.' or '..'. Returns non-zero instead of
+# creating anything unsafe. No box process runs at boot, so this is race-free.
+iso_mkdir_safe() { # iso_mkdir_safe <abs-path>
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  iso_md_rest="${1#/}"
+  iso_md_cur=""
+  while [ -n "$iso_md_rest" ]; do
+    case "$iso_md_rest" in
+      */*)
+        iso_md_part="${iso_md_rest%%/*}"
+        iso_md_rest="${iso_md_rest#*/}"
+        ;;
+      *)
+        iso_md_part="$iso_md_rest"
+        iso_md_rest=""
+        ;;
+    esac
+    [ -n "$iso_md_part" ] || continue
+    case "$iso_md_part" in
+      . | ..) return 1 ;;
+    esac
+    iso_md_cur="$iso_md_cur/$iso_md_part"
+    [ -L "$iso_md_cur" ] && return 1
+    [ -d "$iso_md_cur" ] || mkdir "$iso_md_cur" 2>/dev/null || return 1
+  done
+  return 0
+}
+
 # Data volume (isopod create --disk). ISOPOD_DISK is "SIZE:MOUNTPOINT". The
 # backing image lives in this box's own container layer — there is NO host bind
 # mount, so no host directory is exposed; the guest kernel just gets a block
@@ -138,8 +170,20 @@ if [ -n "${ISOPOD_DISK:-}" ]; then
   iso_disk_size="${ISOPOD_DISK%%:*}"
   iso_disk_mount="${ISOPOD_DISK#*:}"
   iso_disk_img="/var/lib/isopod/data.img"
-  mkdir -p /var/lib/isopod "$iso_disk_mount"
-  if [ ! -f "$iso_disk_img" ]; then
+  iso_disk_ok=1
+  mkdir -p /var/lib/isopod
+  # Build the mountpoint refusing a symlink at EVERY level, not just the last one.
+  # mkdir -p follows symlinks in intermediate components, and with
+  # --nested-containers the mountpoint sits under the box user's own home
+  # (~/.local/share/containers), so they can point an intermediate component at a
+  # root-owned directory and have the root-run mount/chown below land there
+  # instead (CWE-59, same class as the .ssh guard above).
+  if ! iso_mkdir_safe "$iso_disk_mount"; then
+    iso_disk_ok=0
+    echo "isopod: refusing $iso_disk_mount as the data volume mountpoint" >&2
+    echo "isopod: a component of that path is a symlink, '.' or '..'" >&2
+  fi
+  if [ "$iso_disk_ok" = 1 ] && [ ! -f "$iso_disk_img" ]; then
     # Build under a temporary name and rename only on success, so an interrupted
     # or failed mkfs never leaves a file a later boot would mount as formatted.
     if truncate -s "$iso_disk_size" "$iso_disk_img.new" 2>/dev/null &&
@@ -150,15 +194,7 @@ if [ -n "${ISOPOD_DISK:-}" ]; then
       echo "isopod: could not create the $iso_disk_size data volume" >&2
     fi
   fi
-  if [ -f "$iso_disk_img" ]; then
-    # Refuse a symlinked mountpoint: the box user could point a box-writable
-    # mountpoint at a root-owned dir so root's mount/chown here follows it (CWE-59,
-    # same class as the .ssh guard above). No box process runs at boot, so this
-    # check is race-free.
-    if [ -L "$iso_disk_mount" ]; then
-      rm -f "$iso_disk_mount"
-      mkdir -p "$iso_disk_mount"
-    fi
+  if [ "$iso_disk_ok" = 1 ] && [ -f "$iso_disk_img" ]; then
     if mount -o loop "$iso_disk_img" "$iso_disk_mount" 2>/dev/null; then
       chown "$iso_u:$iso_u" "$iso_disk_mount"
     else

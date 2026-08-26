@@ -216,6 +216,12 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   local box_nested="${BOX_NESTED:-}"
   [ -n "$box_nested" ] || box_nested="$(meta_get "$name" nested 2>/dev/null || true)"
   [ "$box_nested" = 1 ] && RUN_ARGS+=(-e "ISOPOD_NESTED=1")
+  # Offline (--offline): create sets BOX_OFFLINE; on reconfigure/upgrade it is
+  # unset, so the box keeps the posture it was created with rather than quietly
+  # regaining a network on the next rebuild.
+  local box_offline="${BOX_OFFLINE:-}"
+  [ -n "$box_offline" ] || box_offline="$(meta_get "$name" offline 2>/dev/null || true)"
+  [ -n "$box_offline" ] || box_offline=0
   [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
   [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
   # Anti-fingerprinting hardening from the hardening profile.
@@ -237,7 +243,17 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
       annotations+=("krun.use_passt=1")
     fi
     local ann
-    for ann in $ISOPOD_MICROVM_ANNOTATIONS; do [ -n "$ann" ] && annotations+=("$ann"); done
+    for ann in $ISOPOD_MICROVM_ANNOTATIONS; do
+      [ -n "$ann" ] || continue
+      # krun.* tuning only, in key=value form. This hatch is word-split into the
+      # engine command line like ISOPOD_RUN_ARGS, so it gets the same refusal to
+      # pass through anything isopod did not mean to hand the runtime.
+      case "$ann" in
+        krun.*=*) ;;
+        *) die "ISOPOD_MICROVM_ANNOTATIONS: '$ann' is not a krun.<key>=<value> annotation" ;;
+      esac
+      annotations+=("$ann")
+    done
     for ann in "${annotations[@]:-}"; do [ -n "$ann" ] && RUN_ARGS+=(--annotation "$ann"); done
   fi
   # Docker/runc can't bind-mask /proc files; hardening_run_args skipped them.
@@ -254,7 +270,24 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # scan packets or re-route around the host rules. All host-enforced at run time
   # — the box can't undo it. Preflight (create/reconfigure) has already verified
   # the engine can enforce this and created the network.
-  case "$(active_egress)" in
+  # One decision for the box's network. An offline box outranks any egress mode:
+  # a box with no route out has nothing left to filter. _net_set records that
+  # isopod chose the network itself, so the ISOPOD_RUN_ARGS check below can refuse
+  # a second --network rather than leave two conflicting flags on one command line.
+  local _net_mode _net_set=0
+  if [ "$box_offline" = 1 ]; then
+    _net_mode=offline
+  else
+    _net_mode="$(active_egress)"
+  fi
+  case "$_net_mode" in
+    offline)
+      # The internal network is the whole story: the engine gives the bridge no
+      # route off the host, so there is no resolver to pin or strip and no
+      # firewall to rely on. Caps dropped for the same reason as the egress modes.
+      RUN_ARGS+=(--network "$ISOPOD_OFFLINE_NET" --cap-drop NET_RAW --cap-drop NET_ADMIN)
+      _net_set=1
+      ;;
     lan-deny)
       # Pin DNS to a public resolver so the box cannot query the host's
       # internal/forwarding resolver for reconnaissance. --dns-search=. drops the
@@ -262,6 +295,7 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
       # network (e.g. "search lan") and is never needed to resolve a public name.
       RUN_ARGS+=(--network "$ISOPOD_EGRESS_NET" --dns "$ISOPOD_EGRESS_DNS" --dns-search=.
         --cap-drop NET_RAW --cap-drop NET_ADMIN)
+      _net_set=1
       ;;
     allow-list)
       # Force the box through the host-side filtering proxy on the bridge
@@ -283,6 +317,7 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
         -e "http_proxy=$_proxy" -e "https_proxy=$_proxy"
         -e "HTTP_PROXY=$_proxy" -e "HTTPS_PROXY=$_proxy"
         -e "no_proxy=localhost,127.0.0.1,::1" -e "NO_PROXY=localhost,127.0.0.1,::1")
+      _net_set=1
       ;;
     *)
       # Egress off. The box keeps working resolvers — it has an open network and
@@ -298,8 +333,8 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # address at all — covering intra-bridge link-local the forward hook won't see.
   # Best-effort: skip when the host kernel has no IPv6, where the sysctl does not
   # exist and --sysctl would abort container start (and there is no v6 anyway).
-  case "$(active_egress)" in
-    lan-deny | allow-list)
+  case "$_net_mode" in
+    lan-deny | allow-list | offline)
       if [ -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ]; then
         RUN_ARGS+=(--sysctl net.ipv6.conf.all.disable_ipv6=1
           --sysctl net.ipv6.conf.default.disable_ipv6=1)
@@ -315,6 +350,23 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   if [ -n "${ISOPOD_RUN_ARGS:-}" ]; then
     local -a extra_run=($ISOPOD_RUN_ARGS)
     assert_safe_run_args "${extra_run[@]}"
+    # isopod already chose this box's network above. A second --network here would
+    # leave two conflicting flags on one command line, and which one the engine
+    # honours is undefined. This is what made the old offline recipe unreliable:
+    # ISOPOD_RUN_ARGS="--network=none" landed next to --network isopod0 rather than
+    # producing an offline box. --offline is the supported spelling now.
+    if [ "$_net_set" = 1 ]; then
+      local _ra
+      for _ra in "${extra_run[@]}"; do
+        case "$_ra" in
+          --net | --network | --net=* | --network=*)
+            die "ISOPOD_RUN_ARGS sets '$_ra', but this box is already on a network isopod chose
+     for it ($_net_mode), and two --network flags conflict.
+     For a box with no route out, use:  isopod create <name> --offline"
+            ;;
+        esac
+      done
+    fi
     RUN_ARGS+=("${extra_run[@]}")
   fi
   RUN_ARGS+=("$image")

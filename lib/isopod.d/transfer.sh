@@ -143,6 +143,12 @@ cmd_fetch() {
   # choice is ambiguous we list the repos and ask for --path. lib/find_box_repo.sh
   # runs the probe; stream it into the box over SSH (sh -s reads it from stdin, so
   # the remote shell never re-parses it) and pass $WORKSPACE in as an env var.
+  # $repo below is BOX-CONTROLLED whenever it comes from the finder: the box owns
+  # the git binary and the PATH that produced it. It is safe in its current uses
+  # (a single quoted argv element to git fetch, sanitized before printing, and a
+  # path the box's own shell re-parses, which crosses no boundary). Keep it out of
+  # render_tmpl, whose SECURITY INVARIANT in util.sh takes only validated values:
+  # a template evaluates $(...), so routing this there would be host execution.
   local repo="$inbox_path"
   if [ -z "$repo" ]; then
     local finder="$ISOPOD_LIB/find_box_repo.sh"
@@ -276,6 +282,15 @@ remap_to_mailmap() {
     [ -n "$oe" ] || die "remap file $src line $lineno: left side needs an <email> to match"
     [ -n "$nn$ne" ] || die "remap file $src line $lineno: right side needs a name and/or <email>"
     [ -n "$ne" ] || ne="$oe" # rename-only: keep the existing email
+    # Same field checks the --name/--email path applies. Every field here becomes a
+    # line in a mailmap the rewrite backends parse, so a stray newline or angle
+    # bracket would add rules of its own. This file is host-owned, so this catches
+    # a hand-edit rather than an attack, but the two paths should not disagree
+    # about what a valid identity is.
+    valid_ident_email "$oe" || die "remap file $src line $lineno: invalid old email '$oe'"
+    valid_ident_email "$ne" || die "remap file $src line $lineno: invalid new email '$ne'"
+    [ -z "$on" ] || valid_ident_name "$on" || die "remap file $src line $lineno: invalid old name '$on'"
+    [ -z "$nn" ] || valid_ident_name "$nn" || die "remap file $src line $lineno: invalid new name '$nn'"
     # mailmap line: [new-name] <new-email> [old-name] <old-email>
     {
       [ -n "$nn" ] && printf '%s ' "$nn"
@@ -502,11 +517,22 @@ cmd_remap() {
       [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
       die "missing helper: $flt (is your isopod install complete?)"
     }
-    if ! git -C "$top" fast-export --no-data --reference-excluded-parents "${boxrefs[@]}" |
+    # --reencode=no: fast-export defaults to aborting on a commit that carries a
+    # non-UTF-8 `encoding` header, which a box sets for itself with one
+    # `git config i18n.commitEncoding`. Without this, that config alone disables
+    # the fallback backend. The filter passes the header through untouched, and
+    # git-filter-repo passes the same flag internally, so the two backends agree.
+    if ! git -C "$top" fast-export --no-data --reencode=no --reference-excluded-parents "${boxrefs[@]}" |
       MAILMAP_FILE="$mm" python3 "$flt" |
       git -C "$top" fast-import --force --quiet; then
       [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
-      die "the fast-export/fast-import rewrite failed"
+      # A box writes its own commit objects, and git accepts some on fetch that
+      # fast-import then refuses (a malformed identity line, for instance). That
+      # fails here rather than being rewritten, which is the safe direction.
+      die "the fast-export/fast-import rewrite failed.
+     Your box refs are untouched and the pre-rewrite backups are under
+     refs/remap-backup/, so nothing is lost. If a box commit has a malformed
+     author or committer line, drop that ref under refs/remotes/$name/ and retry."
     fi
   else
     [ "$mm_tmp" -eq 1 ] && rm -f "$mm"

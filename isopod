@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.7.8"
+ISOPOD_VERSION="3.8.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -131,6 +131,14 @@ ISOPOD_EGRESS_DNS="${ISOPOD_EGRESS_DNS:-1.1.1.1}"
 # dual-stack bridge — no reliance on an in-box sysctl. Max 15 chars (IFNAMSIZ).
 ISOPOD_EGRESS_IFACE="${ISOPOD_EGRESS_IFACE:-isopod-egr}"
 ISOPOD_EGRESS_RULESET="${ISOPOD_EGRESS_RULESET:-$ISOPOD_DIR/security/egress-host.nft}"
+
+# Offline boxes (`isopod create --offline`): a dedicated INTERNAL engine network.
+# The box gets an interface, so the loopback SSH port isopod publishes still
+# works, while the engine gives the bridge no route off the host. Enforced by the
+# engine, so nothing in the box can undo it, and unlike the egress modes it needs
+# no host firewall and no rootful engine, which makes it the one strong network
+# boundary a stock rootless install can reach.
+ISOPOD_OFFLINE_NET="${ISOPOD_OFFLINE_NET:-isopod-offline}"
 
 # macOS host-level egress (pf). When boxes run on a routable vmnet subnet (Apple
 # `container` / vmnet), egress is enforced with pf on the Mac HOST — outside every

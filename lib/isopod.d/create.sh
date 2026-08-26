@@ -8,7 +8,7 @@ cmd_create() {
   local name="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" sudo_opt=0 no_root_key=0 engine_opt="" dockerfile_opt="" image_opt=0
   local container_opt=0 dev_tools=0 harden_opt="" runtime_opt=""
-  local disk_opt="" nested=0 guest_egress_opt="" account_opt=0
+  local disk_opt="" nested=0 guest_egress_opt="" account_opt=0 offline=0
   local -a lan_allow_opts=() host_port_opts=()
   local -a repos=() copies=() exposes=() secrets=()
 
@@ -103,6 +103,10 @@ cmd_create() {
         nested=1
         shift
         ;;
+      --offline)
+        offline=1
+        shift
+        ;;
       --harden)
         harden_opt="$2"
         shift 2
@@ -172,6 +176,12 @@ cmd_create() {
   parse_disk_spec "$disk_opt"
   if [ "${#repos[@]}" -gt 0 ] && [ "${#copies[@]}" -gt 0 ]; then
     die "use either --repo or --copy, not both (you can 'isopod copy-in' later)"
+  fi
+  # An offline box has no network to clone over. Checked here with the other
+  # argument rules so it fails before any image or container work.
+  if [ "$offline" = 1 ] && [ "${#repos[@]}" -gt 0 ]; then
+    die "--offline leaves the box no network, so --repo has nothing to clone from.
+     Copy the work in instead:  isopod create $name --offline --copy <path>"
   fi
   # Resolve each --repo to its workspace subfolder now and reject collisions,
   # so a bad set fails before the container is created (not half-populated).
@@ -377,6 +387,22 @@ cmd_create() {
     IFS=,
     printf '%s' "${SECRET_SPECS[*]:-}"
   )"
+  # Offline box: an internal engine network, so it has no route off the host at
+  # all. This is the one strong network boundary that needs no host setup (no
+  # firewall, no rootful engine, no /dev/kvm), so it stays available on exactly
+  # the stock rootless install where the egress modes degrade to an open network.
+  # An egress mode has nothing left to filter here, so --offline turns it off.
+  # shellcheck disable=SC2034 # read by build_run_args in another module
+  local BOX_OFFLINE="$offline"
+  if [ "$BOX_OFFLINE" = 1 ]; then
+    [ "$ENGINE" = container ] &&
+      die "--offline is not supported on the Apple 'container' engine, which has no internal network.
+     Use podman or docker for an offline box."
+    egress_explicitly_set &&
+      warn "--offline overrides the configured egress mode: an offline box has no route out to filter"
+    export ISOPOD_EGRESS=off
+    ensure_offline_network "$ENGINE"
+  fi
   # Verify the engine can enforce egress isolation and set up its network before
   # the box starts (no-op unless `egress lan-deny` is configured).
   egress_preflight "$ENGINE"
@@ -438,6 +464,7 @@ cmd_create() {
     printf 'secrets=%s\n' "$BOX_SECRETS"
     printf 'disk=%s\n' "$BOX_DISK"
     printf 'nested=%s\n' "$BOX_NESTED"
+    printf 'offline=%s\n' "$BOX_OFFLINE"
     [ "$account_opt" = 1 ] && printf 'account=1\n'
   } >"$(box_dir "$name")/meta"
   write_box_config "$name"
@@ -503,6 +530,10 @@ cmd_create() {
   # State the effective network posture plainly — a default-on egress that could
   # not be enforced degraded to an OPEN network above, and that must not be missed.
   egress_posture_note "$name"
+  # Same for the isolation tier: the default aims at a microVM and steps down to a
+  # plain container on a host without one, which is the common case and is easy to
+  # miss when it is only ever a warning.
+  runtime_posture_note
   # State the kernel-hardening posture too (its guest-sysctl arm only applies to
   # microVM boxes), so what the box actually got is legible at create time.
   harden_posture_note "$BOX_HARDEN"

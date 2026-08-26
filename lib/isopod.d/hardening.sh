@@ -257,6 +257,31 @@ is_microvm_runtime() {
 # egress_posture_note), so what the box actually got is legible. The default
 # profile's guest-sysctl arm applies only to microVM boxes (their own kernel);
 # a container box keeps the engine's default seccomp/isolation.
+# State the isolation tier the box actually GOT, and when it is below the strongest
+# one, the single thing that would raise it. resolve_runtime already warns when it
+# steps down, but a warning scrolls past and names what failed rather than what the
+# box has. isopod degrades on purpose rather than refusing to start, because a box
+# you can run beats isolation you never finish installing, and that trade only
+# works if the result stays legible afterwards.
+runtime_posture_note() {
+  local rt tier
+  rt="$(active_runtime 2>/dev/null || true)"
+  tier="$(runtime_tier "$rt" 2>/dev/null || printf 1)"
+  [ -n "$tier" ] || tier=1
+  case "$tier" in
+    3) info "Isolation: microVM (${rt##*/}) — its own guest kernel behind a KVM boundary." ;;
+    2) info "Isolation: gVisor (${rt##*/}) — synthetic /proc, /sys and syscalls over a shared host kernel." ;;
+    *)
+      info "Isolation: plain container — shares the host kernel. Copy-not-mount, loopback-only
+     SSH and the fingerprint masks all still apply."
+      if is_linux; then
+        info "     For a per-box kernel boundary, add a microVM runtime and create the box again.
+     'isopod doctor' reports /dev/kvm and the runtimes your machine can use."
+      fi
+      ;;
+  esac
+}
+
 harden_posture_note() { # harden_posture_note <level>
   case "$1" in
     off) info "Kernel hardening: OFF (--harden off) — engine defaults only." ;;

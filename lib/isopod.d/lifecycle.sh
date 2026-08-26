@@ -327,6 +327,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   esac
   resolve_egress "$ENGINE"
   egress_preflight "$ENGINE"
+  ensure_box_network "$name" "$ENGINE"
   runtime_preflight "$ENGINE"
 
   # Everything that can still legitimately fail happens BEFORE the container is
@@ -549,6 +550,7 @@ cmd_migrate() {
   newtag=$(build_image "$base" "$dev" "$nested") ||
     die "image build failed in the target store (workspace kept at $ws)"
 
+  ensure_box_network "$name" "$ENGINE"
   local BOX_SUDO BOX_HARDEN BOX_DISK BOX_NESTED BOX_SECRETS BOX_GUEST_EGRESS BOX_GUEST_EGRESS_ALLOW BOX_HOST_PORTS
   BOX_SUDO="$(meta_get "$name" sudo 2>/dev/null || true)"
   [ -n "$BOX_SUDO" ] || BOX_SUDO=1
@@ -740,6 +742,7 @@ cmd_reconfigure() {
   # Re-check egress enforcement + network before recreating (the profile may have
   # changed since create; no-op unless `egress lan-deny` is configured).
   egress_preflight "$ENGINE"
+  ensure_box_network "$name" "$ENGINE"
   # Re-check the runtime too — the profile's `runtime` directive may have changed.
   runtime_preflight "$ENGINE"
 
@@ -896,10 +899,12 @@ flatpak_access_hint() { # flatpak_access_hint <app-id>
   fi
   warn "the '$id' Flatpak does not appear to have access to your home dir.
          The Remote-SSH extension needs to read ~/.ssh/config and isopod's keys.
-         Grant read access with:
-           flatpak override --user --filesystem=\$HOME/.ssh:ro \\
+         Grant read access, then restart the editor and retry:
+           flatpak override --user --filesystem=\$HOME/.ssh/config:ro \\
              --filesystem=$CONFIG_DIR:ro $id
-         then restart VSCodium and retry."
+         That grants the config FILE, not all of ~/.ssh, so your other private keys
+         stay outside the editor sandbox. isopod's own per-box keys live under
+         $CONFIG_DIR and are the only keys the extension needs."
 }
 
 # Administrative root shell in a box, over SSH with the host-held root key.

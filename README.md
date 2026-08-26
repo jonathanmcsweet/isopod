@@ -11,7 +11,7 @@
 - Hardening options to prevent hardware fingerprinting and security exploits
 - Copying and exporting to your local host instead of binding to your personal folders
 - MicroVMs and allow-lists when extra hardening is needed
-- Completely offline containers if desired
+- Completely offline boxes, which need no host setup at all
 - Box-local data volumes, and optional nested containers, without mounting anything from your host
 
 ## Install
@@ -53,6 +53,9 @@ isopod code myproj          # opens VSCodium connected to the container
 
 # Sandbox from an explicit allowlist of host folders to copy
 isopod create scratch --copy ~/src/lib-a --copy ~/notes/specs --color '#b3261e'
+
+# Sandbox with no route off your machine at all (needs no host setup)
+isopod create review --offline --copy ~/src/thing
 isopod code scratch --app cursor
 
 # Day-to-day
@@ -109,6 +112,14 @@ An isopod box puts your code and the agent behind several layers you can dial up
 Isopod also masks the host-revealing `/proc` and `/sys` paths that fingerprinting tools read, runs each box under a microVM with its own kernel when one is available, and can force all network egress through a host-side allow-list.
 
 A microVM runtime can hide things like CPU identity, the kernel build string, and host RAM, all of which can't be done with your standard podman or docker container. The full picture (the isolation model, the fingerprint masks, what still leaks, the runtime tiers, the egress modes, and the kernel-hardening profile) lives in **[docs/security-model.md](docs/security-model.md)**.
+
+### What you actually get on your machine
+
+Isopod aims each box at the strongest setup your host can run and steps down when it can't, warning each time: microVM to gVisor to a plain container, and egress allow-list to lan-deny to an open network. The two strong tiers have host requirements, a microVM needs `/dev/kvm` with kata or krun registered with your engine, and host-enforced egress needs a rootful podman or docker, so on a stock rootless podman with no microVM runtime you get a plain shared-kernel container on an open network.
+
+That box still copies rather than mounts, still reaches you over key-only loopback SSH, and still has the fingerprint masks, which is the layer most people want and the reason the defaults degrade instead of refusing to start. It is the deliberate trade: a box you can run today beats isolation you never finish installing. To see where your machine stands and what to install to move up a tier, run `isopod doctor`; `isopod list` and `isopod info` mark any box whose isolation was stepped down, so a degraded box stays visible long after the warning at create scrolls past.
+
+For a strong boundary with no host setup at all, create the box offline: `isopod create review --offline --copy ~/src/thing`. It goes on a dedicated internal engine network, so `isopod code`, `shell`, `copy-in` and `export` all work as usual while nothing in the box can reach your LAN or the internet. Because the engine enforces it, in-box root cannot undo it, and because it needs no firewall, no root and no `/dev/kvm`, it is available on exactly the stock rootless setup where the other network modes degrade. It suits review, refactoring and analysis; an agent that needs to install packages or call an API needs a network, and `isopod host-port` can hand an offline box one specific service from your machine.
 
 ## Secrets
 

@@ -193,6 +193,39 @@ ensure_egress_network() { # ensure_egress_network <engine>
   fi
 }
 
+# The offline network (`isopod create --offline`): an internal bridge with no
+# route off the host.
+#
+# `--network none` is the obvious spelling and the wrong one: it leaves the box
+# with only loopback, so the published SSH port has nothing to forward to and
+# isopod, which drives a box entirely over SSH, can never reach it. An internal
+# network keeps the box reachable from the host while the engine denies it any
+# route outward, which is the combination an offline box actually needs.
+# Make sure a box's own network exists before it is recreated. Only offline boxes
+# need this: their internal network is created at create time, and a rebuild months
+# later would otherwise fail if it had been removed in between.
+ensure_box_network() { # ensure_box_network <name> <engine>
+  [ "$(meta_get "$1" offline 2>/dev/null || true)" = 1 ] || return 0
+  ensure_offline_network "$2"
+}
+
+ensure_offline_network() { # ensure_offline_network <engine>
+  local engine="$1"
+  if [ "$engine" = docker ]; then
+    docker network inspect "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1 && return 0
+  else
+    "$engine" network exists "$ISOPOD_OFFLINE_NET" 2>/dev/null && return 0
+  fi
+  info "Creating internal offline network '$ISOPOD_OFFLINE_NET' (no route off the host)..."
+  if [ "$engine" = docker ]; then
+    docker network create --internal "$ISOPOD_OFFLINE_NET" >/dev/null ||
+      die "could not create docker network '$ISOPOD_OFFLINE_NET'"
+  else
+    podman network create --internal "$ISOPOD_OFFLINE_NET" >/dev/null ||
+      die "could not create podman network '$ISOPOD_OFFLINE_NET'"
+  fi
+}
+
 # Is the host egress firewall loaded? 0 = loaded, 1 = not loaded, 2 = unknown
 # (nft missing, or reading it needs root we don't have — a false "not loaded"
 # would be misleading, so we report unknown instead).
@@ -497,17 +530,25 @@ egress_filter_regexes() {
       [ -n "${dom:-}" ] || continue
       case "$dom" in
         \*.*)
-          esc="${dom#\*.}"
-          esc="${esc//./\\.}"
+          esc="$(egress_regex_escape "${dom#\*.}")"
           printf '^.+\\.%s$\n' "$esc"
           ;;
         *)
-          esc="${dom//./\\.}"
+          esc="$(egress_regex_escape "$dom")"
           printf '^(.*\\.)?%s$\n' "$esc"
           ;;
       esac
     done <"$f"
   done
+}
+
+# Escape every character that is not a literal hostname character, so no entry can
+# put a regex metacharacter into the trusted filter file. `egress allow` validates
+# what it appends, but both allow-list files can also be edited by hand, and this
+# renderer is the one path they share. An entry with a stray metacharacter ends up
+# matching nothing rather than matching too much.
+egress_regex_escape() { # egress_regex_escape <text>
+  printf '%s' "$1" | sed 's/[^a-zA-Z0-9-]/\\&/g'
 }
 
 # Write the rendered filter file (deduped) to the host state dir.
@@ -773,6 +814,13 @@ resolve_egress() { # resolve_egress <engine>
 # reconfigure time. Reads the resolved mode and the degrade flag resolve_egress set.
 egress_posture_note() { # egress_posture_note <name>
   local name="$1"
+  # An offline box has no route out, so no egress verdict applies to it.
+  if [ "$(meta_get "$name" offline 2>/dev/null || true)" = 1 ]; then
+    info "Network: OFFLINE — '$name' is on an internal network with no route off this host.
+     Engine-enforced, so nothing in the box can undo it. Reach one host service with:
+       isopod host-port add $name <port>"
+    return 0
+  fi
   case "$(active_egress)" in
     allow-list) info "Network: egress allow-list ACTIVE — only allow-listed hosts reachable (host-filtered)." ;;
     lan-deny) info "Network: egress lan-deny ACTIVE — LAN/host/metadata blocked, public internet reachable." ;;
@@ -1187,7 +1235,9 @@ egress_lan_denied() { # egress_lan_denied <name> [count]
     die "$name is not running (start it with: isopod start $name)"
 
   local out
-  out="$(root_ssh "$name" -- "sh -s -- denied $n" <"$helper" 2>/dev/null || true)"
+  # Box-sourced report, so strip control characters before any of it reaches the
+  # host terminal (same treatment as fetch/remap/export output).
+  out="$(root_ssh "$name" -- "sh -s -- denied $n" <"$helper" 2>/dev/null | sanitize_stream || true)"
   if [ -z "$out" ]; then
     printf 'nothing blocked recently for %s\n' "$name"
     if box_is_stale "$name" 2>/dev/null; then
@@ -1328,6 +1378,12 @@ egress_allow() { # egress_allow <domain>
   case "$dom" in
     "" | *[!a-zA-Z0-9.*-]*) die "invalid domain: '$dom' (letters, digits, '.', '-', leading '*.' only)" ;;
   esac
+  # '*' is a regex metacharacter in the rendered filter and only means anything as
+  # the leading '*.' wildcard. Anywhere else it silently widens the match
+  # ('foo*.com' would become 'fo' followed by any number of 'o').
+  case "${dom#\*.}" in
+    *\**) die "invalid domain: '$dom' ('*' is only allowed as a leading '*.')" ;;
+  esac
   mkdir -p "$CONFIG_DIR"
   if [ -f "$USER_EGRESS_ALLOWLIST" ] && grep -qxF "$dom" "$USER_EGRESS_ALLOWLIST" 2>/dev/null; then
     info "'$dom' is already in your allow-list ($USER_EGRESS_ALLOWLIST)"
@@ -1387,6 +1443,12 @@ egress_allowlist_show() {
 # which mechanism is doing it.
 box_egress_posture() { # box_egress_posture <name>
   local mode degraded guest guest_on=0
+  # An offline box has no route out at all, so no egress mode applies and none of
+  # the host-firewall verdicts below mean anything for it. Say what it is.
+  if [ "$(meta_get "$1" offline 2>/dev/null || true)" = 1 ]; then
+    printf 'OFFLINE (internal network, no route off the host; engine-enforced)'
+    return 0
+  fi
   mode="$(meta_get "$1" egress 2>/dev/null || true)"
   degraded="$(meta_get "$1" egress_degraded 2>/dev/null || printf 0)"
   guest="$(meta_get "$1" guest_egress 2>/dev/null || true)"

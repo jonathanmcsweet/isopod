@@ -47,6 +47,13 @@ INFO
   rmi)     exit 0 ;;                         # drop old snapshot
   start|stop) exit 0 ;;
   rm)      exit 0 ;;
+  network) # Report only the offline network as missing, so --offline exercises
+           # its create path. Every other network call keeps the old behaviour
+           # (present), which is what the egress tests expect.
+           case "$1" in
+             exists) [ "$2" = isopod-offline ] && exit 1; exit 0 ;;
+             *)      exit 0 ;;
+           esac ;;
   *)       exit 0 ;;
 esac
 EOF
@@ -97,6 +104,12 @@ EOF
   assert_output --partial "invalid name"
 }
 
+@test "create refuses --offline with --repo (nothing to clone over)" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --repo https://x/y
+  assert_failure
+  assert_output --partial "has nothing to clone from"
+}
+
 @test "create refuses both --repo and --copy together" {
   run "$ISOPOD_ROOT/isopod" create demo --repo https://x/y --copy /tmp
   assert_failure
@@ -113,6 +126,40 @@ EOF
   run "$ISOPOD_ROOT/isopod" create demo --color neon
   assert_failure
   assert_output --partial "unknown color"
+}
+
+# ---- offline boxes -----------------------------------------------------------
+@test "create --offline runs the box on an internal network, still published on loopback" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --color teal
+  assert_success
+  assert_stub_called 'podman network create --internal isopod-offline'
+  assert_stub_called 'podman run .*--network isopod-offline'
+  # --network none would leave the box with only loopback, so the published SSH
+  # port would have nothing to forward to and isopod could never reach the box.
+  assert_stub_not_called 'podman run .*--network none'
+  assert_stub_called 'podman run .*127\.0\.0\.1::2222'
+  assert_stub_called 'podman run .*--cap-drop NET_RAW'
+  run grep '^offline=1$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+@test "create --offline says so in the summary" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline
+  assert_success
+  assert_output --partial "OFFLINE"
+}
+
+@test "a normal box is not put on the offline network" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_not_called 'podman run .*--network isopod-offline'
+  assert_stub_not_called 'podman network create --internal'
+}
+
+@test "create states the isolation tier the box actually got" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_output --partial "Isolation:"
 }
 
 # ---- full create flow --------------------------------------------------------
