@@ -10,7 +10,11 @@
 #   * Point ISOPOD_CONFIG_DIR and HOME at a per-test tmp dir so nothing
 #     touches the real machine and tests are hermetic.
 
-ISOPOD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# -P resolves symlinks, matching what the isopod script computes for itself
+# (_resolve_script_dir uses `cd -P`). On an ostree distro (Silverblue, Kinoite,
+# Bazzite) /home is a symlink to /var/home, so the logical path disagrees with the
+# physical one and every test comparing a path against isopod's output fails.
+ISOPOD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 export ISOPOD_ROOT
 
 load_libs() {

@@ -160,18 +160,21 @@ fi
 # --- D. identity rewrite (remap) --------------------------------------------
 hdr "D. Identity rewrite (isopod remap)"
 if iso create hv-remap >/tmp/hv-remap.log 2>&1; then
+  # The repo has to be AT the workspace root: that is where isopod looks for the
+  # box's git identity, and a repo in a subdirectory leaves it undetectable.
   iso shell hv-remap -- sh -c '
-    cd /home/dev/workspace && git init -q r && cd r &&
+    cd /home/dev/workspace && git init -q &&
     git config user.email box@isopod && git config user.name "Box" &&
     echo x > a && git add a && git commit -qm one' >/dev/null 2>&1
   # A commit git accepts but the old rewriter skipped: an author with no name.
   iso shell hv-remap -- sh -c '
-    cd /home/dev/workspace/r &&
+    cd /home/dev/workspace &&
+    B=$(git rev-parse --abbrev-ref HEAD) &&
     T=$(git rev-parse HEAD^{tree}) && P=$(git rev-parse HEAD) &&
     C=$(printf "tree %s\nparent %s\nauthor <box@isopod> 1700000000 +0000\ncommitter <box@isopod> 1700000000 +0000\n\nnoname\n" "$T" "$P" | git hash-object --literally -t commit -w --stdin) &&
-    git update-ref refs/heads/master "$C"' >/dev/null 2>&1
+    git update-ref "refs/heads/$B" "$C"' >/dev/null 2>&1
   if iso fetch hv-remap >/dev/null 2>&1 &&
-    iso remap hv-remap --force --name "Real Name" --email real@example.com >/tmp/hv-remap-run.log 2>&1; then
+    iso remap hv-remap --force --old-email box@isopod --name "Real Name" --email real@example.com >/tmp/hv-remap-run.log 2>&1; then
     ok "remap completed against a box with an unusual commit"
     if grep -rqi 'box@isopod' /tmp/hv-remap-run.log; then
       NOTES+=("check /tmp/hv-remap-run.log: box identity still mentioned")
