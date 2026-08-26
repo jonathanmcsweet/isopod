@@ -141,6 +141,10 @@ EOF
   assert_stub_called 'podman run .*--cap-drop NET_RAW'
   run grep '^offline=1$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
   assert_success
+  # Guest egress has nothing to filter here and cannot work: its ruleset needs a
+  # default gateway, and an internal network has none.
+  run grep '^guest_egress=off$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
 }
 
 @test "create --offline says so in the summary" {

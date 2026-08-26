@@ -183,7 +183,19 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   local box_guest_egress="${BOX_GUEST_EGRESS:-}"
   [ -n "$box_guest_egress" ] || box_guest_egress="$(meta_get "$name" guest_egress 2>/dev/null || true)"
   [ -n "$box_guest_egress" ] || box_guest_egress=off
-  if [ "$box_guest_egress" = on ] && [ -z "$(active_egress)" ] && is_microvm_runtime; then
+  # Offline (--offline): create sets BOX_OFFLINE; on reconfigure/upgrade it is
+  # unset, so the box keeps the posture it was created with rather than quietly
+  # regaining a network on the next rebuild.
+  local box_offline="${BOX_OFFLINE:-}"
+  [ -n "$box_offline" ] || box_offline="$(meta_get "$name" offline 2>/dev/null || true)"
+  [ -n "$box_offline" ] || box_offline=0
+  # Guest egress filters a box that HAS a network, so it has nothing to do on an
+  # offline one, and asking for it there is actively harmful: the in-guest ruleset
+  # needs a default gateway for its host-control-path exemption, an internal
+  # network has none, and the entrypoint then fails closed and the box comes up
+  # with no sshd at all. cmd_create also records guest_egress=off for an offline
+  # box; this covers a rebuild from meta written before that.
+  if [ "$box_guest_egress" = on ] && [ "$box_offline" != 1 ] && [ -z "$(active_egress)" ] && is_microvm_runtime; then
     RUN_ARGS+=(-e "ISOPOD_GUEST_EGRESS=1" -e "ISOPOD_GUEST_EGRESS_DNS=$ISOPOD_EGRESS_DNS")
     # Private-space exemptions (isopod egress lan-allow), comma-separated. Stored
     # per box, so a box keeps them across stop/start and reconfigure. The
@@ -216,12 +228,6 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   local box_nested="${BOX_NESTED:-}"
   [ -n "$box_nested" ] || box_nested="$(meta_get "$name" nested 2>/dev/null || true)"
   [ "$box_nested" = 1 ] && RUN_ARGS+=(-e "ISOPOD_NESTED=1")
-  # Offline (--offline): create sets BOX_OFFLINE; on reconfigure/upgrade it is
-  # unset, so the box keeps the posture it was created with rather than quietly
-  # regaining a network on the next rebuild.
-  local box_offline="${BOX_OFFLINE:-}"
-  [ -n "$box_offline" ] || box_offline="$(meta_get "$name" offline 2>/dev/null || true)"
-  [ -n "$box_offline" ] || box_offline=0
   [ -n "$memory" ] && RUN_ARGS+=(--memory "$memory")
   [ -n "$cpus" ] && RUN_ARGS+=(--cpus "$cpus")
   # Anti-fingerprinting hardening from the hardening profile.

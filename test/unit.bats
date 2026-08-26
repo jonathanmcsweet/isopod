@@ -1465,6 +1465,26 @@ EOF
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" == *"--network isopod-offline"* ]]
 }
+# Found by live testing, not by stubs: guest egress defaults ON for a microVM box
+# and activates whenever host egress is off, which --offline sets. Its in-guest
+# ruleset needs the default gateway for the host control path exemption, an
+# internal network has none, and the entrypoint fails closed when it cannot find
+# one, so the box came up with no sshd and create rolled back.
+# setup_run_args_box pins is_microvm_runtime and an empty active_egress, which is
+# exactly the state that triggered this: guest egress activates on a microVM box
+# whenever host egress is off, and --offline sets host egress off.
+@test "an offline box never asks for guest egress (rebuild reads it from meta)" {
+  # guest_egress=on is what a box created before this fix has recorded.
+  setup_run_args_box obox 'harden=off' 'sudo=0' 'guest_egress=on' 'offline=1'
+  build_run_args obox localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"--network isopod-offline"* ]]
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+@test "an offline box never asks for guest egress (create path)" {
+  setup_run_args_box obox 'harden=off' 'sudo=0' 'guest_egress=on'
+  BOX_OFFLINE=1 build_run_args obox localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
 @test "build_run_args refuses a --network in ISOPOD_RUN_ARGS for an offline box" {
   ENGINE=podman
   # A benign value, so this reaches the conflict check rather than the

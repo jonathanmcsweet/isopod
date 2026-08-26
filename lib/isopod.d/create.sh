@@ -401,6 +401,13 @@ cmd_create() {
     egress_explicitly_set &&
       warn "--offline overrides the configured egress mode: an offline box has no route out to filter"
     export ISOPOD_EGRESS=off
+    # Guest egress must go off too, and not only because there is nothing left to
+    # filter. Its in-guest ruleset needs the default gateway for the host control
+    # path exemption, an internal network has no gateway, and the entrypoint fails
+    # closed when it cannot find one, so the box would come up with no sshd.
+    [ "$BOX_GUEST_EGRESS" = on ] && [ -n "$guest_egress_opt" ] &&
+      warn "--offline turns --guest-egress off: an offline box has no route out to filter"
+    BOX_GUEST_EGRESS=off
     ensure_offline_network "$ENGINE"
   fi
   # Verify the engine can enforce egress isolation and set up its network before
