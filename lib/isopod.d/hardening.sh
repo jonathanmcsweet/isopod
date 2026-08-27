@@ -263,6 +263,22 @@ is_microvm_runtime() {
 # box has. isopod degrades on purpose rather than refusing to start, because a box
 # you can run beats isolation you never finish installing, and that trade only
 # works if the result stays legible afterwards.
+# What isolation a BOX actually got, for `isopod info`. Reads the runtime recorded
+# at create time, not the active one, so it stays true when the config changes
+# underneath an existing box.
+box_runtime_posture() { # box_runtime_posture <name>
+  local rt tier
+  rt="$(meta_get "$1" runtime 2>/dev/null || true)"
+  [ -n "$rt" ] || rt=container
+  tier="$(runtime_tier "$rt" 2>/dev/null || printf 1)"
+  [ -n "$tier" ] || tier=1
+  case "$tier" in
+    3) printf 'microVM (%s); own guest kernel behind a KVM boundary' "${rt##*/}" ;;
+    2) printf 'gVisor (%s); synthetic /proc, /sys and syscalls over a shared host kernel' "${rt##*/}" ;;
+    *) printf 'plain container; shares the host kernel (isopod doctor reports what this machine can add)' ;;
+  esac
+}
+
 runtime_posture_note() {
   local rt tier
   rt="$(active_runtime 2>/dev/null || true)"

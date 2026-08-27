@@ -1317,6 +1317,31 @@ seed_secret() { # seed_secret <name> <value>
   refute_output --partial '"name"'
 }
 
+# Confirming a box's isolation tier used to mean grepping its meta file: info
+# reported the egress posture but never which boundary the box actually got.
+@test "info reports the isolation tier a box was built with" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal --runtime krun
+  run "$ISOPOD_ROOT/isopod" info demo
+  assert_success
+  assert_output --partial 'isolation : microVM (krun)'
+}
+
+@test "info reports a plain container as sharing the host kernel" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal --container
+  run "$ISOPOD_ROOT/isopod" info demo
+  assert_success
+  assert_output --partial 'isolation : plain container'
+}
+
+# The tier follows the runtime RECORDED for the box, so a config change after the
+# fact cannot make info claim a boundary this box never got.
+@test "info reads the isolation tier from the box, not the active runtime" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal --container
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" info demo
+  assert_success
+  assert_output --partial 'isolation : plain container'
+}
+
 @test "egress status --json emits a valid JSON object with the contract fields" {
   command -v python3 >/dev/null 2>&1 || skip "python3 not available"
   run bash -c "'$ISOPOD_ROOT/isopod' egress status --json 2>/dev/null | python3 -m json.tool"
