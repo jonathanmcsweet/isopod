@@ -398,15 +398,15 @@ cmd_create() {
     [ "$ENGINE" = container ] &&
       die "--offline is not supported on the Apple 'container' engine, which has no internal network.
      Use podman or docker for an offline box."
-    # A microVM reaches its guest through passt, which cannot forward the published
-    # SSH port when the container netns has no gateway, and an internal network has
-    # none. The box boots and sshd listens, but nothing can reach it, so create
-    # fails with the box looking healthy in its own logs. Refuse up front and name
-    # the trade rather than leave that to be debugged.
-    if is_microvm_runtime; then
-      die "--offline needs a plain container for now. A microVM box reaches its guest through
-     passt, which cannot forward the SSH port on a network with no gateway, so the box
-     would boot with sshd running and stay unreachable.
+    # A microVM reaches its guest through passt, which picks its template interface
+    # by following the container's default route. An internal network gets one only
+    # where the engine can install static routes; without it the box boots, sshd
+    # listens, and nothing can reach it. Refuse up front and name the trade rather
+    # than leave a box that looks healthy in its own logs to be debugged.
+    if is_microvm_runtime && ! offline_net_routable "$ENGINE"; then
+      die "--offline needs a plain container on $ENGINE. A microVM box reaches its guest
+     through passt, which needs a default route that $ENGINE cannot put on an internal
+     network, so the box would boot with sshd running and stay unreachable.
      Add --container to trade the per-box kernel boundary for the network one:
        isopod create $name --offline --container
      Or drop --offline and keep the microVM."
@@ -414,10 +414,9 @@ cmd_create() {
     egress_explicitly_set &&
       warn "--offline overrides the configured egress mode: an offline box has no route out to filter"
     export ISOPOD_EGRESS=off
-    # Guest egress must go off too, and not only because there is nothing left to
-    # filter. Its in-guest ruleset needs the default gateway for the host control
-    # path exemption, an internal network has no gateway, and the entrypoint fails
-    # closed when it cannot find one, so the box would come up with no sshd.
+    # Guest egress goes off too: its in-guest ruleset filters the route out, and an
+    # offline box has none. Leaving it on would also load a ruleset whose one job is
+    # blocking private ranges the box cannot reach anyway.
     [ "$BOX_GUEST_EGRESS" = on ] && [ -n "$guest_egress_opt" ] &&
       warn "--offline turns --guest-egress off: an offline box has no route out to filter"
     BOX_GUEST_EGRESS=off

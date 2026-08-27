@@ -147,11 +147,11 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         out --repo, which would have nothing to clone from:
                         copy the work in with --copy instead. To reach one host
                         service from an offline box, use 'isopod host-port'.
-                        Needs --container for now: a microVM reaches its guest
-                        through passt, which cannot forward the SSH port on a
-                        network with no gateway, so the box would boot and stay
-                        unreachable. isopod refuses that pair rather than let it
-                        happen.
+                        A microVM box needs an engine that can put a default
+                        route on an internal network (podman 5 and later), which
+                        is what passt follows to reach the guest. Where the
+                        engine cannot, isopod refuses the pair rather than leave
+                        you a box that boots and stays unreachable.
   --dev                 Add the dev/test toolchain (nested podman/docker, the
                         docker group, shellcheck/shfmt/pexpect/nftables) so the
                         box can run isopod's own test suite. Off by default —

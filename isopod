@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.8.0"
+ISOPOD_VERSION="3.9.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -139,6 +139,12 @@ ISOPOD_EGRESS_RULESET="${ISOPOD_EGRESS_RULESET:-$ISOPOD_DIR/security/egress-host
 # no host firewall and no rootful engine, which makes it the one strong network
 # boundary a stock rootless install can reach.
 ISOPOD_OFFLINE_NET="${ISOPOD_OFFLINE_NET:-isopod-offline}"
+# The offline network's subnet and gateway. Pinned rather than left to the engine
+# because the usual auto-allocation (10.89.0.0/24) sits inside Mullvad's tunnel
+# range (10.64.0.0/10). 10.201.0.0/24 clears that and Tailscale's 100.64.0.0/10.
+# Override both together if it collides with your own network.
+ISOPOD_OFFLINE_SUBNET="${ISOPOD_OFFLINE_SUBNET:-10.201.0.0/24}"
+ISOPOD_OFFLINE_GATEWAY="${ISOPOD_OFFLINE_GATEWAY:-}"
 
 # macOS host-level egress (pf). When boxes run on a routable vmnet subnet (Apple
 # `container` / vmnet), egress is enforced with pf on the Mac HOST — outside every

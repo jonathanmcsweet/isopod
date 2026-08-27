@@ -52,6 +52,13 @@ INFO
            # (present), which is what the egress tests expect.
            case "$1" in
              exists) [ "$2" = isopod-offline ] && exit 1; exit 0 ;;
+             # `network create --help` probes for --route. Advertise it like
+             # podman 5; STUB_NO_ROUTE hides it to stand in for docker/podman 4.
+             create) case "$2" in
+                       --help) [ -n "${STUB_NO_ROUTE:-}" ] ||
+                                 echo '      --route stringArray  static routes' ;;
+                     esac
+                     exit 0 ;;
              *)      exit 0 ;;
            esac ;;
   *)       exit 0 ;;
@@ -132,7 +139,13 @@ EOF
 @test "create --offline runs the box on an internal network, still published on loopback" {
   run "$ISOPOD_ROOT/isopod" create demo --offline --color teal
   assert_success
-  assert_stub_called 'podman network create --internal isopod-offline'
+  assert_stub_called 'podman network create --internal --subnet 10\.201\.0\.0/24 --gateway 10\.201\.0\.1'
+  # passt follows the default route to find the guest; the engine still drops
+  # anything the bridge tries to forward outward.
+  assert_stub_called 'podman network create .*--route 0\.0\.0\.0/0,10\.201\.0\.1'
+  # An offline box resolves no names, so the engine's resolver stays off rather
+  # than the boundary resting on it declining to forward queries onward.
+  assert_stub_called 'podman network create .*--disable-dns'
   assert_stub_called 'podman run .*--network isopod-offline'
   # --network none would leave the box with only loopback, so the published SSH
   # port would have nothing to forward to and isopod could never reach the box.
@@ -141,25 +154,77 @@ EOF
   assert_stub_called 'podman run .*--cap-drop NET_RAW'
   run grep '^offline=1$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
   assert_success
-  # Guest egress has nothing to filter here and cannot work: its ruleset needs a
-  # default gateway, and an internal network has none.
+  # Guest egress filters the route out, and an offline box has none.
   run grep '^guest_egress=off$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
   assert_success
 }
 
 # Found on a real krun host: the box booted, sshd listened, and nothing could
-# reach it, because passt cannot forward the published port without a gateway.
-@test "create --offline is refused on a microVM runtime, naming --container" {
+# reach it, because passt follows the default route to pick its template
+# interface and an internal network installs none on its own.
+@test "create --offline is refused on a microVM runtime the engine cannot route" {
+  export STUB_NO_ROUTE=1
   run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
   assert_failure
   assert_output --partial "needs a plain container"
   assert_output --partial "--container"
 }
 
+@test "create --offline is allowed on a microVM runtime once the engine can route" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
+  assert_success
+  assert_stub_called 'podman network create .*--route 0\.0\.0\.0/0,10\.201\.0\.1'
+  assert_stub_called 'podman run .*--network isopod-offline'
+}
+
 @test "create --offline says so in the summary" {
   run "$ISOPOD_ROOT/isopod" create demo --offline
   assert_success
   assert_output --partial "OFFLINE"
+}
+
+# A docker stub reporting the offline network as missing, so --offline exercises
+# its create path there too.
+offline_docker_stub() {
+  cat > "$STUB_DIR/docker" <<'EOF'
+#!/usr/bin/env bash
+echo "docker $*" >> "$STUB_LOG"
+cmd="$1"; shift || true
+case "$cmd" in
+  info)    exit 0 ;;
+  image)   exit 1 ;;
+  build)   exit 0 ;;
+  run)     echo "deadbeefcontainerid"; exit 0 ;;
+  port)    echo "127.0.0.1:45678" ;;
+  inspect) echo "running" ;;
+  network) case "$1" in
+             inspect) [ "$2" = isopod-offline ] && exit 1; exit 0 ;;
+             *)       exit 0 ;;
+           esac ;;
+  start|stop|rm|rmi|commit) exit 0 ;;
+  *)       exit 0 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/docker"
+}
+
+# docker has neither --disable-dns nor --route, so the offline network is created
+# with the flags it does have.
+@test "create --offline on docker uses only the flags docker has" {
+  offline_docker_stub
+  run "$ISOPOD_ROOT/isopod" create demo --offline --engine docker
+  assert_success
+  assert_stub_called 'docker network create --internal --subnet 10\.201\.0\.0/24 --gateway 10\.201\.0\.1 isopod-offline'
+  assert_stub_not_called 'docker network create .*--disable-dns'
+  assert_stub_not_called 'docker network create .*--route'
+  assert_stub_called 'docker run .*--network isopod-offline'
+}
+
+@test "create --offline is refused under a microVM runtime on docker" {
+  offline_docker_stub
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun --engine docker
+  assert_failure
+  assert_output --partial "needs a plain container on docker"
 }
 
 @test "a normal box is not put on the offline network" {

@@ -209,21 +209,68 @@ ensure_box_network() { # ensure_box_network <name> <engine>
   ensure_offline_network "$2"
 }
 
+# The offline network's gateway: explicit, or the .1 of a /24 subnet.
+offline_gateway() {
+  [ -n "$ISOPOD_OFFLINE_GATEWAY" ] && {
+    printf '%s' "$ISOPOD_OFFLINE_GATEWAY"
+    return 0
+  }
+  case "$ISOPOD_OFFLINE_SUBNET" in
+    *.0/24) printf '%s1' "${ISOPOD_OFFLINE_SUBNET%0/24}" ;;
+    *) die "set ISOPOD_OFFLINE_GATEWAY: no gateway can be derived from ISOPOD_OFFLINE_SUBNET ($ISOPOD_OFFLINE_SUBNET)" ;;
+  esac
+}
+
+# Can this engine put a default route on an internal network? podman 5's --route
+# can; docker has no equivalent. An internal network defines a gateway but
+# installs no default route, since withholding it is what makes the network
+# internal, and passt picks its template interface by following that route. So
+# without --route a microVM's guest comes up unreachable, which is the pair
+# cmd_create refuses.
+offline_net_routable() { # offline_net_routable <engine>
+  [ "$1" = docker ] && return 1
+  "$1" network create --help 2>/dev/null | grep -q -- '--route'
+}
+
+offline_net_exists() { # offline_net_exists <engine>
+  if [ "$1" = docker ]; then
+    docker network inspect "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1
+  else
+    "$1" network exists "$ISOPOD_OFFLINE_NET" 2>/dev/null
+  fi
+}
+
+# Matched on the route text, not an inspect field, so this reads the same across
+# engine versions whose JSON schema differs.
+offline_net_has_route() { # offline_net_has_route <engine>
+  "$1" network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null | grep -q '0\.0\.0\.0/0'
+}
+
 ensure_offline_network() { # ensure_offline_network <engine>
-  local engine="$1"
-  if [ "$engine" = docker ]; then
-    docker network inspect "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1 && return 0
-  else
-    "$engine" network exists "$ISOPOD_OFFLINE_NET" 2>/dev/null && return 0
+  local engine="$1" gw
+  gw="$(offline_gateway)"
+  local -a args=(--internal --subnet "$ISOPOD_OFFLINE_SUBNET" --gateway "$gw")
+  # An offline box resolves no names, and turning the engine's DNS off keeps the
+  # boundary from resting on that resolver declining to forward queries onward.
+  [ "$engine" = docker ] || args+=(--disable-dns)
+  offline_net_routable "$engine" && args+=(--route "0.0.0.0/0,$gw")
+
+  if offline_net_exists "$engine"; then
+    # A network from before the default route still isolates a plain container,
+    # but leaves a microVM guest unreachable. Recreate it. The engine refuses
+    # while a box is attached, which is the check we want.
+    if ! offline_net_routable "$engine" || offline_net_has_route "$engine"; then
+      return 0
+    fi
+    info "Recreating '$ISOPOD_OFFLINE_NET': it predates the offline default route."
+    "$engine" network rm "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1 ||
+      die "'$ISOPOD_OFFLINE_NET' needs recreating so microVM boxes can reach their guest, but a box is still on it.
+     Stop those boxes, then: $engine network rm $ISOPOD_OFFLINE_NET"
   fi
+
   info "Creating internal offline network '$ISOPOD_OFFLINE_NET' (no route off the host)..."
-  if [ "$engine" = docker ]; then
-    docker network create --internal "$ISOPOD_OFFLINE_NET" >/dev/null ||
-      die "could not create docker network '$ISOPOD_OFFLINE_NET'"
-  else
-    podman network create --internal "$ISOPOD_OFFLINE_NET" >/dev/null ||
-      die "could not create podman network '$ISOPOD_OFFLINE_NET'"
-  fi
+  "$engine" network create "${args[@]}" "$ISOPOD_OFFLINE_NET" >/dev/null ||
+    die "could not create $engine network '$ISOPOD_OFFLINE_NET'"
 }
 
 # Is the host egress firewall loaded? 0 = loaded, 1 = not loaded, 2 = unknown

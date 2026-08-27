@@ -468,15 +468,25 @@ isopod create review --offline --container --copy ~/src/thing
 isopod host-port add review 11434          # optionally, one host service (a local Ollama)
 ```
 
-**It needs `--container` for now.** A microVM box reaches its guest through passt,
-which cannot forward the published SSH port when the container's network namespace
-has no gateway, and an internal network has none. The box boots, sshd listens, and
-nothing can reach it. `isopod create` refuses `--offline` under a microVM runtime
-and names this rather than leaving you to debug a box that looks healthy in its own
-logs. So today offline is a choice between the network boundary and the per-box
-kernel boundary, not both. Closing that gap means enforcing the drop inside the
-guest instead of at the engine, which is a weaker boundary (guest root could remove
-it) and is the reason it is not done yet.
+**microVM boxes need podman 5 or later.** A microVM reaches its guest through passt,
+which picks its template interface by following the container's default route. An
+internal network defines a gateway but installs no default route, since withholding
+that route is what makes the network internal, so isopod creates the offline network
+with an explicit `--route 0.0.0.0/0` via the gateway. Adding the route leaves the
+isolation intact: the engine still drops anything the bridge tries to forward
+outward. On an engine that cannot add it (docker, older podman), `isopod create`
+refuses `--offline` under a microVM runtime and names the trade rather than leaving
+you to debug a box that looks healthy in its own logs.
+
+That default route points at the bridge gateway, so an offline box can address the
+host at that one address. Nothing routes past it, and isopod turns the engine's DNS
+off on this network so the address answers nothing by default. It is the same
+residual the guest egress ruleset already exempts for the same reason.
+
+On docker the network is the same internal bridge with the same subnet and gateway,
+but docker has no per-network switch for its embedded resolver at `127.0.0.11`, which
+the daemon answers from outside the network. Treat name resolution as reachable from
+an offline docker box, and use podman where that matters.
 
 **How it works.** The box goes on a dedicated **internal** engine network
 (`isopod-offline`, created on first use). It gets an interface, so the loopback SSH
