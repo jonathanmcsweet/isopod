@@ -398,6 +398,19 @@ cmd_create() {
     [ "$ENGINE" = container ] &&
       die "--offline is not supported on the Apple 'container' engine, which has no internal network.
      Use podman or docker for an offline box."
+    # A microVM reaches its guest through passt, which cannot forward the published
+    # SSH port when the container netns has no gateway, and an internal network has
+    # none. The box boots and sshd listens, but nothing can reach it, so create
+    # fails with the box looking healthy in its own logs. Refuse up front and name
+    # the trade rather than leave that to be debugged.
+    if is_microvm_runtime; then
+      die "--offline needs a plain container for now. A microVM box reaches its guest through
+     passt, which cannot forward the SSH port on a network with no gateway, so the box
+     would boot with sshd running and stay unreachable.
+     Add --container to trade the per-box kernel boundary for the network one:
+       isopod create $name --offline --container
+     Or drop --offline and keep the microVM."
+    fi
     egress_explicitly_set &&
       warn "--offline overrides the configured egress mode: an offline box has no route out to filter"
     export ISOPOD_EGRESS=off

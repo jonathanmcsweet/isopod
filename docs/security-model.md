@@ -464,9 +464,19 @@ engine, no `/dev/kvm`. On a stock rootless podman, where `lan-deny` and `allow-l
 both degrade to an open network, this one still holds.
 
 ```sh
-isopod create review --offline --copy ~/src/thing
+isopod create review --offline --container --copy ~/src/thing
 isopod host-port add review 11434          # optionally, one host service (a local Ollama)
 ```
+
+**It needs `--container` for now.** A microVM box reaches its guest through passt,
+which cannot forward the published SSH port when the container's network namespace
+has no gateway, and an internal network has none. The box boots, sshd listens, and
+nothing can reach it. `isopod create` refuses `--offline` under a microVM runtime
+and names this rather than leaving you to debug a box that looks healthy in its own
+logs. So today offline is a choice between the network boundary and the per-box
+kernel boundary, not both. Closing that gap means enforcing the drop inside the
+guest instead of at the engine, which is a weaker boundary (guest root could remove
+it) and is the reason it is not done yet.
 
 **How it works.** The box goes on a dedicated **internal** engine network
 (`isopod-offline`, created on first use). It gets an interface, so the loopback SSH

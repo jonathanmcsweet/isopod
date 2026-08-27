@@ -147,6 +147,15 @@ EOF
   assert_success
 }
 
+# Found on a real krun host: the box booted, sshd listened, and nothing could
+# reach it, because passt cannot forward the published port without a gateway.
+@test "create --offline is refused on a microVM runtime, naming --container" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
+  assert_failure
+  assert_output --partial "needs a plain container"
+  assert_output --partial "--container"
+}
+
 @test "create --offline says so in the summary" {
   run "$ISOPOD_ROOT/isopod" create demo --offline
   assert_success
