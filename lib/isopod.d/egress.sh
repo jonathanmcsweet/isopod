@@ -206,7 +206,11 @@ ensure_egress_network() { # ensure_egress_network <engine>
 # later would otherwise fail if it had been removed in between.
 ensure_box_network() { # ensure_box_network <name> <engine>
   [ "$(meta_get "$1" offline 2>/dev/null || true)" = 1 ] || return 0
-  ensure_offline_network "$2"
+  # Only a Tier 3 box needs the default route, so read the runtime this box was
+  # built with rather than whatever is active now.
+  local needs_route=0
+  [ "$(runtime_tier "$(meta_get "$1" runtime 2>/dev/null || true)" 2>/dev/null)" = 3 ] && needs_route=1
+  ensure_offline_network "$2" "$needs_route"
 }
 
 # The offline network's gateway: explicit, or the .1 of a /24 subnet.
@@ -240,14 +244,25 @@ offline_net_exists() { # offline_net_exists <engine>
   fi
 }
 
-# Matched on the route text, not an inspect field, so this reads the same across
-# engine versions whose JSON schema differs.
-offline_net_has_route() { # offline_net_has_route <engine>
-  "$1" network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null | grep -q '0\.0\.0\.0/0'
+# Is an existing network missing what this version creates? Matched on the text,
+# not on inspect fields, so it reads the same across engine schema versions.
+offline_net_stale() { # offline_net_stale <engine>
+  local out
+  out="$("$1" network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null || true)"
+  # No default route on an engine that can add one: a microVM box cannot reach
+  # its guest over this network.
+  if offline_net_routable "$1" && ! printf '%s' "$out" | grep -q '0\.0\.0\.0/0'; then
+    return 0
+  fi
+  # Engine resolver still on, which this version turns off.
+  if [ "$1" != docker ] && printf '%s' "$out" | grep -q '"dns_enabled": *true'; then
+    return 0
+  fi
+  return 1
 }
 
-ensure_offline_network() { # ensure_offline_network <engine>
-  local engine="$1" gw
+ensure_offline_network() { # ensure_offline_network <engine> [needs-route]
+  local engine="$1" needs_route="${2:-0}" gw
   gw="$(offline_gateway)"
   local -a args=(--internal --subnet "$ISOPOD_OFFLINE_SUBNET" --gateway "$gw")
   # An offline box resolves no names, and turning the engine's DNS off keeps the
@@ -256,16 +271,19 @@ ensure_offline_network() { # ensure_offline_network <engine>
   offline_net_routable "$engine" && args+=(--route "0.0.0.0/0,$gw")
 
   if offline_net_exists "$engine"; then
-    # A network from before the default route still isolates a plain container,
-    # but leaves a microVM guest unreachable. Recreate it. The engine refuses
-    # while a box is attached, which is the check we want.
-    if ! offline_net_routable "$engine" || offline_net_has_route "$engine"; then
+    offline_net_stale "$engine" || return 0
+    info "Recreating '$ISOPOD_OFFLINE_NET' with this version's settings..."
+    if ! "$engine" network rm "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1; then
+      # Boxes are still on it, and an engine keeps a stopped box attached too, so
+      # stopping them would not help. Only a microVM box actually needs the newer
+      # network: a plain container runs fine on the older one, so say so and carry
+      # on rather than fail a create that would have worked.
+      [ "$needs_route" = 1 ] &&
+        die "a microVM box needs a default route on '$ISOPOD_OFFLINE_NET' to reach its guest, and boxes still on that network block recreating it.
+     Remove them (isopod rm <name>), or add --container to this box."
+      warn "keeping the existing '$ISOPOD_OFFLINE_NET': boxes are still on it, so this box misses the newer network settings"
       return 0
     fi
-    info "Recreating '$ISOPOD_OFFLINE_NET': it predates the offline default route."
-    "$engine" network rm "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1 ||
-      die "'$ISOPOD_OFFLINE_NET' needs recreating so microVM boxes can reach their guest, but a box is still on it.
-     Stop those boxes, then: $engine network rm $ISOPOD_OFFLINE_NET"
   fi
 
   info "Creating internal offline network '$ISOPOD_OFFLINE_NET' (no route off the host)..."

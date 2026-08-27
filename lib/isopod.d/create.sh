@@ -420,7 +420,9 @@ cmd_create() {
     [ "$BOX_GUEST_EGRESS" = on ] && [ -n "$guest_egress_opt" ] &&
       warn "--offline turns --guest-egress off: an offline box has no route out to filter"
     BOX_GUEST_EGRESS=off
-    ensure_offline_network "$ENGINE"
+    local needs_route=0
+    is_microvm_runtime && needs_route=1
+    ensure_offline_network "$ENGINE" "$needs_route"
   fi
   # Verify the engine can enforce egress isolation and set up its network before
   # the box starts (no-op unless `egress lan-deny` is configured).

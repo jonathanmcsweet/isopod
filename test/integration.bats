@@ -50,8 +50,23 @@ INFO
   network) # Report only the offline network as missing, so --offline exercises
            # its create path. Every other network call keeps the old behaviour
            # (present), which is what the egress tests expect.
+           # STUB_OFFLINE_NET: unset = missing (the create path). 'stale' = an
+           # older network (no route, resolver on). 'current' = already correct.
            case "$1" in
-             exists) [ "$2" = isopod-offline ] && exit 1; exit 0 ;;
+             exists)  [ "$2" = isopod-offline ] && [ -z "${STUB_OFFLINE_NET:-}" ] && exit 1
+                      exit 0 ;;
+             inspect) if [ "$2" = isopod-offline ]; then
+                        [ -z "${STUB_OFFLINE_NET:-}" ] && exit 1
+                        if [ "${STUB_OFFLINE_NET:-}" = stale ]; then
+                          echo '[{"dns_enabled": true}]'
+                        else
+                          echo '[{"dns_enabled": false, "routes": [{"destination": "0.0.0.0/0"}]}]'
+                        fi
+                      fi
+                      exit 0 ;;
+             # A box still attached makes the engine refuse the removal.
+             rm)      [ -n "${STUB_NET_RM_FAIL:-}" ] && exit 1
+                      exit 0 ;;
              # `network create --help` probes for --route. Advertise it like
              # podman 5; STUB_NO_ROUTE hides it to stand in for docker/podman 4.
              create) case "$2" in
@@ -181,6 +196,47 @@ EOF
   run "$ISOPOD_ROOT/isopod" create demo --offline
   assert_success
   assert_output --partial "OFFLINE"
+}
+
+# ---- offline network migration ----------------------------------------------
+# An older network (no default route, resolver on) is replaced with one that has
+# both, so an existing install picks up the fix without being told to.
+@test "create --offline recreates an offline network that predates this version" {
+  export STUB_OFFLINE_NET=stale
+  run "$ISOPOD_ROOT/isopod" create demo --offline
+  assert_success
+  assert_stub_called 'podman network rm isopod-offline'
+  assert_stub_called 'podman network create .*--route 0\.0\.0\.0/0,10\.201\.0\.1'
+}
+
+@test "create --offline leaves an already-current offline network alone" {
+  export STUB_OFFLINE_NET=current
+  run "$ISOPOD_ROOT/isopod" create demo --offline
+  assert_success
+  assert_stub_not_called 'podman network rm isopod-offline'
+  # `network create --help` is the --route probe, not a creation.
+  assert_stub_not_called 'podman network create --internal'
+}
+
+# Boxes still on the network block the removal, and an engine keeps a stopped box
+# attached, so stopping them would not help. A plain container does not need the
+# newer network, so the create must still succeed.
+@test "create --offline --container keeps going when the old network cannot be replaced" {
+  export STUB_OFFLINE_NET=stale STUB_NET_RM_FAIL=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --container
+  assert_success
+  assert_output --partial "boxes are still on it"
+  assert_stub_called 'podman run .*--network isopod-offline'
+}
+
+# A microVM box is unreachable without the route, so the same situation has to
+# fail instead, naming the way out.
+@test "create --offline on a microVM fails when the old network cannot be replaced" {
+  export STUB_OFFLINE_NET=stale STUB_NET_RM_FAIL=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
+  assert_failure
+  assert_output --partial "isopod rm"
+  assert_output --partial "--container"
 }
 
 # A docker stub reporting the offline network as missing, so --offline exercises
