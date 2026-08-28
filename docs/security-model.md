@@ -478,10 +478,12 @@ outward. On an engine that cannot add it (docker, older podman), `isopod create`
 refuses `--offline` under a microVM runtime and names the trade rather than leaving
 you to debug a box that looks healthy in its own logs.
 
-That default route points at the bridge gateway, so an offline box can address the
-host at that one address. Nothing routes past it, and isopod turns the engine's DNS
-off on this network so the address answers nothing by default. It is the same
-residual the guest egress ruleset already exempts for the same reason.
+That default route points at the bridge gateway, and passt maps the host onto that
+same address, so an offline box reaches host services listening on all interfaces.
+Everything else is refused: the host's other addresses, the LAN, and the internet.
+Bind a host service to loopback or a named interface when an offline box should not
+see it. Turning the engine's DNS off removes the one service isopod would otherwise
+have put on that address itself.
 
 On docker the network is the same internal bridge with the same subnet and gateway,
 but docker has no per-network switch for its embedded resolver at `127.0.0.11`, which
