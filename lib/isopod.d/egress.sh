@@ -244,6 +244,12 @@ offline_net_exists() { # offline_net_exists <engine>
   fi
 }
 
+# Did the created network actually get the default route? An engine can accept
+# --route and ignore it, and the box only finds out by being unreachable.
+offline_net_has_route() { # offline_net_has_route <engine>
+  "$1" network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null | grep -q '0\.0\.0\.0/0'
+}
+
 # Is an existing network missing what this version creates? Matched on the text,
 # not on inspect fields, so it reads the same across engine schema versions.
 offline_net_stale() { # offline_net_stale <engine>
@@ -289,6 +295,12 @@ ensure_offline_network() { # ensure_offline_network <engine> [needs-route]
   info "Creating internal offline network '$ISOPOD_OFFLINE_NET' (no route off the host)..."
   "$engine" network create "${args[@]}" "$ISOPOD_OFFLINE_NET" >/dev/null ||
     die "could not create $engine network '$ISOPOD_OFFLINE_NET'"
+  # Taking --route is not the same as honouring it. Where the box needs the route,
+  # confirm it landed rather than hand back a box that boots and cannot be reached.
+  if [ "$needs_route" = 1 ] && ! offline_net_has_route "$engine"; then
+    die "$engine took --route for '$ISOPOD_OFFLINE_NET' but the network has no default route, so a microVM box could not reach its guest.
+     Static routes need netavark 1.7 or newer. Add --container to this box, or upgrade netavark."
+  fi
 }
 
 # Is the host egress firewall loaded? 0 = loaded, 1 = not loaded, 2 = unknown

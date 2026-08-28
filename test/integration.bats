@@ -52,10 +52,22 @@ INFO
            # (present), which is what the egress tests expect.
            # STUB_OFFLINE_NET: unset = missing (the create path). 'stale' = an
            # older network (no route, resolver on). 'current' = already correct.
+           # A create records the network in a marker file, so a later exists /
+           # inspect reflects it the way a real engine would. STUB_ROUTE_IGNORED
+           # stands in for an engine that takes --route and drops it.
            case "$1" in
-             exists)  [ "$2" = isopod-offline ] && [ -z "${STUB_OFFLINE_NET:-}" ] && exit 1
+             exists)  [ "$2" = isopod-offline ] && [ -z "${STUB_OFFLINE_NET:-}" ] &&
+                        [ ! -f "$STUB_LOG.offnet" ] && exit 1
                       exit 0 ;;
              inspect) if [ "$2" = isopod-offline ]; then
+                        if [ -f "$STUB_LOG.offnet" ]; then
+                          if [ -n "${STUB_ROUTE_IGNORED:-}" ]; then
+                            echo '[{"dns_enabled": false}]'
+                          else
+                            echo '[{"dns_enabled": false, "routes": [{"destination": "0.0.0.0/0"}]}]'
+                          fi
+                          exit 0
+                        fi
                         [ -z "${STUB_OFFLINE_NET:-}" ] && exit 1
                         if [ "${STUB_OFFLINE_NET:-}" = stale ]; then
                           echo '[{"dns_enabled": true}]'
@@ -66,13 +78,15 @@ INFO
                       exit 0 ;;
              # A box still attached makes the engine refuse the removal.
              rm)      [ -n "${STUB_NET_RM_FAIL:-}" ] && exit 1
-                      exit 0 ;;
+                      rm -f "$STUB_LOG.offnet"; exit 0 ;;
              # `network create --help` probes for --route. Advertise it like
              # podman 5; STUB_NO_ROUTE hides it to stand in for docker/podman 4.
              create) case "$2" in
                        --help) [ -n "${STUB_NO_ROUTE:-}" ] ||
-                                 echo '      --route stringArray  static routes' ;;
+                                 echo '      --route stringArray  static routes'
+                               exit 0 ;;
                      esac
+                     touch "$STUB_LOG.offnet"
                      exit 0 ;;
              *)      exit 0 ;;
            esac ;;
@@ -237,6 +251,25 @@ EOF
   assert_failure
   assert_output --partial "isopod rm"
   assert_output --partial "--container"
+}
+
+# An engine can accept --route and drop it, which used to surface only as a box
+# that boots with sshd running and nothing able to reach it.
+@test "create --offline fails when the engine takes --route but drops it" {
+  export STUB_ROUTE_IGNORED=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
+  assert_failure
+  assert_output --partial "no default route"
+  assert_output --partial "netavark 1.7"
+  assert_output --partial "--container"
+}
+
+# The same network is fine for a plain container, which needs no route.
+@test "create --offline --container ignores a network with no default route" {
+  export STUB_ROUTE_IGNORED=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --container
+  assert_success
+  assert_stub_called 'podman run .*--network isopod-offline'
 }
 
 # A docker stub reporting the offline network as missing, so --offline exercises
