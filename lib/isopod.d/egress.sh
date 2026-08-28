@@ -824,11 +824,14 @@ egress_doctor_engines_and_fw() {
 #   allow-list -> lan-deny (proxy not up) -> off (rootless / firewall not loaded)
 # Sets ISOPOD_EGRESS in-process so the rest of the run (preflight, build_run_args)
 # sees the achievable mode. Silence any degrade with ISOPOD_EGRESS=off.
-resolve_egress() { # resolve_egress <engine>
-  local engine="$1" mode
+resolve_egress() { # resolve_egress <engine> [offline]
+  local engine="$1" offline="${2:-0}" mode
   # Set when default-on egress is walked all the way down to an OPEN network, so
   # create/reconfigure can make that unmissable in their summary (egress_posture_note).
   ISOPOD_EGRESS_DEGRADED=0
+  # An offline box has no route out, so there is no mode to walk down and warning
+  # about an OPEN network here would contradict the posture the box ends up with.
+  [ "$offline" = 1 ] && return 0
   mode="$(active_egress)"
   [ -n "$mode" ] || return 0        # already off
   egress_explicitly_set && return 0 # opt-in: leave fail-closed preflight in charge
@@ -1518,6 +1521,15 @@ egress_allowlist_show() {
 # scrolled away — which is how a box ends up open while its owner believes
 # otherwise. Names the in-guest layer too, so "blocked" is never ambiguous about
 # which mechanism is doing it.
+# Was this box's egress mode walked down to an open network? False for an offline
+# box whatever its meta says: it has no route out, so no egress mode ever applied.
+# create resolves egress before --offline is handled, so boxes already on disk
+# carry a flag that was never true of them.
+box_egress_degraded() { # box_egress_degraded <name>
+  [ "$(meta_get "$1" offline 2>/dev/null || true)" = 1 ] && return 1
+  [ "$(meta_get "$1" egress_degraded 2>/dev/null || printf 0)" = 1 ]
+}
+
 box_egress_posture() { # box_egress_posture <name>
   local mode degraded guest guest_on=0
   # An offline box has no route out at all, so no egress mode applies and none of

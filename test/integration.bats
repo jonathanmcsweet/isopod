@@ -126,7 +126,16 @@ EOF
   cat >"$STUB_DIR/ssh" <<'EOF'
 #!/usr/bin/env bash
 echo "ssh $*" >> "$STUB_LOG"
-[ -t 0 ] || cat >/dev/null 2>&1 || true
+# Bound the drain: under bats stdin is neither a tty nor closed, so a plain
+# `cat` waits for an EOF that never arrives and the suite hangs. `timeout` is
+# coreutils, absent on stock macOS, so fall back to the unbounded drain there.
+if [ ! -t 0 ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 cat >/dev/null 2>&1 || true
+  else
+    cat >/dev/null 2>&1 || true
+  fi
+fi
 exit 0
 EOF
   chmod +x "$STUB_DIR/ssh"
@@ -477,6 +486,36 @@ EOF
   assert_output --partial "Network: OPEN"
   assert_output --partial "could NOT be enforced"
   assert_output --partial "sudo isopod egress apply"
+}
+
+# The stubbed podman is rootless, so default-on egress degrades to an OPEN network
+# for an ordinary box. An offline box has no route out at all, so saying that about
+# it contradicts the OFFLINE posture the same run reports a few lines later.
+@test "create --offline does not warn about an OPEN network" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --container
+  assert_success
+  assert_output --partial "Network: OFFLINE"
+  refute_output --partial "with an OPEN network"
+  refute_output --partial "cannot enforce it"
+}
+
+# create resolved egress before --offline was handled, so boxes already on disk
+# carry egress_degraded=1. doctor and list have to read past that, or the same box
+# reads OFFLINE from info and OPEN from the other two.
+@test "doctor does not report an offline box as an open network" {
+  "$ISOPOD_ROOT/isopod" create demo --offline --container
+  printf 'egress_degraded=1\n' >>"$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" doctor
+  assert_success
+  refute_output --partial "demo: egress isolation was requested but is NOT in force"
+}
+
+@test "list does not flag an offline box as egress OPEN" {
+  "$ISOPOD_ROOT/isopod" create demo --offline --container
+  printf 'egress_degraded=1\n' >>"$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" list
+  assert_success
+  refute_output --partial "egress OPEN"
 }
 
 @test "create with egress disabled by config notes OPEN without the degrade warning" {

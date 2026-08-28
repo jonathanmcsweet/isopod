@@ -249,7 +249,7 @@ cmd_create() {
   # via active_runtime, and --container still overrides it to a plain container.
   [ -n "$runtime_opt" ] && export ISOPOD_RUNTIME="$runtime_opt"
   resolve_runtime "$ENGINE" "$container_opt"
-  resolve_egress "$ENGINE"
+  resolve_egress "$ENGINE" "$offline"
 
   # A data volume is a loop-mounted image inside the box, which needs the box's
   # own kernel: a plain container has no loop devices to attach it to. Fail here

@@ -22,7 +22,7 @@ cmd_list() {
     # Flags worth seeing without running `isopod info` on each box in turn.
     note=""
     box_is_stale "$name" 2>/dev/null && note="stale"
-    [ "$(meta_get "$name" egress_degraded 2>/dev/null || printf 0)" = 1 ] &&
+    box_egress_degraded "$name" &&
       note="${note:+$note, }egress OPEN"
     names+=("$name") statuses+=("$status") sshs+=("$ssh") ports+=("$port") colors+=("$color") notes+=("$note")
     [ "${#name}" -gt "$nw" ] && nw=${#name}
@@ -325,7 +325,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
     "") resolve_runtime "$ENGINE" 0 ;;
     *) export ISOPOD_RUNTIME="$saved_rt" ;;
   esac
-  resolve_egress "$ENGINE"
+  resolve_egress "$ENGINE" "$(meta_get "$name" offline 2>/dev/null || printf 0)"
   egress_preflight "$ENGINE"
   ensure_box_network "$name" "$ENGINE"
   runtime_preflight "$ENGINE"
@@ -511,7 +511,7 @@ cmd_migrate() {
     "") resolve_runtime "$ENGINE" 0 ;;
     *) export ISOPOD_RUNTIME="$saved_rt" ;;
   esac
-  resolve_egress "$ENGINE"
+  resolve_egress "$ENGINE" "$(meta_get "$name" offline 2>/dev/null || printf 0)"
   runtime_preflight "$ENGINE"
   base="$(meta_get "$name" base)"
   dev="$(meta_get "$name" dev 2>/dev/null || printf 0)"
@@ -685,7 +685,7 @@ cmd_reconfigure() {
     *) export ISOPOD_RUNTIME="$saved_rt" ;;
   esac
   # Degrade default-on egress gracefully instead of blocking the recreate.
-  resolve_egress "$ENGINE"
+  resolve_egress "$ENGINE" "$(meta_get "$name" offline 2>/dev/null || printf 0)"
 
   # config.yaml is the source of truth (synthesize it for pre-feature boxes),
   # with any flags overriding individual fields.
