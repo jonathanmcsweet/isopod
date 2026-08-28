@@ -476,7 +476,9 @@ with an explicit `--route 0.0.0.0/0` via the gateway. Adding the route leaves th
 isolation intact: the engine still drops anything the bridge tries to forward
 outward. On an engine that cannot add it (docker, older podman), `isopod create`
 refuses `--offline` under a microVM runtime and names the trade rather than leaving
-you to debug a box that looks healthy in its own logs.
+you to debug a box that looks healthy in its own logs. The real requirement is
+netavark 1.7, which every podman 5 carries, so podman 4 can work as well when its
+netavark is new enough; isopod checks for the flag rather than the version.
 
 That default route points at the bridge gateway, and passt maps the host onto that
 same address, so an offline box reaches host services listening on all interfaces.
