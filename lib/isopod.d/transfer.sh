@@ -307,6 +307,38 @@ remap_to_mailmap() {
 # commits whose existing identity matches --old-email (optionally --old-name)
 # are touched; commit messages and author/committer DATES are preserved. The
 # rewrite is scoped to the box's refs, so the host's own branches are untouched.
+# Put the box refs back to the state captured in refs/remap-backup/, so a retry
+# with the other backend starts from the original history rather than a partial
+# rewrite.
+remap_restore_refs() { # remap_restore_refs <top> <ref>...
+  local top="$1" r
+  shift
+  for r in "$@"; do
+    git -C "$top" update-ref "$r" "refs/remap-backup/${r#refs/}" 2>/dev/null || true
+  done
+}
+
+# Rewrite with core git only: stream the box refs through fast-export, rewrite the
+# matching author/committer/tagger identities, and fast-import them back. Needs no
+# extra tooling (filter-branch is deprecated and often absent), never touches the
+# working tree, and keeps dates verbatim. The rewrite logic lives in
+# lib/remap_identity_filter.py (mailmap-driven and data-block aware, so identity
+# text inside a commit message is left alone).
+#
+# --reencode=no: fast-export defaults to aborting on a commit carrying a non-UTF-8
+# `encoding` header, which a box sets for itself with one `git config
+# i18n.commitEncoding`. Without this, that config alone disables this backend.
+# git-filter-repo passes the same flag internally, so the two backends agree.
+remap_python_rewrite() { # remap_python_rewrite <top> <mailmap> <ref>...
+  local top="$1" mm="$2"
+  shift 2
+  local flt="$ISOPOD_LIB/remap_identity_filter.py"
+  [ -f "$flt" ] || die "missing helper: $flt (is your isopod install complete?)"
+  git -C "$top" fast-export --no-data --reencode=no --reference-excluded-parents "$@" |
+    MAILMAP_FILE="$mm" python3 "$flt" |
+    git -C "$top" fast-import --force --quiet
+}
+
 # Prefers `git filter-repo`; falls back to a python3 fast-export rewrite.
 
 # Can `git filter-repo` actually run here? Its presence on PATH is not proof: it
@@ -498,48 +530,37 @@ cmd_remap() {
   done
   info "Backed up original refs under refs/remap-backup/ (delete when satisfied)."
 
+  local rewrote=0
   if filter_repo_usable "$top"; then
     # Preferred path: filter-repo applies the mailmap directly.
     # --refs scopes the rewrite (implies --partial: other refs/origin are kept).
-    if ! git -C "$top" filter-repo --force --partial --mailmap "$mm" --refs "${boxrefs[@]}"; then
-      [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
-      die "git filter-repo failed"
+    if git -C "$top" filter-repo --force --partial --mailmap "$mm" --refs "${boxrefs[@]}"; then
+      rewrote=1
+    elif have python3; then
+      # A box writes its own commit objects and git accepts identity lines that
+      # filter-repo's parser rejects: an empty author name ("author <e> ts")
+      # crashes it outright. isopod's own rewrite handles those, so retry with it
+      # rather than leave the box unrewritable on a host that has filter-repo.
+      # Restore first: a failed run can leave refs partly rewritten.
+      warn "git filter-repo could not rewrite these refs; retrying with isopod's own rewrite"
+      remap_restore_refs "$top" "${boxrefs[@]}"
+      remap_python_rewrite "$top" "$mm" "${boxrefs[@]}" && rewrote=1
     fi
   elif have python3; then
-    # Fallback using ONLY core git: stream the box refs through fast-export,
-    # rewrite the matching author/committer/tagger identities, and fast-import
-    # them back. This needs no extra tooling (filter-branch is deprecated and
-    # often absent), never touches the working tree, and keeps dates verbatim.
-    # The rewrite logic lives in lib/remap_identity_filter.py (mailmap-driven and
-    # data-block aware, so identity text inside a commit message is left alone).
-    local flt="$ISOPOD_LIB/remap_identity_filter.py"
-    [ -f "$flt" ] || {
-      [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
-      die "missing helper: $flt (is your isopod install complete?)"
-    }
-    # --reencode=no: fast-export defaults to aborting on a commit that carries a
-    # non-UTF-8 `encoding` header, which a box sets for itself with one
-    # `git config i18n.commitEncoding`. Without this, that config alone disables
-    # the fallback backend. The filter passes the header through untouched, and
-    # git-filter-repo passes the same flag internally, so the two backends agree.
-    if ! git -C "$top" fast-export --no-data --reencode=no --reference-excluded-parents "${boxrefs[@]}" |
-      MAILMAP_FILE="$mm" python3 "$flt" |
-      git -C "$top" fast-import --force --quiet; then
-      [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
-      # A box writes its own commit objects, and git accepts some on fetch that
-      # fast-import then refuses (a malformed identity line, for instance). That
-      # fails here rather than being rewritten, which is the safe direction.
-      die "the fast-export/fast-import rewrite failed.
-     Your box refs are untouched and the pre-rewrite backups are under
-     refs/remap-backup/, so nothing is lost. If a box commit has a malformed
-     author or committer line, drop that ref under refs/remotes/$name/ and retry."
-    fi
+    remap_python_rewrite "$top" "$mm" "${boxrefs[@]}" && rewrote=1
   else
     [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
     die "need 'git filter-repo' or python3 to rewrite history — install one:
     Debian/Ubuntu : sudo apt install git-filter-repo   (or: apt install python3)
     macOS (brew)  : brew install git-filter-repo
     any OS (pip)  : pip install git-filter-repo"
+  fi
+  if [ "$rewrote" != 1 ]; then
+    [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
+    die "the identity rewrite failed.
+     Your box refs are restored and the pre-rewrite backups are under
+     refs/remap-backup/, so nothing is lost. If a box commit has a malformed
+     author or committer line, drop that ref under refs/remotes/$name/ and retry."
   fi
   [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
 

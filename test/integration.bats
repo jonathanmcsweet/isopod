@@ -1770,6 +1770,32 @@ EOF
   assert_output --partial "Me <me@home>"
 }
 
+# git-filter-repo starts fine but crashes partway on a commit its parser rejects.
+# A box writes its own commit objects, and an empty author name ("author <e> ts")
+# is one git accepts and filter-repo does not, which used to make remap unusable
+# on any host that had filter-repo installed.
+_stub_crashing_filter_repo() {
+  cat >"$STUB_DIR/git-filter-repo" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" --version "* | *" -h "*) exit 0 ;;   # usable: it starts
+esac
+echo "AttributeError: 'NoneType' object has no attribute 'groups'" >&2
+exit 1
+EOF
+  chmod +x "$STUB_DIR/git-filter-repo"
+}
+
+@test "remap falls back to python3 when git-filter-repo crashes on the repo" {
+  _seed_remapped_host "$TEST_TMP/host"
+  _stub_crashing_filter_repo
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --old-email dev@mybox.local --force
+  assert_success
+  assert_output --partial "retrying with isopod's own rewrite"
+  run git -C "$TEST_TMP/host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "Me <me@home>"
+}
+
 @test "doctor does not report a broken git-filter-repo as the remap backend" {
   _stub_broken_filter_repo
   run "$ISOPOD_ROOT/isopod" doctor
