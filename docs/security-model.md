@@ -490,6 +490,11 @@ but docker has no per-network switch for its embedded resolver at `127.0.0.11`, 
 the daemon answers from outside the network. Treat name resolution as reachable from
 an offline docker box, and use podman where that matters.
 
+The network is created once, on first use, on `10.201.0.0/24`, which clears Mullvad's
+`10.64.0.0/10` and Tailscale's `100.64.0.0/10`. `ISOPOD_OFFLINE_SUBNET` and
+`ISOPOD_OFFLINE_GATEWAY` change it, and since the settings apply only at creation,
+remove the network first with `podman network rm isopod-offline` while no box is on it.
+
 **How it works.** The box goes on a dedicated **internal** engine network
 (`isopod-offline`, created on first use). It gets an interface, so the loopback SSH
 port isopod publishes still works and `code`, `shell`, `copy-in`, `export`, secrets
