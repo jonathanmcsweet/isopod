@@ -64,10 +64,15 @@ case "$out" in
 esac
 # Report what it actually printed. Failing with only "did not render" throws away
 # the one thing that identifies the cause, and costs a whole round trip to get back.
-printf '%s' "$out" | grep -q 'Usage:' || fail "packaged 'isopod help' did not render usage.txt (exit $rc).
+# Matched with `case`, not `printf | grep -q`: grep exits on the first match, printf
+# then takes SIGPIPE, and pipefail turns a successful match into a failed pipeline.
+case "$out" in
+  *"Usage:"*) ;;
+  *) fail "packaged 'isopod help' did not render usage.txt (exit $rc).
   installed from : $ROOT
   ran            : $bin
-  it printed     : $([ -z "$out" ] && printf '(nothing)' || printf '%s' "$out" | head -5)"
+  it printed     : $([ -z "$out" ] && printf '(nothing)' || printf '%s' "$out" | head -5)" ;;
+esac
 ok "packaged install renders templates through the bin symlink"
 
 printf '%spackaging checks passed%s\n' "$c_grn" "$c_rst"

@@ -451,7 +451,11 @@ EOF
   assert_success
   assert_stub_called "podman build .*--build-arg ISOPOD_BASE="
   assert_stub_called "podman build .*--build-arg ISOPOD_USER=dev"
-  assert_stub_called "podman build .*-f $ISOPOD_ROOT/share/Dockerfile"
+  # Match the tail, not an absolute prefix: on a system where /home is a symlink,
+  # isopod resolves its own root differently from the test's ISOPOD_ROOT and the
+  # two spellings of the same path disagree. What matters is that share/Dockerfile
+  # is the file being built.
+  assert_stub_called "podman build .*-f .*/share/Dockerfile"
 }
 
 @test "create stages every share/Dockerfile COPY source into the build context" {
