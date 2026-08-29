@@ -3540,6 +3540,25 @@ ip daddr 1.2.3.4 accept'
   fi
 }
 
+# ---- F2: no output may be redirected into a process substitution ------------
+# `cmd > >(filter)` reads like a pipe but is not: bash does not wait for a
+# process substitution, so the filter can outlive cmd still holding the
+# stdout/stderr it inherited. Under `isopod ... 2>&1 | tee log` that never closes
+# the pipe and the reader hangs. This stranded `isopod create` for five hours,
+# leaving two orphaned `tr`. Capture to a file and filter once the writer exits.
+@test "no command redirects its output into a process substitution" {
+  local hits
+  # Strip comments before matching so the prose above (and the notes left at the
+  # fixed call sites) is not mistaken for code, the same way packaging.sh scans.
+  hits="$(awk '{ line = $0; sub(/#.*$/, "", line)
+                     if (line ~ />[[:space:]]*>\(/) printf "%s:%d: %s\n", FILENAME, FNR, $0 }' \
+    "$ISOPOD_ROOT"/isopod "$ISOPOD_ROOT"/lib/isopod.d/*.sh)"
+  if [ -n "$hits" ]; then
+    printf 'output redirected into a process substitution:\n%s\n' "$hits" >&2
+    return 1
+  fi
+}
+
 # ---- sandbox account (stage 1: lifecycle module) ------------------------------
 
 # The range allocator must clear every existing allocation in BOTH files — a

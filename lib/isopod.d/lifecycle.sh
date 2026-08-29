@@ -351,10 +351,18 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   ws=$(mktemp "${TMPDIR:-/tmp}/isopod-upgrade-$name-XXXXXX.tar")
   info "Copying $WORKSPACE out of '$name'..."
   local -a rc
+  local errf
+  errf=$(mktemp "${TMPDIR:-/tmp}/isopod-tarerr-XXXXXX")
   set +e
-  box_tar_out "$name" "$WORKSPACE" 2> >(grep -v 'file changed as we read it' >&2) >"$ws"
+  # stderr to a file, not `2> >(grep ...)`: bash does not wait for a process
+  # substitution, so the filter can outlive this command still holding the stderr
+  # it inherited. Under `isopod ... 2>&1 | tee log` that never closes the pipe and
+  # the reader hangs. Filter once the writer has exited.
+  box_tar_out "$name" "$WORKSPACE" 2>"$errf" >"$ws"
   rc=("${PIPESTATUS[@]}")
   set -e
+  grep -v 'file changed as we read it' <"$errf" >&2 || true
+  rm -f "$errf"
   if [ "${rc[0]}" -gt 1 ]; then
     rm -f "$ws"
     die "could not read $WORKSPACE out of '$name' — nothing has been changed."
@@ -528,10 +536,18 @@ cmd_migrate() {
   ws=$(mktemp "${TMPDIR:-/tmp}/isopod-migrate-$name-XXXXXX.tar")
   info "Copying $WORKSPACE out of '$name'..."
   local -a rc
+  local errf
+  errf=$(mktemp "${TMPDIR:-/tmp}/isopod-tarerr-XXXXXX")
   set +e
-  box_tar_out "$name" "$WORKSPACE" 2> >(grep -v 'file changed as we read it' >&2) >"$ws"
+  # stderr to a file, not `2> >(grep ...)`: bash does not wait for a process
+  # substitution, so the filter can outlive this command still holding the stderr
+  # it inherited. Under `isopod ... 2>&1 | tee log` that never closes the pipe and
+  # the reader hangs. Filter once the writer has exited.
+  box_tar_out "$name" "$WORKSPACE" 2>"$errf" >"$ws"
   rc=("${PIPESTATUS[@]}")
   set -e
+  grep -v 'file changed as we read it' <"$errf" >&2 || true
+  rm -f "$errf"
   if [ "${rc[0]}" -gt 1 ]; then
     rm -f "$ws"
     die "could not read $WORKSPACE out of '$name' — nothing has been changed."

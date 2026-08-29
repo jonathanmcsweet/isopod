@@ -77,16 +77,24 @@ cmd_export() {
   # the host, which works whatever tar the box ships (busybox lacks --warning).
   mkdir -p "$dest"
   local -a rc
+  local errbox errhost
+  errbox=$(mktemp "${TMPDIR:-/tmp}/isopod-tarerr-XXXXXX")
+  errhost=$(mktemp "${TMPDIR:-/tmp}/isopod-tarerr-XXXXXX")
   set +e
   # Both tar stderrs carry box-controlled filenames (tar embeds the offending
   # name in diagnostics like 'socket ignored'), so strip control bytes on the way
   # to the host terminal — the same ANSI/OSC-injection defense as the git-identity
-  # prints, on the archive channel.
-  box_tar_out "$name" "$WORKSPACE" ${tarx[@]+"${tarx[@]}"} \
-    2> >(grep -v 'file changed as we read it' | sanitize_stream >&2) |
-    tar -C "$dest" --no-same-owner --no-same-permissions -xf - 2> >(sanitize_stream >&2)
+  # prints, on the archive channel. Captured to files and sanitized afterwards,
+  # not piped through `2> >(sanitize_stream)`: bash does not wait for a process
+  # substitution, so the sanitizer can outlive the pipeline still holding the fds
+  # it inherited, and hang `isopod export ... 2>&1 | tee log`.
+  box_tar_out "$name" "$WORKSPACE" ${tarx[@]+"${tarx[@]}"} 2>"$errbox" |
+    tar -C "$dest" --no-same-owner --no-same-permissions -xf - 2>"$errhost"
   rc=("${PIPESTATUS[@]}")
   set -e
+  grep -v 'file changed as we read it' <"$errbox" | sanitize_stream >&2 || true
+  sanitize_stream <"$errhost" >&2 || true
+  rm -f "$errbox" "$errhost"
   if [ "${rc[1]}" -ne 0 ] || [ "${rc[0]}" -gt 1 ]; then
     rm -rf "$dest"
     die "export failed (is '$name' running? try: isopod start $name)"
