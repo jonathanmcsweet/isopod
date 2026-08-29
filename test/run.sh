@@ -93,7 +93,10 @@ step "pexpect: interactive prompt tests"
 if python3 -c 'import pexpect' 2>/dev/null; then
   python3 test/interactive_test.py
 else
-  printf '%spexpect not installed — skipping (pip install pexpect)%s\n' "$c_yel" "$c_rst"
+  # Name the interpreter: with several python3 installs on PATH, pexpect is often
+  # present for one and absent from the one the suite runs.
+  printf '%spexpect not importable by %s: skipping (%s -m pip install pexpect)%s\n' \
+    "$c_yel" "$(command -v python3 || printf python3)" "$(command -v python3 || printf python3)" "$c_rst"
 fi
 
 # --- live (opt-in) ----------------------------------------------------------

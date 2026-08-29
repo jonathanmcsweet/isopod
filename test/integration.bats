@@ -706,6 +706,28 @@ EOF
   assert_output --partial '- "127.0.0.1:5173:5173"'
 }
 
+# Found on a real host: reconfigure of an offline box stopped working when
+# resolve_egress learned to return early for offline boxes, because the rebuild
+# paths take their egress mode from it. With the mode left on, preflight tried to
+# enforce something a rootless engine cannot and the rebuild died.
+@test "reconfigure keeps an offline box offline and does not fail preflight" {
+  "$ISOPOD_ROOT/isopod" create demo --offline --container
+  run "$ISOPOD_ROOT/isopod" reconfigure demo --memory 3g
+  assert_success
+  assert_stub_called 'podman run .*--network isopod-offline'
+  assert_stub_called "podman run .*--memory 3g"
+  run grep '^offline=1$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+# The override warning means "you configured a mode and --offline replaced it".
+# It must not fire when nothing was configured.
+@test "create --offline does not claim to override an egress mode nobody set" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --container
+  assert_success
+  refute_output --partial "overrides the configured egress mode"
+}
+
 @test "reconfigure errors on an unknown box" {
   run "$ISOPOD_ROOT/isopod" reconfigure ghost --memory 4g
   assert_failure

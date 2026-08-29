@@ -39,8 +39,14 @@ iso() { "$ISOPOD" "$@" </dev/null; }
 
 cleanup_box() { iso rm "$1" --force >/dev/null 2>&1 || true; }
 cleanup_all() {
-  local b
+  local b r
   for b in hv-offline hv-disk hv-nest hv-remap hv-upg; do cleanup_box "$b"; done
+  # `iso fetch` and `iso remap` write into the repo this runs from. Drop what
+  # they left so a verification run does not accumulate refs in your checkout.
+  for r in $(git for-each-ref --format='%(refname)' 'refs/remotes/hv-remap/*' \
+    'refs/remap-backup/remotes/hv-remap/*' 2>/dev/null); do
+    git update-ref -d "$r" 2>/dev/null || true
+  done
 }
 trap cleanup_all EXIT
 
@@ -176,8 +182,14 @@ if iso create hv-remap >/tmp/hv-remap.log 2>&1; then
   if iso fetch hv-remap >/dev/null 2>&1 &&
     iso remap hv-remap --force --old-email box@isopod --name "Real Name" --email real@example.com >/tmp/hv-remap-run.log 2>&1; then
     ok "remap completed against a box with an unusual commit"
-    if grep -rqi 'box@isopod' /tmp/hv-remap-run.log; then
-      NOTES+=("check /tmp/hv-remap-run.log: box identity still mentioned")
+    # Check the rewritten refs, not the log: isopod prints the identity it is
+    # rewriting FROM ("Rewriting commits by <box@isopod>"), so grepping the log
+    # flags every successful run. refs/remap-backup/ is excluded on purpose, it
+    # is meant to still hold the originals.
+    if git for-each-ref --format='%(refname)' 'refs/remotes/hv-remap/*' 2>/dev/null |
+      while read -r r; do git log --format='%an <%ae>' "$r" 2>/dev/null; done |
+      grep -qi 'box@isopod'; then
+      NOTES+=("remap left the box identity on refs/remotes/hv-remap/*")
     fi
   else
     bad "remap failed - see /tmp/hv-remap-run.log"

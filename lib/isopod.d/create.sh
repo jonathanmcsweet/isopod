@@ -249,6 +249,10 @@ cmd_create() {
   # via active_runtime, and --container still overrides it to a plain container.
   [ -n "$runtime_opt" ] && export ISOPOD_RUNTIME="$runtime_opt"
   resolve_runtime "$ENGINE" "$container_opt"
+  # Read this before resolve_egress, which sets ISOPOD_EGRESS for an offline box
+  # and would make every offline create look like it overrode a configured mode.
+  local egress_was_set=0
+  egress_explicitly_set && egress_was_set=1
   resolve_egress "$ENGINE" "$offline"
 
   # A data volume is a loop-mounted image inside the box, which needs the box's
@@ -411,7 +415,7 @@ cmd_create() {
        isopod create $name --offline --container
      Or drop --offline and keep the microVM."
     fi
-    egress_explicitly_set &&
+    [ "$egress_was_set" = 1 ] &&
       warn "--offline overrides the configured egress mode: an offline box has no route out to filter"
     export ISOPOD_EGRESS=off
     # Guest egress goes off too: its in-guest ruleset filters the route out, and an

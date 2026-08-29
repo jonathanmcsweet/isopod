@@ -831,7 +831,13 @@ resolve_egress() { # resolve_egress <engine> [offline]
   ISOPOD_EGRESS_DEGRADED=0
   # An offline box has no route out, so there is no mode to walk down and warning
   # about an OPEN network here would contradict the posture the box ends up with.
-  [ "$offline" = 1 ] && return 0
+  # Still turn egress off for the rest of the run: the rebuild paths take their
+  # mode from here, and leaving it on makes preflight try to enforce a mode the
+  # box cannot use, which fails the rebuild.
+  if [ "$offline" = 1 ]; then
+    export ISOPOD_EGRESS=off
+    return 0
+  fi
   mode="$(active_egress)"
   [ -n "$mode" ] || return 0        # already off
   egress_explicitly_set && return 0 # opt-in: leave fail-closed preflight in charge
