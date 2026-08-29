@@ -40,9 +40,10 @@ ANGLE = re.compile(rb"<([^>]*)>")
 #   is host CPU the box gets to spend.
 # [^<]* cannot cross a '<', so there is no ambiguity left to backtrack over.
 IDENT = re.compile(rb"^(author|committer|tagger) ([^<]*)<([^>]*)> (.*)$")
-# A real identity line is well under this. A longer line cannot be one, so it is
-# passed through without running a regex over a length the box picked.
-MAX_IDENT = 8192
+# No length cap on what gets matched: a cap is exactly the skip-the-regex hole
+# described above, since the box picks the length and can pad an identity line
+# past any bound to ride through unrewritten. Nothing here needs one, because
+# the pattern is linear.
 
 
 def parse_mailmap(data):
@@ -128,7 +129,7 @@ def main():
                 out.write(raw)
                 copy_exact(inp, out, int(body))
                 continue
-        elif len(line) <= MAX_IDENT:
+        else:
             m = IDENT.match(line)
             if m:
                 # The name keeps the separating space in group 2; git treats a

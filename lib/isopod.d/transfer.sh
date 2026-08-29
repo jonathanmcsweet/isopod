@@ -319,11 +319,17 @@ remap_to_mailmap() {
 # with the other backend starts from the original history rather than a partial
 # rewrite.
 remap_restore_refs() { # remap_restore_refs <top> <ref>...
-  local top="$1" r
+  # Reports a failed update-ref rather than swallowing it: callers tell the user
+  # their refs are restored, which must not be printed when they are not.
+  local top="$1" r failed=0
   shift
   for r in "$@"; do
-    git -C "$top" update-ref "$r" "refs/remap-backup/${r#refs/}" 2>/dev/null || true
+    if ! git -C "$top" update-ref "$r" "refs/remap-backup/${r#refs/}" 2>/dev/null; then
+      warn "could not restore $r from refs/remap-backup/${r#refs/}"
+      failed=1
+    fi
   done
+  return "$failed"
 }
 
 # Rewrite with core git only: stream the box refs through fast-export, rewrite the
@@ -551,7 +557,13 @@ cmd_remap() {
       # rather than leave the box unrewritable on a host that has filter-repo.
       # Restore first: a failed run can leave refs partly rewritten.
       warn "git filter-repo could not rewrite these refs; retrying with isopod's own rewrite"
-      remap_restore_refs "$top" "${boxrefs[@]}"
+      if ! remap_restore_refs "$top" "${boxrefs[@]}"; then
+        [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
+        die "git filter-repo failed and the original refs could not be restored from
+     refs/remap-backup/, so retrying would rewrite already-rewritten history.
+     Restore by hand and retry:
+       git update-ref refs/remotes/$name/<branch> refs/remap-backup/remotes/$name/<branch>"
+      fi
       remap_python_rewrite "$top" "$mm" "${boxrefs[@]}" && rewrote=1
     fi
   elif have python3; then
@@ -565,10 +577,19 @@ cmd_remap() {
   fi
   if [ "$rewrote" != 1 ]; then
     [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
-    die "the identity rewrite failed.
+    # filter-repo can fail partway with refs already rewritten, and the retry
+    # either did not run (no python3) or failed too. Restore before reporting, so
+    # the message is true on every path that reaches here.
+    if remap_restore_refs "$top" "${boxrefs[@]}"; then
+      die "the identity rewrite failed.
      Your box refs are restored and the pre-rewrite backups are under
      refs/remap-backup/, so nothing is lost. If a box commit has a malformed
      author or committer line, drop that ref under refs/remotes/$name/ and retry."
+    fi
+    die "the identity rewrite failed, and restoring the original refs failed too.
+     The pre-rewrite backups under refs/remap-backup/ are intact, so nothing is
+     lost. Restore by hand with
+       git update-ref refs/remotes/$name/<branch> refs/remap-backup/remotes/$name/<branch>"
   fi
   [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
 
