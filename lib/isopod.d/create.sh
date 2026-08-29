@@ -255,6 +255,28 @@ cmd_create() {
   egress_explicitly_set && egress_was_set=1
   resolve_egress "$ENGINE" "$offline"
 
+  # Both --offline incompatibilities are decided by the engine and the resolved
+  # runtime, settled just above, so refuse here: before the box directory exists,
+  # before the image build, and before the rollback has anything to unwind.
+  if [ "$offline" = 1 ]; then
+    [ "$ENGINE" = container ] &&
+      die "--offline is not supported on the Apple 'container' engine, which has no internal network.
+     Use podman or docker for an offline box."
+    # A microVM reaches its guest through passt, which picks its template interface
+    # by following the container's default route. An internal network gets one only
+    # where the engine can install static routes; without it the box boots, sshd
+    # listens, and nothing can reach it. Refuse up front and name the trade rather
+    # than leave a box that looks healthy in its own logs to be debugged.
+    if is_microvm_runtime && ! offline_net_routable; then
+      die "--offline needs a plain container on $ENGINE. A microVM box reaches its guest
+     through passt, which needs a default route that $ENGINE cannot put on an internal
+     network, so the box would boot with sshd running and stay unreachable.
+     Add --container to trade the per-box kernel boundary for the network one:
+       isopod create $name --offline --container
+     Or drop --offline and keep the microVM."
+    fi
+  fi
+
   # A data volume is a loop-mounted image inside the box, which needs the box's
   # own kernel: a plain container has no loop devices to attach it to. Fail here
   # rather than hand back a box whose volume silently never mounted. This runs
@@ -399,22 +421,6 @@ cmd_create() {
   # shellcheck disable=SC2034 # read by build_run_args in another module
   local BOX_OFFLINE="$offline"
   if [ "$BOX_OFFLINE" = 1 ]; then
-    [ "$ENGINE" = container ] &&
-      die "--offline is not supported on the Apple 'container' engine, which has no internal network.
-     Use podman or docker for an offline box."
-    # A microVM reaches its guest through passt, which picks its template interface
-    # by following the container's default route. An internal network gets one only
-    # where the engine can install static routes; without it the box boots, sshd
-    # listens, and nothing can reach it. Refuse up front and name the trade rather
-    # than leave a box that looks healthy in its own logs to be debugged.
-    if is_microvm_runtime && ! offline_net_routable "$ENGINE"; then
-      die "--offline needs a plain container on $ENGINE. A microVM box reaches its guest
-     through passt, which needs a default route that $ENGINE cannot put on an internal
-     network, so the box would boot with sshd running and stay unreachable.
-     Add --container to trade the per-box kernel boundary for the network one:
-       isopod create $name --offline --container
-     Or drop --offline and keep the microVM."
-    fi
     [ "$egress_was_set" = 1 ] &&
       warn "--offline overrides the configured egress mode: an offline box has no route out to filter"
     export ISOPOD_EGRESS=off
@@ -426,7 +432,7 @@ cmd_create() {
     BOX_GUEST_EGRESS=off
     local needs_route=0
     is_microvm_runtime && needs_route=1
-    ensure_offline_network "$ENGINE" "$needs_route"
+    ensure_offline_network "$needs_route"
   fi
   # Verify the engine can enforce egress isolation and set up its network before
   # the box starts (no-op unless `egress lan-deny` is configured).

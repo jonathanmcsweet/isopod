@@ -327,7 +327,7 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   esac
   resolve_egress "$ENGINE" "$(meta_get "$name" offline 2>/dev/null || printf 0)"
   egress_preflight "$ENGINE"
-  ensure_box_network "$name" "$ENGINE"
+  ensure_box_network "$name"
   runtime_preflight "$ENGINE"
 
   # Everything that can still legitimately fail happens BEFORE the container is
@@ -566,7 +566,7 @@ cmd_migrate() {
   newtag=$(build_image "$base" "$dev" "$nested") ||
     die "image build failed in the target store (workspace kept at $ws)"
 
-  ensure_box_network "$name" "$ENGINE"
+  ensure_box_network "$name"
   local BOX_SUDO BOX_HARDEN BOX_DISK BOX_NESTED BOX_SECRETS BOX_GUEST_EGRESS BOX_GUEST_EGRESS_ALLOW BOX_HOST_PORTS
   BOX_SUDO="$(meta_get "$name" sudo 2>/dev/null || true)"
   [ -n "$BOX_SUDO" ] || BOX_SUDO=1
@@ -733,6 +733,13 @@ cmd_reconfigure() {
       on | off) ;;
       *) die "invalid --guest-egress '$guest_egress' (use: on | off)" ;;
     esac
+    # An offline box has no route out, so an in-guest filter would be recorded in
+    # meta and enforced by nothing. create refuses the same pair; refuse it here
+    # rather than store a posture the box does not have.
+    if [ "$guest_egress" = on ] && [ "$(meta_get "$name" offline 2>/dev/null || true)" = 1 ]; then
+      die "'$name' is offline, so it has no route out for guest egress to filter.
+     Drop --guest-egress: an offline box already reaches nothing."
+    fi
     if [ "$guest_egress" = on ] && box_is_stale "$name" 2>/dev/null; then
       die "'$name' was built from an older isopod, so its image has no egress ruleset to load —
      turning guest egress on would leave it unable to start sshd. Rebuild it first:
@@ -758,7 +765,7 @@ cmd_reconfigure() {
   # Re-check egress enforcement + network before recreating (the profile may have
   # changed since create; no-op unless `egress lan-deny` is configured).
   egress_preflight "$ENGINE"
-  ensure_box_network "$name" "$ENGINE"
+  ensure_box_network "$name"
   # Re-check the runtime too — the profile's `runtime` directive may have changed.
   runtime_preflight "$ENGINE"
 

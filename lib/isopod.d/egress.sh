@@ -204,13 +204,13 @@ ensure_egress_network() { # ensure_egress_network <engine>
 # Make sure a box's own network exists before it is recreated. Only offline boxes
 # need this: their internal network is created at create time, and a rebuild months
 # later would otherwise fail if it had been removed in between.
-ensure_box_network() { # ensure_box_network <name> <engine>
+ensure_box_network() { # ensure_box_network <name>
   [ "$(meta_get "$1" offline 2>/dev/null || true)" = 1 ] || return 0
   # Only a Tier 3 box needs the default route, so read the runtime this box was
   # built with rather than whatever is active now.
   local needs_route=0
   [ "$(runtime_tier "$(meta_get "$1" runtime 2>/dev/null || true)" 2>/dev/null)" = 3 ] && needs_route=1
-  ensure_offline_network "$2" "$needs_route"
+  ensure_offline_network "$needs_route"
 }
 
 # The offline network's gateway: explicit, or the .1 of a /24 subnet.
@@ -231,55 +231,66 @@ offline_gateway() {
 # internal, and passt picks its template interface by following that route. So
 # without --route a microVM's guest comes up unreachable, which is the pair
 # cmd_create refuses.
-offline_net_routable() { # offline_net_routable <engine>
-  [ "$1" = docker ] && return 1
-  "$1" network create --help 2>/dev/null | grep -q -- '--route'
+# Memoized: the answer cannot change within a run, and each probe is an engine
+# process on the create path.
+_OFFLINE_ROUTABLE=""
+offline_net_routable() {
+  if [ -z "$_OFFLINE_ROUTABLE" ]; then
+    _OFFLINE_ROUTABLE=1
+    if [ "$ENGINE" != docker ] && engine network create --help 2>/dev/null | grep -q -- '--route'; then
+      _OFFLINE_ROUTABLE=0
+    fi
+  fi
+  return "$_OFFLINE_ROUTABLE"
 }
 
-offline_net_exists() { # offline_net_exists <engine>
-  if [ "$1" = docker ]; then
-    docker network inspect "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1
+offline_net_exists() {
+  if [ "$ENGINE" = docker ]; then
+    engine network inspect "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1
   else
-    "$1" network exists "$ISOPOD_OFFLINE_NET" 2>/dev/null
+    engine network exists "$ISOPOD_OFFLINE_NET" 2>/dev/null
   fi
 }
 
 # Did the created network actually get the default route? An engine can accept
 # --route and ignore it, and the box only finds out by being unreachable.
-offline_net_has_route() { # offline_net_has_route <engine>
-  "$1" network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null | grep -q '0\.0\.0\.0/0'
+offline_net_has_route() {
+  engine network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null | grep -q '0\.0\.0\.0/0'
 }
 
 # Is an existing network missing what this version creates? Matched on the text,
 # not on inspect fields, so it reads the same across engine schema versions.
-offline_net_stale() { # offline_net_stale <engine>
+offline_net_stale() {
   local out
-  out="$("$1" network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null || true)"
+  out="$(engine network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null || true)"
   # No default route on an engine that can add one: a microVM box cannot reach
   # its guest over this network.
-  if offline_net_routable "$1" && ! printf '%s' "$out" | grep -q '0\.0\.0\.0/0'; then
+  if offline_net_routable && ! printf '%s' "$out" | grep -q '0\.0\.0\.0/0'; then
     return 0
   fi
   # Engine resolver still on, which this version turns off.
-  if [ "$1" != docker ] && printf '%s' "$out" | grep -q '"dns_enabled": *true'; then
+  if [ "$ENGINE" != docker ] && printf '%s' "$out" | grep -q '"dns_enabled": *true'; then
     return 0
   fi
   return 1
 }
 
-ensure_offline_network() { # ensure_offline_network <engine> [needs-route]
-  local engine="$1" needs_route="${2:-0}" gw
+# Every engine call goes through engine(), not "$ENGINE": with --account the box
+# runs in the sandbox account's store, and a rootless network defined in the
+# caller's store is invisible there.
+ensure_offline_network() { # ensure_offline_network [needs-route]
+  local needs_route="${1:-0}" gw
   gw="$(offline_gateway)"
   local -a args=(--internal --subnet "$ISOPOD_OFFLINE_SUBNET" --gateway "$gw")
   # An offline box resolves no names, and turning the engine's DNS off keeps the
   # boundary from resting on that resolver declining to forward queries onward.
-  [ "$engine" = docker ] || args+=(--disable-dns)
-  offline_net_routable "$engine" && args+=(--route "0.0.0.0/0,$gw")
+  [ "$ENGINE" = docker ] || args+=(--disable-dns)
+  offline_net_routable && args+=(--route "0.0.0.0/0,$gw")
 
-  if offline_net_exists "$engine"; then
-    offline_net_stale "$engine" || return 0
+  if offline_net_exists; then
+    offline_net_stale || return 0
     info "Recreating '$ISOPOD_OFFLINE_NET' with this version's settings..."
-    if ! "$engine" network rm "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1; then
+    if ! engine network rm "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1; then
       # Boxes are still on it, and an engine keeps a stopped box attached too, so
       # stopping them would not help. Only a microVM box actually needs the newer
       # network: a plain container runs fine on the older one, so say so and carry
@@ -293,12 +304,12 @@ ensure_offline_network() { # ensure_offline_network <engine> [needs-route]
   fi
 
   info "Creating internal offline network '$ISOPOD_OFFLINE_NET' (no route off the host)..."
-  "$engine" network create "${args[@]}" "$ISOPOD_OFFLINE_NET" >/dev/null ||
-    die "could not create $engine network '$ISOPOD_OFFLINE_NET'"
+  engine network create "${args[@]}" "$ISOPOD_OFFLINE_NET" >/dev/null ||
+    die "could not create $ENGINE network '$ISOPOD_OFFLINE_NET'"
   # Taking --route is not the same as honouring it. Where the box needs the route,
   # confirm it landed rather than hand back a box that boots and cannot be reached.
-  if [ "$needs_route" = 1 ] && ! offline_net_has_route "$engine"; then
-    die "$engine took --route for '$ISOPOD_OFFLINE_NET' but the network has no default route, so a microVM box could not reach its guest.
+  if [ "$needs_route" = 1 ] && ! offline_net_has_route; then
+    die "$ENGINE took --route for '$ISOPOD_OFFLINE_NET' but the network has no default route, so a microVM box could not reach its guest.
      Static routes need netavark 1.7 or newer. Add --container to this box, or upgrade netavark."
   fi
 }
@@ -902,8 +913,10 @@ egress_posture_note() { # egress_posture_note <name>
   local name="$1"
   # An offline box has no route out, so no egress verdict applies to it.
   if [ "$(meta_get "$name" offline 2>/dev/null || true)" = 1 ]; then
-    info "Network: OFFLINE — '$name' is on an internal network with no route off this host.
-     Engine-enforced, so nothing in the box can undo it. Reach one host service with:
+    info "Network: OFFLINE — '$name' is on an internal network with no route off this host:
+     no internet, no LAN. Host services bound to all interfaces still answer on the
+     gateway, so bind those to a specific address if that matters. Engine-enforced
+     otherwise, so nothing in the box can undo it. Reach one host service with:
        isopod host-port add $name <port>"
     return 0
   fi
