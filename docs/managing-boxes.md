@@ -93,8 +93,10 @@ build, and overrides of the build args isopod sets itself (`ISOPOD_BASE`,
 image cache tag, so overriding one caches a different image under the legitimate
 image's tag. Use `--image`, `--dev` or `--nested-containers` instead.
 `ISOPOD_RUN_ARGS` — extra args for `run` (e.g. custom DNS). For an offline box
-use `isopod create --offline` rather than a `--network` here, which isopod
-refuses since it already chose the box's network. Args that would undo the sandbox
+use `isopod create --offline`: `--network none` here is always refused, since it
+takes the box off the loopback publish isopod reaches sshd through, and any
+`--network` is refused when isopod already chose the box's network for an egress
+mode or `--offline`. A custom network is yours to set where isopod chose none. Args that would undo the sandbox
 (`-v`, `--mount`, `--privileged`, `--userns`, `--pid`, `--cap-add`,
 `--security-opt`, `--network host`) are refused.
 `ISOPOD_ALLOW_UNSAFE_RUN_ARGS` — set to `1` to confirm you mean one of the
