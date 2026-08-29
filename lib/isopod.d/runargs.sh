@@ -289,9 +289,13 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   case "$_net_mode" in
     offline)
       # The internal network is the whole story: the engine gives the bridge no
-      # route off the host, so there is no resolver to pin or strip and no
-      # firewall to rely on. Caps dropped for the same reason as the egress modes.
-      RUN_ARGS+=(--network "$ISOPOD_OFFLINE_NET" --cap-drop NET_RAW --cap-drop NET_ADMIN)
+      # route off the host, so there is no resolver to pin and no firewall to rely
+      # on. The engine still copies the host's resolv.conf in, though, so drop the
+      # search domain as every other mode does: it names your network, and an
+      # offline box has nothing to resolve with it. Caps dropped for the same
+      # reason as the egress modes.
+      RUN_ARGS+=(--network "$ISOPOD_OFFLINE_NET" --dns-search=.
+        --cap-drop NET_RAW --cap-drop NET_ADMIN)
       _net_set=1
       ;;
     lan-deny)
@@ -361,18 +365,29 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
     # honours is undefined. This is what made the old offline recipe unreliable:
     # ISOPOD_RUN_ARGS="--network=none" landed next to --network isopod0 rather than
     # producing an offline box. --offline is the supported spelling now.
-    if [ "$_net_set" = 1 ]; then
-      local _ra
-      for _ra in "${extra_run[@]}"; do
-        case "$_ra" in
-          --net | --network | --net=* | --network=*)
-            die "ISOPOD_RUN_ARGS sets '$_ra', but this box is already on a network isopod chose
+    local _i _ra _rv
+    for _i in "${!extra_run[@]}"; do
+      _ra="${extra_run[$_i]}"
+      case "$_ra" in
+        --net | --network) _rv="${extra_run[$((_i + 1))]:-}" ;;
+        --net=* | --network=*) _rv="${_ra#*=}" ;;
+        *) continue ;;
+      esac
+      if [ "$_net_set" = 1 ]; then
+        die "ISOPOD_RUN_ARGS sets '$_ra', but this box is already on a network isopod chose
      for it ($_net_mode), and two --network flags conflict.
      For a box with no route out, use:  isopod create <name> --offline"
-            ;;
-        esac
-      done
-    fi
+      fi
+      # Where isopod left the network to the engine there is no conflict, but
+      # 'none' still takes the box off every network including the loopback
+      # publish sshd is reached through, so create fails at the host key scan with
+      # a box that looks healthy in its own logs. This was the old offline recipe.
+      if [ "$_rv" = none ]; then
+        die "ISOPOD_RUN_ARGS sets '$_ra $_rv', which leaves the box on no network at all,
+     so isopod could not reach its sshd and the box would be unusable.
+     For a box with no route out, use:  isopod create <name> --offline"
+      fi
+    done
     RUN_ARGS+=("${extra_run[@]}")
   fi
   RUN_ARGS+=("$image")
