@@ -8,7 +8,7 @@ cmd_create() {
   local name="" branch="" base="$DEFAULT_BASE_IMAGE" color="" port=""
   local memory="" cpus="" sudo_opt=0 no_root_key=0 engine_opt="" dockerfile_opt="" image_opt=0
   local container_opt=0 dev_tools=0 harden_opt="" runtime_opt=""
-  local disk_opt="" nested=0 guest_egress_opt="" account_opt=0 offline=0
+  local disk_opt="" nested=0 guest_egress_opt="" account_opt=0 offline=0 guest_inbound_opt=""
   local -a lan_allow_opts=() host_port_opts=()
   local -a repos=() copies=() exposes=() secrets=()
 
@@ -113,6 +113,10 @@ cmd_create() {
         ;;
       --guest-egress)
         guest_egress_opt="$2"
+        shift 2
+        ;;
+      --guest-inbound)
+        guest_inbound_opt="$2"
         shift 2
         ;;
       --lan-allow)
@@ -372,6 +376,18 @@ cmd_create() {
     on | off) ;;
     *) die "invalid --guest-egress '$BOX_GUEST_EGRESS' (use: on | off)" ;;
   esac
+
+  # Neighbour isolation: drop inbound that did not come from the host, so a box
+  # cannot reach a box beside it on the same engine network. On by default for a
+  # microVM box, which is the only tier whose entrypoint can load a ruleset.
+  # Independent of --guest-egress on purpose: an offline box has guest egress
+  # forced off and still has neighbours.
+  # shellcheck disable=SC2034 # read by build_run_args in another module
+  local BOX_GUEST_INBOUND="${guest_inbound_opt:-on}"
+  case "$BOX_GUEST_INBOUND" in
+    on | off) ;;
+    *) die "invalid --guest-inbound '$BOX_GUEST_INBOUND' (use: on | off)" ;;
+  esac
   # Private-space addresses this box may still reach (--lan-allow, repeatable).
   # Validated here so a typo fails at create time rather than silently producing a
   # box that cannot reach the service it was created for.
@@ -496,6 +512,7 @@ cmd_create() {
     printf 'disk=%s\n' "$BOX_DISK"
     printf 'nested=%s\n' "$BOX_NESTED"
     printf 'offline=%s\n' "$BOX_OFFLINE"
+    printf 'guest_inbound=%s\n' "$BOX_GUEST_INBOUND"
     [ "$account_opt" = 1 ] && printf 'account=1\n'
   } >"$(box_dir "$name")/meta"
   write_box_config "$name"

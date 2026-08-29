@@ -2688,6 +2688,40 @@ setup_run_args_box() { # setup_run_args_box <name> <meta-line...>
   [[ " ${RUN_ARGS[*]} " != *"no-new-privileges"* ]]
 }
 
+# ---- neighbour isolation (--guest-inbound) ----------------------------------
+# Boxes sharing an engine network can reach each other's listening ports. This
+# layer drops inbound that did not come from the host. It is independent of guest
+# egress on purpose: an offline box has guest egress forced off and still has
+# neighbours, which is the case that motivated it.
+@test "neighbour isolation is on for a microVM box by default" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_inbound=on'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_GUEST_INBOUND=1"* ]]
+}
+
+@test "neighbour isolation stays off when the box asked for off" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_inbound=off'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_INBOUND* ]]
+}
+
+# The case the feature exists for: offline forces guest egress off, so tying
+# inbound isolation to guest egress would have left offline boxes uncovered.
+@test "neighbour isolation is on for an offline microVM box" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_inbound=on' 'guest_egress=off' 'offline=1'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_GUEST_INBOUND=1"* ]]
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# A box built before this feature has an entrypoint with no inbound block, so
+# setting the variable would claim a protection the image cannot apply.
+@test "neighbour isolation is off for a box whose meta predates it" {
+  setup_run_args_box demo 'harden=off' 'sudo=0'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_INBOUND* ]]
+}
+
 @test "guest egress is switched on for a microVM box that asked for it" {
   setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=on'
   build_run_args demo localhost/img 127.0.0.1::2222 '' ''

@@ -91,6 +91,19 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         and its proxy lives on a private address). Defence in
                         depth: it runs in the guest, so guest root could remove
                         it — the box user has no sudo or CAP_NET_ADMIN by default.
+  --guest-inbound <on|off>
+                        Neighbour isolation (microVM boxes). ON by default: boxes
+                        sharing an engine network can otherwise reach each other's
+                        listening ports, so a compromised box can attack whatever
+                        the box beside it left running. Drops inbound that did not
+                        come from the host, which is where everything isopod does
+                        (SSH, --expose, DHCP) arrives from. Separate from
+                        --guest-egress because an offline box has that forced off
+                        and still has neighbours. Like guest egress it runs in the
+                        guest, so guest root could remove it, and it does not cover
+                        plain container boxes, whose entrypoint cannot load a
+                        ruleset. Turn it off if a host cannot apply it: a box that
+                        asked for it and cannot get it refuses to start.
   --lan-allow <addr>    Let this box reach one address in private space anyway —
                         an internal registry, a git server, a database on the LAN
                         (repeatable). Names already resolve inside a box, so

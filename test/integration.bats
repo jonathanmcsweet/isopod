@@ -149,6 +149,12 @@ EOF
   assert_output --partial "invalid name"
 }
 
+@test "create rejects a --guest-inbound value that is not on or off" {
+  run "$ISOPOD_ROOT/isopod" create demo --guest-inbound maybe
+  assert_failure
+  assert_output --partial "invalid --guest-inbound"
+}
+
 @test "create refuses --offline with --repo (nothing to clone over)" {
   run "$ISOPOD_ROOT/isopod" create demo --offline --repo https://x/y
   assert_failure
