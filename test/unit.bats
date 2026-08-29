@@ -2395,6 +2395,105 @@ entrypoint_fn() { # entrypoint_fn <name>
   assert_success
 }
 
+# ---- egress_regex_escape -----------------------------------------------------
+# The allow-list feeds a host-security filter and both files can be hand-edited,
+# so an entry must never put a live metacharacter into the trusted filter. This
+# renderer is the one path both files share.
+
+@test "egress_regex_escape leaves hostname characters alone" {
+  run egress_regex_escape "example-host"
+  assert_output "example-host"
+}
+
+@test "egress_regex_escape escapes the label separator" {
+  run egress_regex_escape "example.com"
+  assert_output 'example\.com'
+}
+
+@test "egress_regex_escape neutralises wildcards and quantifiers" {
+  run egress_regex_escape ".*"
+  assert_output '\.\*'
+  run egress_regex_escape 'a+b?'
+  assert_output 'a\+b\?'
+}
+
+@test "egress_regex_escape neutralises alternation and grouping" {
+  run egress_regex_escape "a.com|b.com"
+  assert_output 'a\.com\|b\.com'
+  run egress_regex_escape "(evil)"
+  assert_output '\(evil\)'
+  run egress_regex_escape "[a-z]"
+  assert_output '\[a-z\]'
+}
+
+@test "egress_regex_escape neutralises anchors" {
+  run egress_regex_escape '^a$'
+  assert_output '\^a\$'
+}
+
+@test "egress_regex_escape escapes a backslash rather than passing it through" {
+  run egress_regex_escape 'a\b'
+  assert_output 'a\\b'
+}
+
+@test "egress_regex_escape escapes whitespace and underscore" {
+  run egress_regex_escape "a b_c"
+  assert_output 'a\ b\_c'
+}
+
+@test "egress_regex_escape returns nothing for empty input" {
+  run egress_regex_escape ""
+  assert_output ""
+}
+
+@test "egress_regex_escape handles a very long label" {
+  local long
+  long="$(printf 'a%.0s' $(seq 1 300))"
+  run egress_regex_escape "$long.com"
+  assert_output "$long\\.com"
+}
+
+# Non-ASCII is escaped byte by byte. POSIX ERE leaves `\` before an ordinary
+# character undefined, so a hand-typed IDN most likely matches nothing: it fails
+# CLOSED, which is the safe direction. Real IDNs reach the list punycoded
+# (xn--...), which is plain ASCII and unaffected. Pinned so a future change to
+# the escaping cannot start letting raw bytes through instead.
+@test "egress_regex_escape escapes non-ASCII rather than passing it through" {
+  run egress_regex_escape "münchen.de"
+  [[ "$output" != *"ü"* ]]
+  [[ "$output" == *'\.de' ]]
+  [[ "$output" == m* ]]
+}
+
+# The property the function exists for, end to end: a metacharacter entry must
+# not widen the filter. Without escaping, '.*' renders a regex matching any host.
+@test "an allow-list entry of .* cannot match an arbitrary host" {
+  ISOPOD_EGRESS_ALLOWLIST="$TEST_TMP/sys-allow.conf"
+  USER_EGRESS_ALLOWLIST="$TEST_TMP/user-allow.conf"
+  printf '.*\n' >"$ISOPOD_EGRESS_ALLOWLIST"
+  : >"$USER_EGRESS_ALLOWLIST"
+  local re
+  re="$(egress_filter_regexes)"
+  [ -n "$re" ]
+  printf 'evil.example.net\n' | grep -Eq "$re" && return 1
+  return 0
+}
+
+@test "an ordinary allow-list entry still matches its own host and subdomains" {
+  ISOPOD_EGRESS_ALLOWLIST="$TEST_TMP/sys-allow.conf"
+  USER_EGRESS_ALLOWLIST="$TEST_TMP/user-allow.conf"
+  printf 'example.com\n' >"$ISOPOD_EGRESS_ALLOWLIST"
+  : >"$USER_EGRESS_ALLOWLIST"
+  local re
+  re="$(egress_filter_regexes)"
+  printf 'example.com\n' | grep -Eq "$re"
+  printf 'api.example.com\n' | grep -Eq "$re"
+  # and must not match a look-alike that merely ends with the same text
+  printf 'notexample.com\n' | grep -Eq "$re" && return 1
+  printf 'example.com.evil.net\n' | grep -Eq "$re" && return 1
+  return 0
+}
+
 # ---- assert_safe_build_args --------------------------------------------------
 # The build-args counterpart. Overriding a build arg isopod sets itself is the
 # interesting one: image_tag_for hashes the base image and the dev/nested flags
