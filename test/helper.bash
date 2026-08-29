@@ -78,7 +78,23 @@ isopod_setup_env() {
 }
 
 isopod_teardown_env() {
-  [ -n "${TEST_TMP:-}" ] && rm -rf "$TEST_TMP"
+  [ -n "${TEST_TMP:-}" ] || return 0
+  # Rootless podman writes its overlay layers owned by the subuids mapped into
+  # the box, which the caller cannot unlink from outside the user namespace, so
+  # a plain rm -rf fails on every live test even when the test itself passed.
+  # Delete that tree from inside the namespace, where those uids are ours.
+  if [ -d "$TEST_TMP/home/.local/share/containers" ] && command -v podman >/dev/null 2>&1; then
+    podman unshare rm -rf "$TEST_TMP/home/.local/share/containers" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TEST_TMP" 2>/dev/null || true
+  # A leaked tree is not a test failure, the assertions already ran, but a live
+  # test leaves a whole image store behind, so silence here fills the disk. fd 3 is
+  # bats' diagnostic channel; guard it in case this helper is sourced outside bats.
+  if [ -e "$TEST_TMP" ]; then
+    printf 'note: could not remove %s (try: podman unshare rm -rf %s)\n' \
+      "$TEST_TMP" "$TEST_TMP" >&3 2>/dev/null || true
+  fi
+  return 0
 }
 
 # Source the isopod script's functions without executing main.
