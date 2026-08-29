@@ -915,7 +915,8 @@ egress_posture_note() { # egress_posture_note <name>
   if [ "$(meta_get "$name" offline 2>/dev/null || true)" = 1 ]; then
     info "Network: OFFLINE — '$name' is on an internal network with no route off this host:
      no internet, no LAN. Host services bound to all interfaces still answer on the
-     gateway, so bind those to a specific address if that matters. Engine-enforced
+     gateway, so bind those to a specific address if that matters, and other offline
+     boxes share this network, so they can reach each other. Engine-enforced
      otherwise, so nothing in the box can undo it. Reach one host service with:
        isopod host-port add $name <port>"
     return 0

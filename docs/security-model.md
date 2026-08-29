@@ -31,6 +31,8 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 - **Every possible exploit an agent could theoretically take in your container.** The in-container user has **no `sudo` by default**, and the box additionally runs with `no-new-privileges`, so an agent that gets code execution as the box user cannot escalate to root inside the box. Administration comes from *outside* instead: `isopod root-shell <name>` logs in as root with a key the host generates per box and never places inside it, so there is no password to capture and no setuid path to abuse. Add system packages that way, or from the host with [`isopod install`](managing-boxes.md#adding-a-system-package-isopod-install). Pass **`--sudo`** to opt back into passwordless in-box sudo for a hands-on box — but understand that anything running as the box user, including an agent, inherits it. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` needs them — see [Fingerprint hardening](#fingerprint-hardening).
 
+- **One box reaching another.** Boxes sharing a network can reach each other's listening ports. Host-enforced egress drops this at L3, but a rootless engine cannot load that ruleset and offline boxes are not covered by it, so in those cases treat boxes running at the same time as a single trust domain. Per-box SSH keys keep this out of another box's shell; what is exposed is whatever else an agent left listening. See [Offline boxes are isolated from the world, not from each other](#offline-boxes-are-isolated-from-the-world-not-from-each-other).
+
 - **Unknown exploits.** There is no such thing as perfect security, and isopod can't prevent an exploit no one has discovered yet. It gives you a set of features to incrementally harden your sandbox, not a guarantee.
 
 - **Container escape for standard Podman / Docker containers** Containers share the host kernel. Rootless Podman makes escapes very hard, but a container is not a VM. For "agent might be actively malicious and sophisticated," use the microVM option. For "agent might do dumb destructive things or over-collect data" this is the right tool.
@@ -385,8 +387,15 @@ isopod create devbox --account # this box runs under the account, behind the uid
   v4 rules; if you make it dual-stack, also load the commented `ip6` rules in
   `security/egress-host.nft`.
 - Same-bridge boxes can still discover each other at L2, but not reach each other
-  at L3 (dropped) — and both are equally locked down, so this leaks nothing about
-  the host.
+  at L3 (dropped by the forward chain) — and both are equally locked down, so this
+  leaks nothing about the host. That drop is the *host* ruleset, so it holds only
+  where host-enforced egress is actually loaded. On a rootless engine that cannot
+  load it, and for [offline boxes](#offline-boxes---offline) whose subnet the
+  ruleset does not cover, boxes on one network do reach each other.
+- In-guest egress (`--guest-egress`) does **not** survive root inside the box: the
+  ruleset is loaded by `nft` in the box's own kernel, so a box that reaches root can
+  flush it. Host-enforced egress runs outside the box and is unaffected. Where both
+  are possible, the host-side layer is the stronger one.
 
 ### Reaching one internal service anyway (`egress lan-allow`)
 
@@ -515,6 +524,28 @@ left to filter. To let an offline box reach exactly one service on your machine,
 forward it with [`isopod host-port`](#reaching-a-service-on-your-host-host-port),
 which rides the SSH connection isopod already holds rather than giving the box a
 route.
+
+### Offline boxes are isolated from the world, not from each other
+
+Every offline box joins the same internal network, so they share one subnet and one
+bridge. `--internal` withholds the route *off* the bridge; it does nothing about
+traffic *within* it, and netavark has no per-network switch for that. Two offline
+boxes therefore reach each other's listening ports.
+
+Per-box SSH keys mean this is not a way into another box's shell. The private half
+never leaves the host and the box's sshd accepts keys only, so `sshd` is reachable
+but not enterable. The exposure is whatever *else* a box is listening on: an agent
+that starts a dev server, a debugger (`node --inspect` is remote code execution by
+design), a notebook kernel, or an unauthenticated database has opened it to its
+neighbours. Storage is unaffected either way, since each box has its own overlay and
+its own `--disk` image file.
+
+Being a microVM does not help here. The kernel boundary is stronger, but the network
+position is identical: two offline krun boxes reach each other exactly as two offline
+containers do, because passt maps the guest onto the container's namespace.
+
+Until per-box networks land, treat offline boxes running at the same time as one
+trust domain, and bind what an agent starts to loopback rather than `0.0.0.0`.
 
 ## Network egress allow-list (`egress allow-list`)
 

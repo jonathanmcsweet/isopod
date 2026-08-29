@@ -142,6 +142,8 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         or your LAN. Host services bound to all interfaces do
                         still answer on the bridge gateway, so bind those to a
                         specific address if an offline box should not see them.
+                        Offline boxes also share one network and can reach each
+                        other, so treat two of them as a single trust domain.
                         Enforced by the engine, so the box cannot
                         undo it, and it needs no firewall, no root and no
                         /dev/kvm, which makes it the strongest network boundary
