@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Host verification for the isopod 3.8.0 changes.
+# Host verification for the isopod 3.9.0 changes.
 #
 # Run this from the isopod repo on a machine with a working container engine.
 # It creates throwaway boxes named hv-* and removes them at the end.
 #
-#   bash isopod-host-verify.sh            # everything the host supports
-#   SKIP_LIVE=1 bash isopod-host-verify.sh  # skip the slow live bats suite
+#   bash test/host-verify.sh            # everything the host supports
+#   SKIP_LIVE=1 bash test/host-verify.sh  # skip the slow live bats suite
 #
 # Deliberately does NOT use `set -e`: every check runs and reports, so one
 # failure does not hide the rest.
@@ -29,6 +29,7 @@ skip() {
   SKIP=$((SKIP + 1))
 }
 hdr() { printf '\n=== %s ===\n' "$1"; }
+note() { printf '  [note] %s\n' "$1"; }
 
 # Every isopod call goes through this. Several commands ask for confirmation
 # (upgrade, remap, rm, gc), and this script sends their output to a log file, so a
@@ -76,8 +77,16 @@ fi
 
 # --- B. offline boxes (the newest code, least proven) ------------------------
 hdr "B. Offline box (--offline)"
-if iso create hv-offline --offline >/tmp/hv-offline.log 2>&1; then
+# Prefer whatever runtime this host resolves to. Where the engine cannot put a
+# route on an internal network, create refuses on purpose and names --container:
+# that refusal is the feature working, so take its advice instead of reporting the
+# host as broken and skipping the whole section.
+if iso create hv-offline --offline >/tmp/hv-offline.log 2>&1 ||
+  { grep -q -- '--offline needs a plain container' /tmp/hv-offline.log &&
+    iso create hv-offline --offline --container >>/tmp/hv-offline.log 2>&1; }; then
   ok "offline box created and reachable over SSH"
+  grep -q -- '--offline needs a plain container' /tmp/hv-offline.log &&
+    note "this engine cannot route an internal network, so the box ran with --container (create said so, correctly)"
 
   if iso info hv-offline 2>/dev/null | grep -qi 'OFFLINE'; then
     ok "info reports the OFFLINE posture"

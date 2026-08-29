@@ -1435,6 +1435,63 @@ EOF
 # An internal engine network, NOT --network none: none leaves the box with only
 # loopback, so the published SSH port has nothing to forward to and isopod, which
 # drives a box entirely over SSH, could never reach it.
+# ---- the offline network must live in the store the box runs in -------------
+# With --account the box runs as the sandbox account, and a rootless network is
+# per-user: one defined in the invoking user's store is invisible there, so the
+# run failed with "network not found" after create had already built the image.
+# engine() is what applies the account; calling "$ENGINE" directly bypassed it.
+# Shadowing engine() here means any call that goes around it records nothing and
+# the assertions below fail.
+@test "the offline network is created through engine(), not the engine binary" {
+  ENGINE=podman
+  : >"$TEST_TMP/engine-calls"
+  engine() {
+    printf '%s\n' "$*" >>"$TEST_TMP/engine-calls"
+    case "$*" in
+      *"network create"*"--help"*) printf -- '--route\n' ;;
+      *"network exists"*) return 1 ;;
+    esac
+    return 0
+  }
+  ensure_offline_network 0
+  run cat "$TEST_TMP/engine-calls"
+  assert_output --partial "network create"
+  assert_output --partial "isopod-offline"
+}
+
+@test "the offline network probes all go through engine() too" {
+  ENGINE=podman
+  : >"$TEST_TMP/engine-calls"
+  engine() {
+    printf '%s\n' "$*" >>"$TEST_TMP/engine-calls"
+    case "$*" in
+      *"network create"*"--help"*) printf -- '--route\n' ;;
+    esac
+    return 0
+  }
+  # Verdicts do not matter here, only that each probe reached engine().
+  offline_net_exists || true
+  offline_net_has_route || true
+  run cat "$TEST_TMP/engine-calls"
+  assert_output --partial "network exists"
+  assert_output --partial "network inspect"
+}
+
+# The probe forks an engine process, and its answer cannot change within a run.
+@test "offline_net_routable asks the engine only once" {
+  ENGINE=podman
+  : >"$TEST_TMP/engine-calls"
+  engine() {
+    printf '%s\n' "$*" >>"$TEST_TMP/engine-calls"
+    printf -- '--route\n'
+  }
+  offline_net_routable
+  offline_net_routable
+  offline_net_routable
+  run wc -l <"$TEST_TMP/engine-calls"
+  assert_output "1"
+}
+
 @test "build_run_args puts an offline box on the internal network" {
   ENGINE=podman
   BOX_OFFLINE=1 build_run_args box img 127.0.0.1::2222 "" ""
@@ -1519,12 +1576,38 @@ EOF
   assert_failure
   assert_output --partial "two --network flags conflict"
 }
-@test "build_run_args passes --network=none through when egress is off" {
+# With egress off isopod picks no network, so there is no conflicting flag -- but
+# 'none' still takes the box off the loopback publish sshd is reached through, so
+# create would fail at the host key scan. This is the old offline recipe the docs
+# now send to --offline, so it is refused on its own terms, not as a conflict.
+@test "build_run_args refuses --network=none even when isopod chose no network" {
   ENGINE=podman
   ISOPOD_EGRESS=off ISOPOD_RUN_ARGS="--network=none" \
+    run build_run_args box img 127.0.0.1::2222 "" ""
+  assert_failure
+  assert_output --partial "no network at all"
+}
+@test "build_run_args refuses a separated --network none when isopod chose no network" {
+  ENGINE=podman
+  ISOPOD_EGRESS=off ISOPOD_RUN_ARGS="--network none" \
+    run build_run_args box img 127.0.0.1::2222 "" ""
+  assert_failure
+  assert_output --partial "no network at all"
+}
+# A custom network is still the caller's business where isopod chose none.
+@test "build_run_args passes a non-none --network through when egress is off" {
+  ENGINE=podman
+  ISOPOD_EGRESS=off ISOPOD_RUN_ARGS="--network=mynet" \
     build_run_args box img 127.0.0.1::2222 "" ""
   local joined="${RUN_ARGS[*]}"
-  [[ "$joined" == *"--network=none"* ]]
+  [[ "$joined" == *"--network=mynet"* ]]
+}
+# The offline branch is no longer the one mode that leaks the host search domain.
+@test "build_run_args drops the host DNS search domain for an offline box" {
+  ENGINE=podman
+  BOX_OFFLINE=1 build_run_args obox img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--dns-search=."* ]]
 }
 @test "build_run_args auto-adds krun.use_passt for a krun microVM (virtio-net for isopod code)" {
   ENGINE=podman
