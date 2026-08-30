@@ -2821,6 +2821,56 @@ setup_run_args_box() { # setup_run_args_box <name> <meta-line...>
   [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_INBOUND* ]]
 }
 
+# The posture line is the only place a user sees whether this layer is in force.
+# It has to follow the same rule as the guest egress verdict: report what the box
+# GOT, not what create recorded. A container box keeps guest_inbound=on in meta
+# and never loads the chain, so reporting from meta alone would promise neighbour
+# isolation on exactly the tier that does not have it.
+@test "box_inbound_posture reports isolation for a microVM box" {
+  mk_meta demo 'guest_inbound=on' 'runtime=krun'
+  run box_inbound_posture demo
+  assert_output --partial 'isolated'
+}
+
+@test "box_inbound_posture reports OPEN for a container box despite guest_inbound=on" {
+  mk_meta demo 'guest_inbound=on' 'runtime=container'
+  run box_inbound_posture demo
+  assert_output --partial 'OPEN'
+  refute_output --partial 'isolated'
+}
+
+@test "box_inbound_posture reports OPEN for a gVisor box" {
+  mk_meta demo 'guest_inbound=on' 'runtime=runsc'
+  run box_inbound_posture demo
+  assert_output --partial 'OPEN'
+}
+
+@test "box_inbound_posture reports OPEN when the box asked for off" {
+  mk_meta demo 'guest_inbound=off' 'runtime=krun'
+  run box_inbound_posture demo
+  assert_output --partial 'OPEN'
+}
+
+# A box built before the feature has no guest_inbound line and an entrypoint with
+# no inbound block, so absent must read as OPEN, never as protected.
+@test "box_inbound_posture reports OPEN for a box whose meta predates the feature" {
+  mk_meta demo 'runtime=krun'
+  run box_inbound_posture demo
+  assert_output --partial 'OPEN'
+}
+
+# An offline box is the case the feature exists for, and its egress posture
+# returns early with OFFLINE, so the neighbour verdict has to be its own line or
+# it would never be shown for exactly the boxes that need it.
+@test "box_inbound_posture reports an offline microVM box as isolated" {
+  mk_meta demo 'guest_inbound=on' 'runtime=krun' 'offline=1'
+  run box_inbound_posture demo
+  assert_output --partial 'isolated'
+  run box_egress_posture demo
+  assert_output --partial 'OFFLINE'
+  refute_output --partial 'isolated'
+}
+
 @test "guest egress is switched on for a microVM box that asked for it" {
   setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_egress=on'
   build_run_args demo localhost/img 127.0.0.1::2222 '' ''
