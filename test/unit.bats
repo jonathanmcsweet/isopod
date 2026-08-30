@@ -1814,10 +1814,24 @@ author <box@isopod> 1700000000 +0000
 @test "remap filter does not backtrack on a long crafted ident line" {
   # A 180KB author line of " <" took 24s of host CPU under the old greedy
   # pattern, and scaled quadratically from there.
+  #
+  # The bound needs a timeout command, and `timeout` is coreutils: absent on
+  # stock macOS, where brew ships it as gtimeout. Skip rather than run unbounded,
+  # since the whole point is that a regression here hangs -- an unbounded run
+  # would take the suite with it instead of failing this one test. The behaviour
+  # is Python's, not the platform's, so Linux CI covers it.
+  local to=""
+  if command -v timeout >/dev/null 2>&1; then
+    to=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    to=gtimeout
+  else
+    skip "no timeout command (brew install coreutils) to bound this safely"
+  fi
   printf 'Me <me@host> <box@isopod>\n' >"$TEST_TMP/mm"
   local big
   big="author $(printf ' <%.0s' $(seq 1 20000)) 1 +0000"
-  run timeout 15 bash -c "printf '%s\n' \"\$1\" | MAILMAP_FILE='$TEST_TMP/mm' python3 '$ISOPOD_LIB/remap_identity_filter.py'" _ "$big"
+  run "$to" 15 bash -c "printf '%s\n' \"\$1\" | MAILMAP_FILE='$TEST_TMP/mm' python3 '$ISOPOD_LIB/remap_identity_filter.py'" _ "$big"
   assert_success
 }
 
