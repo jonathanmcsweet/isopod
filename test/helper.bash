@@ -63,6 +63,13 @@ isopod_hermetic_bin() {
 # Create a sandboxed environment for a single test.
 isopod_setup_env() {
   TEST_TMP="$(mktemp -d "${BATS_TMPDIR:-/tmp}/isopod-test.XXXXXX")"
+  # Physical path, not the one mktemp handed back: on macOS that is under /var,
+  # which is itself a symlink to /private/var. Anything under test that walks a
+  # path component by component (iso_mkdir_safe refuses a symlinked component,
+  # by design) then trips on the first element and never reaches what the test
+  # set up -- one test fails outright and its negative-control siblings pass for
+  # the wrong reason. A box's paths are real, so this is the harness's problem.
+  TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
   export TEST_TMP
   export HOME="$TEST_TMP/home"
   export ISOPOD_CONFIG_DIR="$TEST_TMP/home/.config/isopod"
