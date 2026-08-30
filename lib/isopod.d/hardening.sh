@@ -253,6 +253,50 @@ is_microvm_runtime() {
   [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
 }
 
+# What isolation a BOX actually got, for `isopod info`. Reads the runtime recorded
+# at create time, not the active one, so it stays true when the config changes
+# underneath an existing box.
+# Classification comes from box_isolation so this text and `info --json` can never
+# describe the same box differently, and an unrecognized runtime is reported as
+# unrecognized rather than asserted to share the host kernel.
+box_runtime_posture() { # box_runtime_posture <name>
+  local rt label
+  rt="$(meta_get "$1" runtime 2>/dev/null || true)"
+  label="${rt##*/}"
+  [ -n "$label" ] || label="$(box_engine "$1" 2>/dev/null || printf container)"
+  case "$(box_isolation "$1")" in
+    microvm) printf 'microVM (%s); own guest kernel behind a KVM boundary' "$label" ;;
+    sandbox) printf 'gVisor (%s); synthetic /proc, /sys and syscalls over a shared host kernel' "$label" ;;
+    container) printf 'plain container; shares the host kernel (isopod doctor reports what this machine can add)' ;;
+    *) printf 'unrecognized runtime (%s); isopod cannot say what boundary it gives' "$label" ;;
+  esac
+}
+
+# State the isolation tier the box actually GOT, and when it is below the strongest
+# one, the single thing that would raise it. resolve_runtime already warns when it
+# steps down, but a warning scrolls past and names what failed rather than what the
+# box has. isopod degrades on purpose rather than refusing to start, because a box
+# you can run beats isolation you never finish installing, and that trade only
+# works if the result stays legible afterwards.
+runtime_posture_note() {
+  local rt tier
+  rt="$(active_runtime 2>/dev/null || true)"
+  tier="$(runtime_tier "$rt" 2>/dev/null || printf 1)"
+  [ -n "$tier" ] || tier=1
+  case "$tier" in
+    3) info "Isolation: microVM (${rt##*/}) — its own guest kernel behind a KVM boundary." ;;
+    2) info "Isolation: gVisor (${rt##*/}) — synthetic /proc, /sys and syscalls over a shared host kernel." ;;
+    *)
+      info "Isolation: plain container — shares the host kernel. Copy-not-mount, loopback-only
+     SSH and the fingerprint masks all still apply."
+      if is_linux; then
+        info "     For a per-box kernel boundary, add a microVM runtime and create the box again.
+     'isopod doctor' reports /dev/kvm and the runtimes your machine can use."
+      fi
+      ;;
+  esac
+}
+
 # Print the box's effective kernel-hardening posture at create (like
 # egress_posture_note), so what the box actually got is legible. The default
 # profile's guest-sysctl arm applies only to microVM boxes (their own kernel);

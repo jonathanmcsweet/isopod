@@ -12,7 +12,7 @@
 #      symlink — the exact path that broke under brew
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
 c_grn=$'\033[32m'
 c_red=$'\033[31m'
@@ -57,11 +57,22 @@ HOME="$home" XDG_DATA_HOME="$home/.local/share" \
 
 bin="$prefix/bin/isopod"
 [ -x "$bin" ] || fail "install.sh did not produce $bin"
-out="$("$bin" help 2>&1)" || true
+rc=0
+out="$("$bin" help 2>&1)" || rc=$?
 case "$out" in
   *"missing template"*) fail "packaged install can't find its templates: $out" ;;
 esac
-printf '%s' "$out" | grep -q 'Usage:' || fail "packaged 'isopod help' did not render usage.txt"
+# Report what it actually printed. Failing with only "did not render" throws away
+# the one thing that identifies the cause, and costs a whole round trip to get back.
+# Matched with `case`, not `printf | grep -q`: grep exits on the first match, printf
+# then takes SIGPIPE, and pipefail turns a successful match into a failed pipeline.
+case "$out" in
+  *"Usage:"*) ;;
+  *) fail "packaged 'isopod help' did not render usage.txt (exit $rc).
+  installed from : $ROOT
+  ran            : $bin
+  it printed     : $([ -z "$out" ] && printf '(nothing)' || printf '%s' "$out" | head -5)" ;;
+esac
 ok "packaged install renders templates through the bin symlink"
 
 printf '%spackaging checks passed%s\n' "$c_grn" "$c_rst"

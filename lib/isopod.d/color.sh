@@ -55,7 +55,22 @@ resolve_color() { # resolve_color <preset|hex>
 apply_color() { # apply_color <name> <hexcolor>
   local name="$1" hex="$2" script="$ISOPOD_LIB/apply_color.py"
   [ -f "$script" ] || die "missing helper: $script (is your isopod install complete?)"
-  box_ssh "$name" -- \
+  # The box picks which python3 runs here, so both streams are box-controlled and
+  # get the same control-character stripping as every other box output the host
+  # prints. This runs on start/restart too, i.e. exactly when the user is
+  # re-attaching to a box that may already be compromised.
+  #
+  # Captured, NOT piped through `> >(sanitize_stream)`: bash does not wait for a
+  # process substitution, and ssh can leave the pipe's write end open in a child,
+  # so the reader never sees EOF and create hangs. Deadlocked a create for hours.
+  local out="" err="" errf rc=0
+  errf="$(mktemp "${TMPDIR:-/tmp}/isopod-color.XXXXXX")" || die "could not create a temp file"
+  out="$(box_ssh "$name" -- \
     env "ISOPOD_COLOR=$hex" "ISOPOD_NAME=$name" "ISOPOD_WS=$WORKSPACE" \
-    python3 - <"$script"
+    python3 - <"$script" 2>"$errf")" || rc=$?
+  err="$(cat "$errf" 2>/dev/null || true)"
+  rm -f "$errf"
+  [ -n "$out" ] && printf '%s\n' "$out" | sanitize_stream
+  [ -n "$err" ] && printf '%s\n' "$err" | sanitize_stream >&2
+  return "$rc"
 }

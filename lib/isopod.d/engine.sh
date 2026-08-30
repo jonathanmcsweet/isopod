@@ -347,6 +347,31 @@ engine_build_extra() {
   printf '%s\n' $ISOPOD_BUILD_ARGS
 }
 
+# The build-args counterpart to assert_safe_run_args. Two refusals:
+#   host mounts into the build context, same reasoning as the run-args check;
+#   overrides of the build args isopod sets itself. image_tag_for hashes the base
+#   image and the dev/nested flags into the cache tag, so overriding one builds a
+#   DIFFERENT image and caches it under the legitimate image's tag, where every
+#   later create reuses it. ISOPOD_SSHD_PORT must match BOX_SSHD_PORT or the box
+#   comes up unreachable. Same override as the run-args check.
+assert_safe_build_args() { # assert_safe_build_args <arg...>
+  [ "${ISOPOD_ALLOW_UNSAFE_RUN_ARGS:-0}" = 1 ] && return 0
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -v | --volume | --mount | -v=* | --volume=* | --mount=*)
+        die "ISOPOD_BUILD_ARGS contains '$a', which would expose host files to the image build.
+     If you genuinely need it, set ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 to confirm."
+        ;;
+      ISOPOD_BASE=* | ISOPOD_USER=* | ISOPOD_SSHD_PORT=* | ISOPOD_DEV_TOOLS=* | ISOPOD_NESTED=* | --build-arg=ISOPOD_*)
+        die "ISOPOD_BUILD_ARGS overrides '$a', which isopod sets itself and hashes into the image
+     cache tag, so the result would be cached under a different image's tag.
+     Use the matching isopod flag instead (--image, --dev, --nested-containers)."
+        ;;
+    esac
+  done
+}
+
 build_image() { # build_image <base-image> [dev-tools 0|1] [nested 0|1] -> echoes tag
   local base="$1" dev="${2:-0}" nested="${3:-0}" tag
   tag=$(image_tag_for "$base" "$dev" "$nested")
@@ -357,6 +382,7 @@ build_image() { # build_image <base-image> [dev-tools 0|1] [nested 0|1] -> echoe
   info "Building sandbox base image from $base (one-time$([ "$dev" = 1 ] && printf ', with --dev toolchain')$([ "$nested" = 1 ] && printf ', with nested podman'))..." >&2
   local -a extra_build=()
   mapfile -t extra_build < <(engine_build_extra)
+  [ "${#extra_build[@]}" -gt 0 ] && assert_safe_build_args "${extra_build[@]}"
   # Minimal build context: only the files the Dockerfile COPYs in. Apple
   # `container build` requires the Dockerfile to live INSIDE the context directory
   # (it rejects a -f path outside it, and trips on a '//' in the path), so for that
@@ -430,6 +456,7 @@ build_user_image() { # build_user_image <dockerfile-path> -> echoes tag
   info "Building image from $df (context: $ctx, one-time)..." >&2
   local -a extra_build=()
   mapfile -t extra_build < <(engine_build_extra)
+  [ "${#extra_build[@]}" -gt 0 ] && assert_safe_build_args "${extra_build[@]}"
   if ! engine build "${extra_build[@]}" -t "$tag" -f "$df" "$ctx" >&2; then
     die "build of $df failed (see output above)"
   fi

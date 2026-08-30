@@ -193,6 +193,127 @@ ensure_egress_network() { # ensure_egress_network <engine>
   fi
 }
 
+# The offline network (`isopod create --offline`): an internal bridge with no
+# route off the host.
+#
+# `--network none` is the obvious spelling and the wrong one: it leaves the box
+# with only loopback, so the published SSH port has nothing to forward to and
+# isopod, which drives a box entirely over SSH, can never reach it. An internal
+# network keeps the box reachable from the host while the engine denies it any
+# route outward, which is the combination an offline box actually needs.
+# Make sure a box's own network exists before it is recreated. Only offline boxes
+# need this: their internal network is created at create time, and a rebuild months
+# later would otherwise fail if it had been removed in between.
+ensure_box_network() { # ensure_box_network <name>
+  [ "$(meta_get "$1" offline 2>/dev/null || true)" = 1 ] || return 0
+  # Only a Tier 3 box needs the default route, so read the runtime this box was
+  # built with rather than whatever is active now.
+  local needs_route=0
+  [ "$(runtime_tier "$(meta_get "$1" runtime 2>/dev/null || true)" 2>/dev/null)" = 3 ] && needs_route=1
+  ensure_offline_network "$needs_route"
+}
+
+# The offline network's gateway: explicit, or the .1 of a /24 subnet.
+offline_gateway() {
+  [ -n "$ISOPOD_OFFLINE_GATEWAY" ] && {
+    printf '%s' "$ISOPOD_OFFLINE_GATEWAY"
+    return 0
+  }
+  case "$ISOPOD_OFFLINE_SUBNET" in
+    *.0/24) printf '%s1' "${ISOPOD_OFFLINE_SUBNET%0/24}" ;;
+    *) die "set ISOPOD_OFFLINE_GATEWAY: no gateway can be derived from ISOPOD_OFFLINE_SUBNET ($ISOPOD_OFFLINE_SUBNET)" ;;
+  esac
+}
+
+# Can this engine put a default route on an internal network? podman 5's --route
+# can; docker has no equivalent. An internal network defines a gateway but
+# installs no default route, since withholding it is what makes the network
+# internal, and passt picks its template interface by following that route. So
+# without --route a microVM's guest comes up unreachable, which is the pair
+# cmd_create refuses.
+# Memoized: the answer cannot change within a run, and each probe is an engine
+# process on the create path.
+_OFFLINE_ROUTABLE=""
+offline_net_routable() {
+  if [ -z "$_OFFLINE_ROUTABLE" ]; then
+    _OFFLINE_ROUTABLE=1
+    if [ "$ENGINE" != docker ] && engine network create --help 2>/dev/null | grep -q -- '--route'; then
+      _OFFLINE_ROUTABLE=0
+    fi
+  fi
+  return "$_OFFLINE_ROUTABLE"
+}
+
+offline_net_exists() {
+  if [ "$ENGINE" = docker ]; then
+    engine network inspect "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1
+  else
+    engine network exists "$ISOPOD_OFFLINE_NET" 2>/dev/null
+  fi
+}
+
+# Did the created network actually get the default route? An engine can accept
+# --route and ignore it, and the box only finds out by being unreachable.
+offline_net_has_route() {
+  engine network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null | grep -q '0\.0\.0\.0/0'
+}
+
+# Is an existing network missing what this version creates? Matched on the text,
+# not on inspect fields, so it reads the same across engine schema versions.
+offline_net_stale() {
+  local out
+  out="$(engine network inspect "$ISOPOD_OFFLINE_NET" 2>/dev/null || true)"
+  # No default route on an engine that can add one: a microVM box cannot reach
+  # its guest over this network.
+  if offline_net_routable && ! printf '%s' "$out" | grep -q '0\.0\.0\.0/0'; then
+    return 0
+  fi
+  # Engine resolver still on, which this version turns off.
+  if [ "$ENGINE" != docker ] && printf '%s' "$out" | grep -q '"dns_enabled": *true'; then
+    return 0
+  fi
+  return 1
+}
+
+# Every engine call goes through engine(), not "$ENGINE": with --account the box
+# runs in the sandbox account's store, and a rootless network defined in the
+# caller's store is invisible there.
+ensure_offline_network() { # ensure_offline_network [needs-route]
+  local needs_route="${1:-0}" gw
+  gw="$(offline_gateway)"
+  local -a args=(--internal --subnet "$ISOPOD_OFFLINE_SUBNET" --gateway "$gw")
+  # An offline box resolves no names, and turning the engine's DNS off keeps the
+  # boundary from resting on that resolver declining to forward queries onward.
+  [ "$ENGINE" = docker ] || args+=(--disable-dns)
+  offline_net_routable && args+=(--route "0.0.0.0/0,$gw")
+
+  if offline_net_exists; then
+    offline_net_stale || return 0
+    info "Recreating '$ISOPOD_OFFLINE_NET' with this version's settings..."
+    if ! engine network rm "$ISOPOD_OFFLINE_NET" >/dev/null 2>&1; then
+      # Boxes are still on it, and an engine keeps a stopped box attached too, so
+      # stopping them would not help. Only a microVM box actually needs the newer
+      # network: a plain container runs fine on the older one, so say so and carry
+      # on rather than fail a create that would have worked.
+      [ "$needs_route" = 1 ] &&
+        die "a microVM box needs a default route on '$ISOPOD_OFFLINE_NET' to reach its guest, and boxes still on that network block recreating it.
+     Remove them (isopod rm <name>), or add --container to this box."
+      warn "keeping the existing '$ISOPOD_OFFLINE_NET': boxes are still on it, so this box misses the newer network settings"
+      return 0
+    fi
+  fi
+
+  info "Creating internal offline network '$ISOPOD_OFFLINE_NET' (no route off the host)..."
+  engine network create "${args[@]}" "$ISOPOD_OFFLINE_NET" >/dev/null ||
+    die "could not create $ENGINE network '$ISOPOD_OFFLINE_NET'"
+  # Taking --route is not the same as honouring it. Where the box needs the route,
+  # confirm it landed rather than hand back a box that boots and cannot be reached.
+  if [ "$needs_route" = 1 ] && ! offline_net_has_route; then
+    die "$ENGINE took --route for '$ISOPOD_OFFLINE_NET' but the network has no default route, so a microVM box could not reach its guest.
+     Static routes need netavark 1.7 or newer. Add --container to this box, or upgrade netavark."
+  fi
+}
+
 # Is the host egress firewall loaded? 0 = loaded, 1 = not loaded, 2 = unknown
 # (nft missing, or reading it needs root we don't have — a false "not loaded"
 # would be misleading, so we report unknown instead).
@@ -497,17 +618,25 @@ egress_filter_regexes() {
       [ -n "${dom:-}" ] || continue
       case "$dom" in
         \*.*)
-          esc="${dom#\*.}"
-          esc="${esc//./\\.}"
+          esc="$(egress_regex_escape "${dom#\*.}")"
           printf '^.+\\.%s$\n' "$esc"
           ;;
         *)
-          esc="${dom//./\\.}"
+          esc="$(egress_regex_escape "$dom")"
           printf '^(.*\\.)?%s$\n' "$esc"
           ;;
       esac
     done <"$f"
   done
+}
+
+# Escape every character that is not a literal hostname character, so no entry can
+# put a regex metacharacter into the trusted filter file. `egress allow` validates
+# what it appends, but both allow-list files can also be edited by hand, and this
+# renderer is the one path they share. An entry with a stray metacharacter ends up
+# matching nothing rather than matching too much.
+egress_regex_escape() { # egress_regex_escape <text>
+  printf '%s' "$1" | sed 's/[^a-zA-Z0-9-]/\\&/g'
 }
 
 # Write the rendered filter file (deduped) to the host state dir.
@@ -706,11 +835,20 @@ egress_doctor_engines_and_fw() {
 #   allow-list -> lan-deny (proxy not up) -> off (rootless / firewall not loaded)
 # Sets ISOPOD_EGRESS in-process so the rest of the run (preflight, build_run_args)
 # sees the achievable mode. Silence any degrade with ISOPOD_EGRESS=off.
-resolve_egress() { # resolve_egress <engine>
-  local engine="$1" mode
+resolve_egress() { # resolve_egress <engine> [offline]
+  local engine="$1" offline="${2:-0}" mode
   # Set when default-on egress is walked all the way down to an OPEN network, so
   # create/reconfigure can make that unmissable in their summary (egress_posture_note).
   ISOPOD_EGRESS_DEGRADED=0
+  # An offline box has no route out, so there is no mode to walk down and warning
+  # about an OPEN network here would contradict the posture the box ends up with.
+  # Still turn egress off for the rest of the run: the rebuild paths take their
+  # mode from here, and leaving it on makes preflight try to enforce a mode the
+  # box cannot use, which fails the rebuild.
+  if [ "$offline" = 1 ]; then
+    export ISOPOD_EGRESS=off
+    return 0
+  fi
   mode="$(active_egress)"
   [ -n "$mode" ] || return 0        # already off
   egress_explicitly_set && return 0 # opt-in: leave fail-closed preflight in charge
@@ -773,6 +911,16 @@ resolve_egress() { # resolve_egress <engine>
 # reconfigure time. Reads the resolved mode and the degrade flag resolve_egress set.
 egress_posture_note() { # egress_posture_note <name>
   local name="$1"
+  # An offline box has no route out, so no egress verdict applies to it.
+  if [ "$(meta_get "$name" offline 2>/dev/null || true)" = 1 ]; then
+    info "Network: OFFLINE — '$name' is on an internal network with no route off this host:
+     no internet, no LAN. Host services bound to all interfaces still answer on the
+     gateway, so bind those to a specific address if that matters, and other offline
+     boxes share this network, so they can reach each other. Engine-enforced
+     otherwise, so nothing in the box can undo it. Reach one host service with:
+       isopod host-port add $name <port>"
+    return 0
+  fi
   case "$(active_egress)" in
     allow-list) info "Network: egress allow-list ACTIVE — only allow-listed hosts reachable (host-filtered)." ;;
     lan-deny) info "Network: egress lan-deny ACTIVE — LAN/host/metadata blocked, public internet reachable." ;;
@@ -1187,7 +1335,9 @@ egress_lan_denied() { # egress_lan_denied <name> [count]
     die "$name is not running (start it with: isopod start $name)"
 
   local out
-  out="$(root_ssh "$name" -- "sh -s -- denied $n" <"$helper" 2>/dev/null || true)"
+  # Box-sourced report, so strip control characters before any of it reaches the
+  # host terminal (same treatment as fetch/remap/export output).
+  out="$(root_ssh "$name" -- "sh -s -- denied $n" <"$helper" 2>/dev/null | sanitize_stream || true)"
   if [ -z "$out" ]; then
     printf 'nothing blocked recently for %s\n' "$name"
     if box_is_stale "$name" 2>/dev/null; then
@@ -1328,6 +1478,12 @@ egress_allow() { # egress_allow <domain>
   case "$dom" in
     "" | *[!a-zA-Z0-9.*-]*) die "invalid domain: '$dom' (letters, digits, '.', '-', leading '*.' only)" ;;
   esac
+  # '*' is a regex metacharacter in the rendered filter and only means anything as
+  # the leading '*.' wildcard. Anywhere else it silently widens the match
+  # ('foo*.com' would become 'fo' followed by any number of 'o').
+  case "${dom#\*.}" in
+    *\**) die "invalid domain: '$dom' ('*' is only allowed as a leading '*.')" ;;
+  esac
   mkdir -p "$CONFIG_DIR"
   if [ -f "$USER_EGRESS_ALLOWLIST" ] && grep -qxF "$dom" "$USER_EGRESS_ALLOWLIST" 2>/dev/null; then
     info "'$dom' is already in your allow-list ($USER_EGRESS_ALLOWLIST)"
@@ -1385,8 +1541,23 @@ egress_allowlist_show() {
 # scrolled away — which is how a box ends up open while its owner believes
 # otherwise. Names the in-guest layer too, so "blocked" is never ambiguous about
 # which mechanism is doing it.
+# Was this box's egress mode walked down to an open network? False for an offline
+# box whatever its meta says: it has no route out, so no egress mode ever applied.
+# create resolves egress before --offline is handled, so boxes already on disk
+# carry a flag that was never true of them.
+box_egress_degraded() { # box_egress_degraded <name>
+  [ "$(meta_get "$1" offline 2>/dev/null || true)" = 1 ] && return 1
+  [ "$(meta_get "$1" egress_degraded 2>/dev/null || printf 0)" = 1 ]
+}
+
 box_egress_posture() { # box_egress_posture <name>
   local mode degraded guest guest_on=0
+  # An offline box has no route out at all, so no egress mode applies and none of
+  # the host-firewall verdicts below mean anything for it. Say what it is.
+  if [ "$(meta_get "$1" offline 2>/dev/null || true)" = 1 ]; then
+    printf 'OFFLINE (internal network, no route off the host; engine-enforced)'
+    return 0
+  fi
   mode="$(meta_get "$1" egress 2>/dev/null || true)"
   degraded="$(meta_get "$1" egress_degraded 2>/dev/null || printf 0)"
   guest="$(meta_get "$1" guest_egress 2>/dev/null || true)"

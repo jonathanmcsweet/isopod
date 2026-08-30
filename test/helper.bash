@@ -10,7 +10,11 @@
 #   * Point ISOPOD_CONFIG_DIR and HOME at a per-test tmp dir so nothing
 #     touches the real machine and tests are hermetic.
 
-ISOPOD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# -P resolves symlinks, matching what the isopod script computes for itself
+# (_resolve_script_dir uses `cd -P`). On an ostree distro (Silverblue, Kinoite,
+# Bazzite) /home is a symlink to /var/home, so the logical path disagrees with the
+# physical one and every test comparing a path against isopod's output fails.
+ISOPOD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 export ISOPOD_ROOT
 
 load_libs() {
@@ -59,6 +63,13 @@ isopod_hermetic_bin() {
 # Create a sandboxed environment for a single test.
 isopod_setup_env() {
   TEST_TMP="$(mktemp -d "${BATS_TMPDIR:-/tmp}/isopod-test.XXXXXX")"
+  # Physical path, not the one mktemp handed back: on macOS that is under /var,
+  # which is itself a symlink to /private/var. Anything under test that walks a
+  # path component by component (iso_mkdir_safe refuses a symlinked component,
+  # by design) then trips on the first element and never reaches what the test
+  # set up -- one test fails outright and its negative-control siblings pass for
+  # the wrong reason. A box's paths are real, so this is the harness's problem.
+  TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
   export TEST_TMP
   export HOME="$TEST_TMP/home"
   export ISOPOD_CONFIG_DIR="$TEST_TMP/home/.config/isopod"
@@ -74,7 +85,23 @@ isopod_setup_env() {
 }
 
 isopod_teardown_env() {
-  [ -n "${TEST_TMP:-}" ] && rm -rf "$TEST_TMP"
+  [ -n "${TEST_TMP:-}" ] || return 0
+  # Rootless podman writes its overlay layers owned by the subuids mapped into
+  # the box, which the caller cannot unlink from outside the user namespace, so
+  # a plain rm -rf fails on every live test even when the test itself passed.
+  # Delete that tree from inside the namespace, where those uids are ours.
+  if [ -d "$TEST_TMP/home/.local/share/containers" ] && command -v podman >/dev/null 2>&1; then
+    podman unshare rm -rf "$TEST_TMP/home/.local/share/containers" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TEST_TMP" 2>/dev/null || true
+  # A leaked tree is not a test failure, the assertions already ran, but a live
+  # test leaves a whole image store behind, so silence here fills the disk. fd 3 is
+  # bats' diagnostic channel; guard it in case this helper is sourced outside bats.
+  if [ -e "$TEST_TMP" ]; then
+    printf 'note: could not remove %s (try: podman unshare rm -rf %s)\n' \
+      "$TEST_TMP" "$TEST_TMP" >&3 2>/dev/null || true
+  fi
+  return 0
 }
 
 # Source the isopod script's functions without executing main.

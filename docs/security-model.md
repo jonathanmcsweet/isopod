@@ -31,6 +31,8 @@ We have some mitigations for a snooping AI agent fingerprinting your host machin
 
 - **Every possible exploit an agent could theoretically take in your container.** The in-container user has **no `sudo` by default**, and the box additionally runs with `no-new-privileges`, so an agent that gets code execution as the box user cannot escalate to root inside the box. Administration comes from *outside* instead: `isopod root-shell <name>` logs in as root with a key the host generates per box and never places inside it, so there is no password to capture and no setuid path to abuse. Add system packages that way, or from the host with [`isopod install`](managing-boxes.md#adding-a-system-package-isopod-install). Pass **`--sudo`** to opt back into passwordless in-box sudo for a hands-on box — but understand that anything running as the box user, including an agent, inherits it. The container also intentionally keeps Linux capabilities (no `--cap-drop=ALL`), since `sshd` needs them — see [Fingerprint hardening](#fingerprint-hardening).
 
+- **One box reaching another.** Boxes sharing a network can reach each other's listening ports. Host-enforced egress drops this at L3, but a rootless engine cannot load that ruleset and offline boxes are not covered by it, so in those cases treat boxes running at the same time as a single trust domain. Per-box SSH keys keep this out of another box's shell; what is exposed is whatever else an agent left listening. See [Offline boxes are isolated from the world, not from each other](#offline-boxes-are-isolated-from-the-world-not-from-each-other).
+
 - **Unknown exploits.** There is no such thing as perfect security, and isopod can't prevent an exploit no one has discovered yet. It gives you a set of features to incrementally harden your sandbox, not a guarantee.
 
 - **Container escape for standard Podman / Docker containers** Containers share the host kernel. Rootless Podman makes escapes very hard, but a container is not a VM. For "agent might be actively malicious and sophisticated," use the microVM option. For "agent might do dumb destructive things or over-collect data" this is the right tool.
@@ -380,13 +382,20 @@ isopod create devbox --account # this box runs under the account, behind the uid
 
 - Blocks your **LAN/host/metadata/internal-DNS**, not exfiltration to arbitrary
   **public** IPs — the box still has public internet (that's what keeps `apt`/`pip`
-  working). For a fully offline box, use `ISOPOD_RUN_ARGS="--network=none"`.
+  working). For a fully offline box, use [`isopod create --offline`](#offline-boxes---offline).
 - The isopod network is **IPv4-only** so a box has no IPv6 route to slip around the
   v4 rules; if you make it dual-stack, also load the commented `ip6` rules in
   `security/egress-host.nft`.
 - Same-bridge boxes can still discover each other at L2, but not reach each other
-  at L3 (dropped) — and both are equally locked down, so this leaks nothing about
-  the host.
+  at L3 (dropped by the forward chain) — and both are equally locked down, so this
+  leaks nothing about the host. That drop is the *host* ruleset, so it holds only
+  where host-enforced egress is actually loaded. On a rootless engine that cannot
+  load it, and for [offline boxes](#offline-boxes---offline) whose subnet the
+  ruleset does not cover, boxes on one network do reach each other.
+- In-guest egress (`--guest-egress`) does **not** survive root inside the box: the
+  ruleset is loaded by `nft` in the box's own kernel, so a box that reaches root can
+  flush it. Host-enforced egress runs outside the box and is unaffected. Where both
+  are possible, the host-side layer is the stronger one.
 
 ### Reaching one internal service anyway (`egress lan-allow`)
 
@@ -455,6 +464,88 @@ as the box user, which cannot bind a privileged port — use `8443:443`), it is
 **TCP only**, and one ssh process carries all of a box's forwards, so adding or
 removing one briefly restarts the others. Forwards are reopened by `isopod start`
 and torn down by `isopod stop`.
+
+## Offline boxes (`--offline`)
+
+`isopod create <name> --offline` gives a box no route off the host. It is the only
+network boundary here that needs nothing set up first: no host firewall, no rootful
+engine, no `/dev/kvm`. On a stock rootless podman, where `lan-deny` and `allow-list`
+both degrade to an open network, this one still holds.
+
+```sh
+isopod create review --offline --container --copy ~/src/thing
+isopod host-port add review 11434          # optionally, one host service (a local Ollama)
+```
+
+**microVM boxes need podman 5 or later.** A microVM reaches its guest through passt,
+which picks its template interface by following the container's default route. An
+internal network defines a gateway but installs no default route, since withholding
+that route is what makes the network internal, so isopod creates the offline network
+with an explicit `--route 0.0.0.0/0` via the gateway. Adding the route leaves the
+isolation intact: the engine still drops anything the bridge tries to forward
+outward. On an engine that cannot add it (docker, older podman), `isopod create`
+refuses `--offline` under a microVM runtime and names the trade rather than leaving
+you to debug a box that looks healthy in its own logs. The real requirement is
+netavark 1.7, which every podman 5 carries, so podman 4 can work as well when its
+netavark is new enough; isopod checks for the flag rather than the version.
+
+That default route points at the bridge gateway, and passt maps the host onto that
+same address, so an offline box reaches host services listening on all interfaces.
+Everything else is refused: the host's other addresses, the LAN, and the internet.
+Bind a host service to loopback or a named interface when an offline box should not
+see it. Turning the engine's DNS off removes the one service isopod would otherwise
+have put on that address itself.
+
+On docker the network is the same internal bridge with the same subnet and gateway,
+but docker has no per-network switch for its embedded resolver at `127.0.0.11`, which
+the daemon answers from outside the network. Treat name resolution as reachable from
+an offline docker box, and use podman where that matters.
+
+The network is created once, on first use, on `10.201.0.0/24`, which clears Mullvad's
+`10.64.0.0/10` and Tailscale's `100.64.0.0/10`. `ISOPOD_OFFLINE_SUBNET` and
+`ISOPOD_OFFLINE_GATEWAY` change it, and since the settings apply only at creation,
+remove the network first with `podman network rm isopod-offline` while no box is on it.
+
+**How it works.** The box goes on a dedicated **internal** engine network
+(`isopod-offline`, created on first use). It gets an interface, so the loopback SSH
+port isopod publishes still works and `code`, `shell`, `copy-in`, `export`, secrets
+and host-port forwards all behave normally, but the engine gives that bridge no
+route outward. Enforcement is the engine's, so in-box root cannot undo it, and
+`NET_RAW`/`NET_ADMIN` are dropped so the box cannot try to re-route around it.
+
+`--network none` would be the obvious way to spell this and is the wrong one: it
+leaves the box with only loopback, so the published SSH port has nothing to forward
+to and isopod, which brings a box up entirely over SSH, could never reach it.
+
+**What it rules out.** `--repo` needs a network to clone over, so pass `--copy`
+instead. `apt`, `pip` and any API the agent wants are all unreachable, which is the
+point. `--offline` turns any configured egress mode off, since there is no traffic
+left to filter. To let an offline box reach exactly one service on your machine,
+forward it with [`isopod host-port`](#reaching-a-service-on-your-host-host-port),
+which rides the SSH connection isopod already holds rather than giving the box a
+route.
+
+### Offline boxes are isolated from the world, not from each other
+
+Every offline box joins the same internal network, so they share one subnet and one
+bridge. `--internal` withholds the route *off* the bridge; it does nothing about
+traffic *within* it, and netavark has no per-network switch for that. Two offline
+boxes therefore reach each other's listening ports.
+
+Per-box SSH keys mean this is not a way into another box's shell. The private half
+never leaves the host and the box's sshd accepts keys only, so `sshd` is reachable
+but not enterable. The exposure is whatever *else* a box is listening on: an agent
+that starts a dev server, a debugger (`node --inspect` is remote code execution by
+design), a notebook kernel, or an unauthenticated database has opened it to its
+neighbours. Storage is unaffected either way, since each box has its own overlay and
+its own `--disk` image file.
+
+Being a microVM does not help here. The kernel boundary is stronger, but the network
+position is identical: two offline krun boxes reach each other exactly as two offline
+containers do, because passt maps the guest onto the container's namespace.
+
+Until per-box networks land, treat offline boxes running at the same time as one
+trust domain, and bind what an agent starts to loopback rather than `0.0.0.0`.
 
 ## Network egress allow-list (`egress allow-list`)
 

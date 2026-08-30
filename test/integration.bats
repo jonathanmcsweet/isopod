@@ -47,6 +47,49 @@ INFO
   rmi)     exit 0 ;;                         # drop old snapshot
   start|stop) exit 0 ;;
   rm)      exit 0 ;;
+  network) # Report only the offline network as missing, so --offline exercises
+           # its create path. Every other network call keeps the old behaviour
+           # (present), which is what the egress tests expect.
+           # STUB_OFFLINE_NET: unset = missing (the create path). 'stale' = an
+           # older network (no route, resolver on). 'current' = already correct.
+           # A create records the network in a marker file, so a later exists /
+           # inspect reflects it the way a real engine would. STUB_ROUTE_IGNORED
+           # stands in for an engine that takes --route and drops it.
+           case "$1" in
+             exists)  [ "$2" = isopod-offline ] && [ -z "${STUB_OFFLINE_NET:-}" ] &&
+                        [ ! -f "$STUB_LOG.offnet" ] && exit 1
+                      exit 0 ;;
+             inspect) if [ "$2" = isopod-offline ]; then
+                        if [ -f "$STUB_LOG.offnet" ]; then
+                          if [ -n "${STUB_ROUTE_IGNORED:-}" ]; then
+                            echo '[{"dns_enabled": false}]'
+                          else
+                            echo '[{"dns_enabled": false, "routes": [{"destination": "0.0.0.0/0"}]}]'
+                          fi
+                          exit 0
+                        fi
+                        [ -z "${STUB_OFFLINE_NET:-}" ] && exit 1
+                        if [ "${STUB_OFFLINE_NET:-}" = stale ]; then
+                          echo '[{"dns_enabled": true}]'
+                        else
+                          echo '[{"dns_enabled": false, "routes": [{"destination": "0.0.0.0/0"}]}]'
+                        fi
+                      fi
+                      exit 0 ;;
+             # A box still attached makes the engine refuse the removal.
+             rm)      [ -n "${STUB_NET_RM_FAIL:-}" ] && exit 1
+                      rm -f "$STUB_LOG.offnet"; exit 0 ;;
+             # `network create --help` probes for --route. Advertise it like
+             # podman 5; STUB_NO_ROUTE hides it to stand in for docker/podman 4.
+             create) case "$2" in
+                       --help) [ -n "${STUB_NO_ROUTE:-}" ] ||
+                                 echo '      --route stringArray  static routes'
+                               exit 0 ;;
+                     esac
+                     touch "$STUB_LOG.offnet"
+                     exit 0 ;;
+             *)      exit 0 ;;
+           esac ;;
   *)       exit 0 ;;
 esac
 EOF
@@ -83,7 +126,16 @@ EOF
   cat >"$STUB_DIR/ssh" <<'EOF'
 #!/usr/bin/env bash
 echo "ssh $*" >> "$STUB_LOG"
-[ -t 0 ] || cat >/dev/null 2>&1 || true
+# Bound the drain: under bats stdin is neither a tty nor closed, so a plain
+# `cat` waits for an EOF that never arrives and the suite hangs. `timeout` is
+# coreutils, absent on stock macOS, so fall back to the unbounded drain there.
+if [ ! -t 0 ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 cat >/dev/null 2>&1 || true
+  else
+    cat >/dev/null 2>&1 || true
+  fi
+fi
 exit 0
 EOF
   chmod +x "$STUB_DIR/ssh"
@@ -95,6 +147,12 @@ EOF
   run "$ISOPOD_ROOT/isopod" create "bad name"
   assert_failure
   assert_output --partial "invalid name"
+}
+
+@test "create refuses --offline with --repo (nothing to clone over)" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --repo https://x/y
+  assert_failure
+  assert_output --partial "has nothing to clone from"
 }
 
 @test "create refuses both --repo and --copy together" {
@@ -113,6 +171,171 @@ EOF
   run "$ISOPOD_ROOT/isopod" create demo --color neon
   assert_failure
   assert_output --partial "unknown color"
+}
+
+# ---- offline boxes -----------------------------------------------------------
+@test "create --offline runs the box on an internal network, still published on loopback" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --color teal
+  assert_success
+  assert_stub_called 'podman network create --internal --subnet 10\.201\.0\.0/24 --gateway 10\.201\.0\.1'
+  # passt follows the default route to find the guest; the engine still drops
+  # anything the bridge tries to forward outward.
+  assert_stub_called 'podman network create .*--route 0\.0\.0\.0/0,10\.201\.0\.1'
+  # An offline box resolves no names, so the engine's resolver stays off rather
+  # than the boundary resting on it declining to forward queries onward.
+  assert_stub_called 'podman network create .*--disable-dns'
+  assert_stub_called 'podman run .*--network isopod-offline'
+  # --network none would leave the box with only loopback, so the published SSH
+  # port would have nothing to forward to and isopod could never reach the box.
+  assert_stub_not_called 'podman run .*--network none'
+  assert_stub_called 'podman run .*127\.0\.0\.1::2222'
+  assert_stub_called 'podman run .*--cap-drop NET_RAW'
+  run grep '^offline=1$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+  # Guest egress filters the route out, and an offline box has none.
+  run grep '^guest_egress=off$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+# Found on a real krun host: the box booted, sshd listened, and nothing could
+# reach it, because passt follows the default route to pick its template
+# interface and an internal network installs none on its own.
+@test "create --offline is refused on a microVM runtime the engine cannot route" {
+  export STUB_NO_ROUTE=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
+  assert_failure
+  assert_output --partial "needs a plain container"
+  assert_output --partial "--container"
+}
+
+@test "create --offline is allowed on a microVM runtime once the engine can route" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
+  assert_success
+  assert_stub_called 'podman network create .*--route 0\.0\.0\.0/0,10\.201\.0\.1'
+  assert_stub_called 'podman run .*--network isopod-offline'
+}
+
+@test "create --offline says so in the summary" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline
+  assert_success
+  assert_output --partial "OFFLINE"
+}
+
+# ---- offline network migration ----------------------------------------------
+# An older network (no default route, resolver on) is replaced with one that has
+# both, so an existing install picks up the fix without being told to.
+@test "create --offline recreates an offline network that predates this version" {
+  export STUB_OFFLINE_NET=stale
+  run "$ISOPOD_ROOT/isopod" create demo --offline
+  assert_success
+  assert_stub_called 'podman network rm isopod-offline'
+  assert_stub_called 'podman network create .*--route 0\.0\.0\.0/0,10\.201\.0\.1'
+}
+
+@test "create --offline leaves an already-current offline network alone" {
+  export STUB_OFFLINE_NET=current
+  run "$ISOPOD_ROOT/isopod" create demo --offline
+  assert_success
+  assert_stub_not_called 'podman network rm isopod-offline'
+  # `network create --help` is the --route probe, not a creation.
+  assert_stub_not_called 'podman network create --internal'
+}
+
+# Boxes still on the network block the removal, and an engine keeps a stopped box
+# attached, so stopping them would not help. A plain container does not need the
+# newer network, so the create must still succeed.
+@test "create --offline --container keeps going when the old network cannot be replaced" {
+  export STUB_OFFLINE_NET=stale STUB_NET_RM_FAIL=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --container
+  assert_success
+  assert_output --partial "boxes are still on it"
+  assert_stub_called 'podman run .*--network isopod-offline'
+}
+
+# A microVM box is unreachable without the route, so the same situation has to
+# fail instead, naming the way out.
+@test "create --offline on a microVM fails when the old network cannot be replaced" {
+  export STUB_OFFLINE_NET=stale STUB_NET_RM_FAIL=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
+  assert_failure
+  assert_output --partial "isopod rm"
+  assert_output --partial "--container"
+}
+
+# An engine can accept --route and drop it, which used to surface only as a box
+# that boots with sshd running and nothing able to reach it.
+@test "create --offline fails when the engine takes --route but drops it" {
+  export STUB_ROUTE_IGNORED=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun
+  assert_failure
+  assert_output --partial "no default route"
+  assert_output --partial "netavark 1.7"
+  assert_output --partial "--container"
+}
+
+# The same network is fine for a plain container, which needs no route.
+@test "create --offline --container ignores a network with no default route" {
+  export STUB_ROUTE_IGNORED=1
+  run "$ISOPOD_ROOT/isopod" create demo --offline --container
+  assert_success
+  assert_stub_called 'podman run .*--network isopod-offline'
+}
+
+# A docker stub reporting the offline network as missing, so --offline exercises
+# its create path there too.
+offline_docker_stub() {
+  cat > "$STUB_DIR/docker" <<'EOF'
+#!/usr/bin/env bash
+echo "docker $*" >> "$STUB_LOG"
+cmd="$1"; shift || true
+case "$cmd" in
+  info)    exit 0 ;;
+  image)   exit 1 ;;
+  build)   exit 0 ;;
+  run)     echo "deadbeefcontainerid"; exit 0 ;;
+  port)    echo "127.0.0.1:45678" ;;
+  inspect) echo "running" ;;
+  network) case "$1" in
+             inspect) [ "$2" = isopod-offline ] && exit 1; exit 0 ;;
+             *)       exit 0 ;;
+           esac ;;
+  start|stop|rm|rmi|commit) exit 0 ;;
+  *)       exit 0 ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/docker"
+}
+
+# docker has neither --disable-dns nor --route, so the offline network is created
+# with the flags it does have.
+@test "create --offline on docker uses only the flags docker has" {
+  offline_docker_stub
+  run "$ISOPOD_ROOT/isopod" create demo --offline --engine docker
+  assert_success
+  assert_stub_called 'docker network create --internal --subnet 10\.201\.0\.0/24 --gateway 10\.201\.0\.1 isopod-offline'
+  assert_stub_not_called 'docker network create .*--disable-dns'
+  assert_stub_not_called 'docker network create .*--route'
+  assert_stub_called 'docker run .*--network isopod-offline'
+}
+
+@test "create --offline is refused under a microVM runtime on docker" {
+  offline_docker_stub
+  run "$ISOPOD_ROOT/isopod" create demo --offline --runtime krun --engine docker
+  assert_failure
+  assert_output --partial "needs a plain container on docker"
+}
+
+@test "a normal box is not put on the offline network" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_stub_not_called 'podman run .*--network isopod-offline'
+  assert_stub_not_called 'podman network create --internal'
+}
+
+@test "create states the isolation tier the box actually got" {
+  run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_output --partial "Isolation:"
 }
 
 # ---- full create flow --------------------------------------------------------
@@ -228,7 +451,11 @@ EOF
   assert_success
   assert_stub_called "podman build .*--build-arg ISOPOD_BASE="
   assert_stub_called "podman build .*--build-arg ISOPOD_USER=dev"
-  assert_stub_called "podman build .*-f $ISOPOD_ROOT/share/Dockerfile"
+  # Match the tail, not an absolute prefix: on a system where /home is a symlink,
+  # isopod resolves its own root differently from the test's ISOPOD_ROOT and the
+  # two spellings of the same path disagree. What matters is that share/Dockerfile
+  # is the file being built.
+  assert_stub_called "podman build .*-f .*/share/Dockerfile"
 }
 
 @test "create stages every share/Dockerfile COPY source into the build context" {
@@ -263,6 +490,36 @@ EOF
   assert_output --partial "Network: OPEN"
   assert_output --partial "could NOT be enforced"
   assert_output --partial "sudo isopod egress apply"
+}
+
+# The stubbed podman is rootless, so default-on egress degrades to an OPEN network
+# for an ordinary box. An offline box has no route out at all, so saying that about
+# it contradicts the OFFLINE posture the same run reports a few lines later.
+@test "create --offline does not warn about an OPEN network" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --container
+  assert_success
+  assert_output --partial "Network: OFFLINE"
+  refute_output --partial "with an OPEN network"
+  refute_output --partial "cannot enforce it"
+}
+
+# create resolved egress before --offline was handled, so boxes already on disk
+# carry egress_degraded=1. doctor and list have to read past that, or the same box
+# reads OFFLINE from info and OPEN from the other two.
+@test "doctor does not report an offline box as an open network" {
+  "$ISOPOD_ROOT/isopod" create demo --offline --container
+  printf 'egress_degraded=1\n' >>"$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" doctor
+  assert_success
+  refute_output --partial "demo: egress isolation was requested but is NOT in force"
+}
+
+@test "list does not flag an offline box as egress OPEN" {
+  "$ISOPOD_ROOT/isopod" create demo --offline --container
+  printf 'egress_degraded=1\n' >>"$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  run "$ISOPOD_ROOT/isopod" list
+  assert_success
+  refute_output --partial "egress OPEN"
 }
 
 @test "create with egress disabled by config notes OPEN without the degrade warning" {
@@ -447,6 +704,28 @@ EOF
   run cat "$ISOPOD_CONFIG_DIR/boxes/demo/config.yaml"
   assert_output --partial "mem_limit: 8g"
   assert_output --partial '- "127.0.0.1:5173:5173"'
+}
+
+# Found on a real host: reconfigure of an offline box stopped working when
+# resolve_egress learned to return early for offline boxes, because the rebuild
+# paths take their egress mode from it. With the mode left on, preflight tried to
+# enforce something a rootless engine cannot and the rebuild died.
+@test "reconfigure keeps an offline box offline and does not fail preflight" {
+  "$ISOPOD_ROOT/isopod" create demo --offline --container
+  run "$ISOPOD_ROOT/isopod" reconfigure demo --memory 3g
+  assert_success
+  assert_stub_called 'podman run .*--network isopod-offline'
+  assert_stub_called "podman run .*--memory 3g"
+  run grep '^offline=1$' "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_success
+}
+
+# The override warning means "you configured a mode and --offline replaced it".
+# It must not fire when nothing was configured.
+@test "create --offline does not claim to override an egress mode nobody set" {
+  run "$ISOPOD_ROOT/isopod" create demo --offline --container
+  assert_success
+  refute_output --partial "overrides the configured egress mode"
 }
 
 @test "reconfigure errors on an unknown box" {
@@ -1192,6 +1471,31 @@ seed_secret() { # seed_secret <name> <value>
   refute_output --partial '"name"'
 }
 
+# Confirming a box's isolation tier used to mean grepping its meta file: info
+# reported the egress posture but never which boundary the box actually got.
+@test "info reports the isolation tier a box was built with" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal --runtime krun
+  run "$ISOPOD_ROOT/isopod" info demo
+  assert_success
+  assert_output --partial 'isolation : microVM (krun)'
+}
+
+@test "info reports a plain container as sharing the host kernel" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal --container
+  run "$ISOPOD_ROOT/isopod" info demo
+  assert_success
+  assert_output --partial 'isolation : plain container'
+}
+
+# The tier follows the runtime RECORDED for the box, so a config change after the
+# fact cannot make info claim a boundary this box never got.
+@test "info reads the isolation tier from the box, not the active runtime" {
+  "$ISOPOD_ROOT/isopod" create demo --color teal --container
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" info demo
+  assert_success
+  assert_output --partial 'isolation : plain container'
+}
+
 @test "egress status --json emits a valid JSON object with the contract fields" {
   command -v python3 >/dev/null 2>&1 || skip "python3 not available"
   run bash -c "'$ISOPOD_ROOT/isopod' egress status --json 2>/dev/null | python3 -m json.tool"
@@ -1527,6 +1831,32 @@ EOF
   run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --old-email dev@mybox.local --force
   assert_success
   refute_output --partial "git filter-repo failed"
+  run git -C "$TEST_TMP/host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "Me <me@home>"
+}
+
+# git-filter-repo starts fine but crashes partway on a commit its parser rejects.
+# A box writes its own commit objects, and an empty author name ("author <e> ts")
+# is one git accepts and filter-repo does not, which used to make remap unusable
+# on any host that had filter-repo installed.
+_stub_crashing_filter_repo() {
+  cat >"$STUB_DIR/git-filter-repo" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" --version "* | *" -h "*) exit 0 ;;   # usable: it starts
+esac
+echo "AttributeError: 'NoneType' object has no attribute 'groups'" >&2
+exit 1
+EOF
+  chmod +x "$STUB_DIR/git-filter-repo"
+}
+
+@test "remap falls back to python3 when git-filter-repo crashes on the repo" {
+  _seed_remapped_host "$TEST_TMP/host"
+  _stub_crashing_filter_repo
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --old-email dev@mybox.local --force
+  assert_success
+  assert_output --partial "retrying with isopod's own rewrite"
   run git -C "$TEST_TMP/host" log --format='%an <%ae>' refs/remotes/mybox/master
   assert_output --partial "Me <me@home>"
 }
