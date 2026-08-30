@@ -1488,8 +1488,11 @@ EOF
   offline_net_routable
   offline_net_routable
   offline_net_routable
-  run wc -l <"$TEST_TMP/engine-calls"
-  assert_output "1"
+  # Numeric compare rather than assert_output: BSD wc pads its count with
+  # spaces, so matching the string "1" passes on Linux and fails on macOS.
+  local calls
+  calls=$(wc -l <"$TEST_TMP/engine-calls")
+  [ "$calls" -eq 1 ]
 }
 
 @test "build_run_args puts an offline box on the internal network" {
