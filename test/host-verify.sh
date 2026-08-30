@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host verification for the isopod 3.9.0 changes.
+# Host verification for the isopod 3.10.0 changes.
 #
 # Run this from the isopod repo on a machine with a working container engine.
 # It creates throwaway boxes named hv-* and removes them at the end.
@@ -38,10 +38,23 @@ note() { printf '  [note] %s\n' "$1"; }
 # their non-interactive flag explicitly below.
 iso() { "$ISOPOD" "$@" </dev/null; }
 
+# Run one shell command inside a box.
+#
+# `isopod shell <box> -- a b c` reaches the box as the joined string "a b c":
+# ssh concatenates its argv and the box's shell re-splits it, which is the
+# documented behaviour. Quoting written here does not survive that, so
+# `sh -c 'curl -m 8 https://example.com'` arrives as `sh -c curl -m 8 ...` and
+# runs curl with no arguments: exit 2, whatever the network can reach. Six
+# checks in this script were reading that as proof of isolation. Pass ONE
+# already-quoted word and let the box shell run it.
+in_box() { # in_box <box> <shell-command>
+  iso shell "$1" -- "$2"
+}
+
 cleanup_box() { iso rm "$1" --force >/dev/null 2>&1 || true; }
 cleanup_all() {
   local b r
-  for b in hv-offline hv-disk hv-nest hv-remap hv-upg; do cleanup_box "$b"; done
+  for b in hv-offline hv-offline2 hv-offline3 hv-disk hv-nest hv-remap hv-upg; do cleanup_box "$b"; done
   # `iso fetch` and `iso remap` write into the repo this runs from. Drop what
   # they left so a verification run does not accumulate refs in your checkout.
   for r in $(git for-each-ref --format='%(refname)' 'refs/remotes/hv-remap/*' \
@@ -85,8 +98,11 @@ if iso create hv-offline --offline >/tmp/hv-offline.log 2>&1 ||
   { grep -q -- '--offline needs a plain container' /tmp/hv-offline.log &&
     iso create hv-offline --offline --container >>/tmp/hv-offline.log 2>&1; }; then
   ok "offline box created and reachable over SSH"
-  grep -q -- '--offline needs a plain container' /tmp/hv-offline.log &&
+  OFF_EXTRA=()
+  grep -q -- '--offline needs a plain container' /tmp/hv-offline.log && {
+    OFF_EXTRA=(--container)
     note "this engine cannot route an internal network, so the box ran with --container (create said so, correctly)"
+  }
 
   if iso info hv-offline 2>/dev/null | grep -qi 'OFFLINE'; then
     ok "info reports the OFFLINE posture"
@@ -94,23 +110,39 @@ if iso create hv-offline --offline >/tmp/hv-offline.log 2>&1 ||
     bad "info does not report OFFLINE"
   fi
 
-  # The box must not reach the internet.
-  if iso shell hv-offline -- sh -c 'curl -sS -m 8 https://example.com >/dev/null 2>&1' 2>/dev/null; then
+  # The box must not reach the internet. Check curl is there first: without the
+  # control, a missing curl exits 127 and reads exactly like a blocked network.
+  if ! in_box hv-offline 'command -v curl' >/dev/null 2>&1; then
+    skip "internet check (no curl in the box, so the probe would prove nothing)"
+  elif in_box hv-offline 'curl -sS -m 8 -o /dev/null https://example.com' >/dev/null 2>&1; then
     bad "offline box REACHED the internet (this is the critical check)"
   else
     ok "offline box cannot reach the internet"
   fi
 
-  # ...nor the LAN. Uses the host's default gateway as the target.
+  # ...nor the LAN. The image has no ping (no iputils-ping in the Dockerfile),
+  # so ICMP is not available to probe with. The route table is the determinate
+  # check: an internal network gives the box no default route, and without one
+  # nothing off its own subnet is addressable. Field 2 of /proc/net/route is the
+  # destination; 00000000 is the default route.
+  if in_box hv-offline 'cut -f2 /proc/net/route | grep -qx 00000000' >/dev/null 2>&1; then
+    bad "offline box HAS a default route (it can address the LAN)"
+  else
+    ok "offline box has no default route"
+  fi
+
+  # Corroboration, not proof: a gateway that refuses TCP/22 looks the same as one
+  # the box cannot reach. Only the connecting case is conclusive, and that case
+  # is a real failure.
   GW="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
   if [ -n "${GW:-}" ]; then
-    if iso shell hv-offline -- sh -c "ping -c1 -W2 $GW >/dev/null 2>&1" 2>/dev/null; then
-      bad "offline box REACHED the LAN gateway $GW"
+    if in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$GW/22'" >/dev/null 2>&1; then
+      bad "offline box OPENED TCP to the LAN gateway $GW"
     else
-      ok "offline box cannot reach the LAN gateway"
+      ok "offline box could not open TCP to the LAN gateway $GW"
     fi
   else
-    skip "LAN check (no default gateway found)"
+    skip "LAN gateway probe (no default gateway found)"
   fi
 
   # Copy-in and export must still work: they ride the SSH channel, not the network.
@@ -142,6 +174,56 @@ else
   bad "offline box failed to create - see /tmp/hv-offline.log (this is the one to send back)"
 fi
 
+# --- B2. neighbour isolation (--guest-inbound, new in 3.10) ------------------
+hdr "B2. Box-to-box isolation on a shared network"
+# Offline boxes share one internal engine network, so with nothing filtering
+# inbound traffic box A can open a connection to box B's sshd. 3.10 loads an nft
+# input chain inside the box that drops anything not from the host. This is the
+# only check that exercises that change, and it needs a second box.
+#
+# The chain is loaded by the box's own entrypoint, so it exists ONLY on a microVM
+# box: a plain container has no CAP_NET_ADMIN to load a ruleset with. Where
+# --offline had to fall back to --container, the protection is absent by
+# construction, and this section says so instead of reporting a pass.
+if [ -z "${OFF_EXTRA+x}" ]; then
+  skip "neighbour isolation (no offline box to test from)"
+elif iso create hv-offline2 --offline ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-offline2.log 2>&1; then
+  ok "second offline box created"
+  TIER="$(iso info hv-offline 2>/dev/null | awk -F': *' '/isolation/{print $2; exit}')"
+  note "offline boxes on this host run as: ${TIER:-unknown}"
+  case "${TIER:-}" in
+    microVM*) ;;
+    *) note "the in-box inbound filter is microVM-only, so a reach below is a known gap, not a regression" ;;
+  esac
+  B_IP="$(in_box hv-offline2 'hostname -I' 2>/dev/null | awk '{print $1}')"
+  if [ -z "${B_IP:-}" ]; then
+    skip "neighbour isolation (could not read the second box's address)"
+  elif ! in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22'" >/dev/null 2>&1; then
+    # Control: a box that cannot open TCP at all would read as isolated.
+    skip "neighbour isolation (the box cannot reach even its own sshd, so a refusal would prove nothing)"
+  elif in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$B_IP/22'" >/dev/null 2>&1; then
+    bad "offline box REACHED its neighbour's sshd at $B_IP:22"
+  else
+    ok "offline box cannot reach its neighbour's sshd at $B_IP:22"
+    # Positive control. Without it, "cannot reach" could equally mean the two
+    # boxes were never on the same network, and the pass above would be empty.
+    # With the filter off, the identical probe must connect.
+    if iso create hv-offline3 --offline --guest-inbound off ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-offline3.log 2>&1; then
+      C_IP="$(in_box hv-offline3 'hostname -I' 2>/dev/null | awk '{print $1}')"
+      if [ -n "${C_IP:-}" ] &&
+        in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$C_IP/22'" >/dev/null 2>&1; then
+        ok "control: the same probe DOES reach a neighbour created with --guest-inbound off"
+      else
+        bad "control failed: the probe cannot reach an unprotected neighbour either, so the pass above proves nothing"
+      fi
+    else
+      skip "control box (--guest-inbound off) failed to create - see /tmp/hv-offline3.log"
+    fi
+  fi
+else
+  bad "second offline box failed to create - see /tmp/hv-offline2.log"
+fi
+
 # --- C. data volume startup fix (needs a microVM runtime) --------------------
 hdr "C. Data volume mountpoint fix (--disk / --nested-containers)"
 if [ "$HAS_KVM" != 1 ]; then
@@ -150,16 +232,23 @@ else
   if iso create hv-nest --nested-containers >/tmp/hv-nest.log 2>&1; then
     ok "nested-containers box created"
     # The attack: redirect an intermediate component of the mountpoint path.
-    iso shell hv-nest -- sh -c 'rm -rf ~/.local/share && ln -s /etc ~/.local/share' >/dev/null 2>&1
+    in_box hv-nest 'rm -rf ~/.local/share && ln -s /etc ~/.local/share' >/dev/null 2>&1
+    # Confirm the redirect is actually in place. It was not, before the quoting
+    # fix, which made everything below this a test of nothing.
+    if in_box hv-nest '[ -L ~/.local/share ]' >/dev/null 2>&1; then
+      ok "attack set up: ~/.local/share redirected to /etc"
+    else
+      bad "could not set up the redirect, so the checks below prove nothing"
+    fi
     iso stop hv-nest >/dev/null 2>&1
     if iso start hv-nest >/tmp/hv-nest-restart.log 2>&1; then
       ok "box still boots after the mountpoint was redirected"
-      if iso shell hv-nest -- sh -c '[ -d /etc/containers ] && mountpoint -q /etc/containers' 2>/dev/null; then
+      if in_box hv-nest '[ -d /etc/containers ] && mountpoint -q /etc/containers' >/dev/null 2>&1; then
         bad "the redirect SUCCEEDED - /etc/containers is a mounted volume (fix not effective)"
       else
         ok "redirect refused - nothing was mounted over /etc"
       fi
-      if iso shell hv-nest -- sh -c 'true' 2>/dev/null; then
+      if in_box hv-nest 'true' >/dev/null 2>&1; then
         ok "SSH still reachable after the refusal (fails safe, not closed)"
       else
         bad "box became unreachable after the refusal"
@@ -177,17 +266,25 @@ hdr "D. Identity rewrite (isopod remap)"
 if iso create hv-remap >/tmp/hv-remap.log 2>&1; then
   # The repo has to be AT the workspace root: that is where isopod looks for the
   # box's git identity, and a repo in a subdirectory leaves it undetectable.
-  iso shell hv-remap -- sh -c '
+  in_box hv-remap '
     cd /home/dev/workspace && git init -q &&
     git config user.email box@isopod && git config user.name "Box" &&
     echo x > a && git add a && git commit -qm one' >/dev/null 2>&1
   # A commit git accepts but the old rewriter skipped: an author with no name.
-  iso shell hv-remap -- sh -c '
+  # shellcheck disable=SC2016  # $T/$P/$B must expand in the box, not here
+  in_box hv-remap '
     cd /home/dev/workspace &&
     B=$(git rev-parse --abbrev-ref HEAD) &&
     T=$(git rev-parse HEAD^{tree}) && P=$(git rev-parse HEAD) &&
     C=$(printf "tree %s\nparent %s\nauthor <box@isopod> 1700000000 +0000\ncommitter <box@isopod> 1700000000 +0000\n\nnoname\n" "$T" "$P" | git hash-object --literally -t commit -w --stdin) &&
     git update-ref "refs/heads/$B" "$C"' >/dev/null 2>&1
+  # Same reason as section C: without this the box has no repo and the remap
+  # below would be rewriting nothing.
+  if in_box hv-remap 'git -C /home/dev/workspace rev-parse HEAD' >/dev/null 2>&1; then
+    ok "test repo built in the box"
+  else
+    bad "could not build the test repo, so the remap check below proves nothing"
+  fi
   if iso fetch hv-remap >/dev/null 2>&1 &&
     iso remap hv-remap --force --old-email box@isopod --name "Real Name" --email real@example.com >/tmp/hv-remap-run.log 2>&1; then
     ok "remap completed against a box with an unusual commit"
@@ -214,7 +311,7 @@ if iso create hv-upg >/tmp/hv-upg.log 2>&1; then
   echo keepme >"$TMPD/keep.txt"
   iso copy-in hv-upg "$TMPD" >/dev/null 2>&1
   if iso upgrade hv-upg --yes >/tmp/hv-upg-run.log 2>&1; then
-    if iso shell hv-upg -- sh -c 'find /home/dev/workspace -name keep.txt | grep -q .' 2>/dev/null; then
+    if in_box hv-upg 'find /home/dev/workspace -name keep.txt | grep -q .' >/dev/null 2>&1; then
       ok "upgrade preserved the workspace"
     else
       bad "upgrade LOST the workspace - see /tmp/hv-upg-run.log"
