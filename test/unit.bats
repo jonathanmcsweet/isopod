@@ -710,6 +710,35 @@ teardown() { isopod_teardown_env; }
   assert_success
   grep -qxF "internal.example.org" "$USER_EGRESS_ALLOWLIST"
 }
+# '*' passed the character check but is an ERE metacharacter, so 'foo*.com'
+# rendered as 'foo*\.com' ("fo" then any number of "o") and matched far more than
+# the entry named. It is meaningful only as the leading '*.' wildcard.
+@test "egress_allow rejects '*' anywhere but a leading '*.'" {
+  run egress_allow 'foo*.com'
+  assert_failure
+  assert_output --partial "only allowed as a leading"
+  run egress_allow '*.foo.*'
+  assert_failure
+  assert_output --partial "only allowed as a leading"
+}
+@test "egress_allow still accepts a leading '*.' wildcard" {
+  ISOPOD_EGRESS_STATE_DIR="$TEST_TMP/state"
+  run egress_allow '*.cdn.example.net'
+  assert_success
+  grep -qxF '*.cdn.example.net' "$USER_EGRESS_ALLOWLIST"
+}
+# egress_allow validates what IT appends, but both allow-list files can also be
+# edited by hand, so the renderer is what has to keep the trusted filter safe.
+@test "egress_filter_regexes escapes metacharacters from a hand-edited file" {
+  ISOPOD_EGRESS_ALLOWLIST="$TEST_TMP/allow.conf"
+  USER_EGRESS_ALLOWLIST="$TEST_TMP/user.conf"
+  printf 'foo*.com\nbar+baz.com\n' >"$ISOPOD_EGRESS_ALLOWLIST"
+  : >"$USER_EGRESS_ALLOWLIST"
+  run egress_filter_regexes
+  assert_success
+  assert_line '^(.*\.)?foo\*\.com$'
+  assert_line '^(.*\.)?bar\+baz\.com$'
+}
 
 @test "egress_can_enforce: true for rootful podman, false for rootless" {
   make_stub podman 0 "false" # {{.Host.Security.Rootless}} => false
@@ -1402,6 +1431,187 @@ EOF
   local joined="${RUN_ARGS[*]}"
   [[ "$joined" == *"--annotation krun.nested_virt=1"* ]]
 }
+# ---- offline boxes (--offline) -----------------------------------------------
+# An internal engine network, NOT --network none: none leaves the box with only
+# loopback, so the published SSH port has nothing to forward to and isopod, which
+# drives a box entirely over SSH, could never reach it.
+# ---- the offline network must live in the store the box runs in -------------
+# With --account the box runs as the sandbox account, and a rootless network is
+# per-user: one defined in the invoking user's store is invisible there, so the
+# run failed with "network not found" after create had already built the image.
+# engine() is what applies the account; calling "$ENGINE" directly bypassed it.
+# Shadowing engine() here means any call that goes around it records nothing and
+# the assertions below fail.
+@test "the offline network is created through engine(), not the engine binary" {
+  ENGINE=podman
+  : >"$TEST_TMP/engine-calls"
+  engine() {
+    printf '%s\n' "$*" >>"$TEST_TMP/engine-calls"
+    case "$*" in
+      *"network create"*"--help"*) printf -- '--route\n' ;;
+      *"network exists"*) return 1 ;;
+    esac
+    return 0
+  }
+  ensure_offline_network 0
+  run cat "$TEST_TMP/engine-calls"
+  assert_output --partial "network create"
+  assert_output --partial "isopod-offline"
+}
+
+@test "the offline network probes all go through engine() too" {
+  ENGINE=podman
+  : >"$TEST_TMP/engine-calls"
+  engine() {
+    printf '%s\n' "$*" >>"$TEST_TMP/engine-calls"
+    case "$*" in
+      *"network create"*"--help"*) printf -- '--route\n' ;;
+    esac
+    return 0
+  }
+  # Verdicts do not matter here, only that each probe reached engine().
+  offline_net_exists || true
+  offline_net_has_route || true
+  run cat "$TEST_TMP/engine-calls"
+  assert_output --partial "network exists"
+  assert_output --partial "network inspect"
+}
+
+# The probe forks an engine process, and its answer cannot change within a run.
+@test "offline_net_routable asks the engine only once" {
+  ENGINE=podman
+  : >"$TEST_TMP/engine-calls"
+  engine() {
+    printf '%s\n' "$*" >>"$TEST_TMP/engine-calls"
+    printf -- '--route\n'
+  }
+  offline_net_routable
+  offline_net_routable
+  offline_net_routable
+  # Numeric compare rather than assert_output: BSD wc pads its count with
+  # spaces, so matching the string "1" passes on Linux and fails on macOS.
+  local calls
+  calls=$(wc -l <"$TEST_TMP/engine-calls")
+  [ "$calls" -eq 1 ]
+}
+
+@test "build_run_args puts an offline box on the internal network" {
+  ENGINE=podman
+  BOX_OFFLINE=1 build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--network isopod-offline"* ]]
+  [[ "$joined" == *"--cap-drop NET_RAW"* ]]
+  [[ "$joined" == *"--cap-drop NET_ADMIN"* ]]
+  # The SSH port must still be published or the box is unreachable.
+  [[ "$joined" == *"-p 127.0.0.1::2222"* ]]
+  [[ "$joined" != *"--network none"* ]]
+}
+@test "an offline box overrides an enforced egress mode" {
+  ENGINE=podman
+  BOX_OFFLINE=1 ISOPOD_EGRESS=allow-list build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--network isopod-offline"* ]]
+  # No egress bridge, and no proxy to route through: there is no traffic to filter.
+  [[ "$joined" != *"--network isopod0"* ]]
+  [[ "$joined" != *"http_proxy"* ]]
+}
+# On reconfigure/upgrade BOX_OFFLINE is unset, so the posture has to come from
+# meta or a rebuild would quietly hand the box a network back.
+@test "build_run_args reads the offline posture from meta when BOX_OFFLINE is unset" {
+  ENGINE=podman
+  mkdir -p "$BOXES_DIR/obox"
+  printf 'offline=1\n' >"$BOXES_DIR/obox/meta"
+  build_run_args obox img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--network isopod-offline"* ]]
+}
+# Found by live testing, not by stubs: guest egress defaults ON for a microVM box
+# and activates whenever host egress is off, which --offline sets. Its in-guest
+# ruleset needs the default gateway for the host control path exemption, an
+# internal network has none, and the entrypoint fails closed when it cannot find
+# one, so the box came up with no sshd and create rolled back.
+# setup_run_args_box pins is_microvm_runtime and an empty active_egress, which is
+# exactly the state that triggered this: guest egress activates on a microVM box
+# whenever host egress is off, and --offline sets host egress off.
+@test "an offline box never asks for guest egress (rebuild reads it from meta)" {
+  # guest_egress=on is what a box created before this fix has recorded.
+  setup_run_args_box obox 'harden=off' 'sudo=0' 'guest_egress=on' 'offline=1'
+  build_run_args obox localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"--network isopod-offline"* ]]
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+@test "an offline box never asks for guest egress (create path)" {
+  setup_run_args_box obox 'harden=off' 'sudo=0' 'guest_egress=on'
+  BOX_OFFLINE=1 build_run_args obox localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+@test "build_run_args refuses a --network in ISOPOD_RUN_ARGS for an offline box" {
+  ENGINE=podman
+  # A benign value, so this reaches the conflict check rather than the
+  # assert_safe_run_args deny list that --network=host would trip first.
+  BOX_OFFLINE=1 ISOPOD_RUN_ARGS="--network=none" \
+    run build_run_args box img 127.0.0.1::2222 "" ""
+  assert_failure
+  assert_output --partial "two --network flags conflict"
+}
+@test "box_egress_posture reports an offline box as OFFLINE" {
+  mkdir -p "$BOXES_DIR/obox"
+  printf 'offline=1\negress=off\n' >"$BOXES_DIR/obox/meta"
+  run box_egress_posture obox
+  assert_success
+  assert_output --partial "OFFLINE"
+}
+
+@test "build_run_args refuses an annotation that is not krun.<key>=<value>" {
+  ENGINE=podman
+  ISOPOD_MICROVM_ANNOTATIONS="--privileged" ISOPOD_RUNTIME=krun \
+    run build_run_args box img 127.0.0.1::2222 "" ""
+  assert_failure
+  assert_output --partial "not a krun."
+}
+# An enforced egress mode already set --network, so a second one from the
+# ISOPOD_RUN_ARGS hatch left two conflicting flags on the command line. That is
+# what made the documented offline recipe unreliable.
+@test "build_run_args refuses a --network in ISOPOD_RUN_ARGS when egress is enforced" {
+  ENGINE=podman
+  ISOPOD_EGRESS=allow-list ISOPOD_RUN_ARGS="--network=none" \
+    run build_run_args box img 127.0.0.1::2222 "" ""
+  assert_failure
+  assert_output --partial "two --network flags conflict"
+}
+# With egress off isopod picks no network, so there is no conflicting flag -- but
+# 'none' still takes the box off the loopback publish sshd is reached through, so
+# create would fail at the host key scan. This is the old offline recipe the docs
+# now send to --offline, so it is refused on its own terms, not as a conflict.
+@test "build_run_args refuses --network=none even when isopod chose no network" {
+  ENGINE=podman
+  ISOPOD_EGRESS=off ISOPOD_RUN_ARGS="--network=none" \
+    run build_run_args box img 127.0.0.1::2222 "" ""
+  assert_failure
+  assert_output --partial "no network at all"
+}
+@test "build_run_args refuses a separated --network none when isopod chose no network" {
+  ENGINE=podman
+  ISOPOD_EGRESS=off ISOPOD_RUN_ARGS="--network none" \
+    run build_run_args box img 127.0.0.1::2222 "" ""
+  assert_failure
+  assert_output --partial "no network at all"
+}
+# A custom network is still the caller's business where isopod chose none.
+@test "build_run_args passes a non-none --network through when egress is off" {
+  ENGINE=podman
+  ISOPOD_EGRESS=off ISOPOD_RUN_ARGS="--network=mynet" \
+    build_run_args box img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--network=mynet"* ]]
+}
+# The offline branch is no longer the one mode that leaks the host search domain.
+@test "build_run_args drops the host DNS search domain for an offline box" {
+  ENGINE=podman
+  BOX_OFFLINE=1 build_run_args obox img 127.0.0.1::2222 "" ""
+  local joined="${RUN_ARGS[*]}"
+  [[ "$joined" == *"--dns-search=."* ]]
+}
 @test "build_run_args auto-adds krun.use_passt for a krun microVM (virtio-net for isopod code)" {
   ENGINE=podman
   ISOPOD_RUNTIME=krun build_run_args box img 127.0.0.1::2222 "" ""
@@ -1567,6 +1777,117 @@ EOF
   sshd_line=$(grep -n 'exec /usr/sbin/sshd' "$ISOPOD_ENTRYPOINT" | cut -d: -f1)
   [ -n "$rm_line" ] && [ -n "$sshd_line" ]
   [ "$rm_line" -lt "$sshd_line" ]
+}
+
+# ---- remap_identity_filter.py -------------------------------------------------
+# Runs on the HOST over a fast-export stream whose ident-line BYTES the box wrote
+# (a box can author commit objects directly). The parser must split an identity
+# the way git does, or a commit silently escapes the rewrite.
+remap_filter() { # remap_filter <stdin-bytes> ; echoes the filtered stream
+  printf 'Me <me@host> <box@isopod>\n' >"$TEST_TMP/mm"
+  printf '%s' "$1" | MAILMAP_FILE="$TEST_TMP/mm" python3 "$ISOPOD_LIB/remap_identity_filter.py"
+}
+
+@test "remap filter rewrites an identity with no name at all" {
+  # "author <e> ts" has ONE space, so a pattern needing " <" skipped it entirely
+  # and the box kept whichever identities it wrote this way, with no error.
+  run remap_filter 'author <box@isopod> 1700000000 +0000
+'
+  assert_success
+  assert_output --partial "me@host"
+}
+
+@test "remap filter takes the first <...> on a two-bracket ident, as git does" {
+  run remap_filter 'author A <box@isopod> <keep@evil.example> 1700000000 +0000
+'
+  assert_success
+  # box@isopod is the email git reports, so it is the one that gets remapped.
+  assert_output --partial "Me <me@host>"
+}
+
+@test "remap filter leaves an identity inside a counted payload alone" {
+  run remap_filter 'data 37
+author <box@isopod> 1700000000 +0000
+'
+  assert_success
+  assert_output --partial "box@isopod"
+  refute_output --partial "me@host"
+}
+
+@test "remap filter does not backtrack on a long crafted ident line" {
+  # A 180KB author line of " <" took 24s of host CPU under the old greedy
+  # pattern, and scaled quadratically from there.
+  #
+  # The bound needs a timeout command, and `timeout` is coreutils: absent on
+  # stock macOS, where brew ships it as gtimeout. Skip rather than run unbounded,
+  # since the whole point is that a regression here hangs -- an unbounded run
+  # would take the suite with it instead of failing this one test. The behaviour
+  # is Python's, not the platform's, so Linux CI covers it.
+  local to=""
+  if command -v timeout >/dev/null 2>&1; then
+    to=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    to=gtimeout
+  else
+    skip "no timeout command (brew install coreutils) to bound this safely"
+  fi
+  printf 'Me <me@host> <box@isopod>\n' >"$TEST_TMP/mm"
+  local big
+  big="author $(printf ' <%.0s' $(seq 1 20000)) 1 +0000"
+  run "$to" 15 bash -c "printf '%s\n' \"\$1\" | MAILMAP_FILE='$TEST_TMP/mm' python3 '$ISOPOD_LIB/remap_identity_filter.py'" _ "$big"
+  assert_success
+}
+
+@test "remap filter still rewrites an ordinary identity" {
+  run remap_filter 'author Box Agent <box@isopod> 1700000000 +0000
+'
+  assert_success
+  assert_output "author Me <me@host> 1700000000 +0000"
+}
+
+# ---- entrypoint: iso_mkdir_safe (CWE-59) --------------------------------------
+# mkdir -p follows symlinks in INTERMEDIATE components, and with
+# --nested-containers the data volume mountpoint sits under the box user's own
+# home (~/.local/share/containers). Pointing an intermediate component at a
+# root-owned directory made the root-run mount/chown at boot land there instead.
+# The entrypoint is a standalone POSIX sh script that runs at import and so
+# cannot be sourced; lift the one function under test out of it (same approach as
+# the resolv.conf awk test below).
+entrypoint_fn() { # entrypoint_fn <name>
+  eval "$(sed -n "/^$1() {/,/^}/p" "$ISOPOD_ENTRYPOINT")"
+}
+
+@test "iso_mkdir_safe refuses a symlinked intermediate component" {
+  entrypoint_fn iso_mkdir_safe
+  mkdir -p "$TEST_TMP/home/share" "$TEST_TMP/rootowned"
+  ln -s "$TEST_TMP/rootowned" "$TEST_TMP/home/share/link"
+  run iso_mkdir_safe "$TEST_TMP/home/share/link/containers"
+  assert_failure
+  # The redirected target must be left untouched, not created through the link.
+  [ ! -e "$TEST_TMP/rootowned/containers" ]
+}
+
+@test "iso_mkdir_safe refuses a symlinked final component" {
+  entrypoint_fn iso_mkdir_safe
+  mkdir -p "$TEST_TMP/rootowned"
+  ln -s "$TEST_TMP/rootowned" "$TEST_TMP/mnt"
+  run iso_mkdir_safe "$TEST_TMP/mnt"
+  assert_failure
+}
+
+@test "iso_mkdir_safe refuses a relative path or a '..' component" {
+  entrypoint_fn iso_mkdir_safe
+  run iso_mkdir_safe "relative/path"
+  assert_failure
+  run iso_mkdir_safe "$TEST_TMP/a/../b"
+  assert_failure
+}
+
+@test "iso_mkdir_safe creates a clean path" {
+  entrypoint_fn iso_mkdir_safe
+  run iso_mkdir_safe "$TEST_TMP/a/b/containers"
+  assert_success
+  [ -d "$TEST_TMP/a/b/containers" ]
 }
 
 # ---- secrets: names, paths, specs ---------------------------------------------
@@ -2071,6 +2392,35 @@ EOF
 
 @test "assert_safe_run_args allows an empty argument list" {
   run assert_safe_run_args
+  assert_success
+}
+
+# ---- assert_safe_build_args --------------------------------------------------
+# The build-args counterpart. Overriding a build arg isopod sets itself is the
+# interesting one: image_tag_for hashes the base image and the dev/nested flags
+# into the cache tag, so an override builds a different image and caches it under
+# the legitimate image's tag, where every later create reuses it.
+@test "assert_safe_build_args refuses host mounts into the build" {
+  run assert_safe_build_args -v /:/host
+  assert_failure
+  assert_output --partial "expose host files"
+  run assert_safe_build_args --volume=/etc:/etc
+  assert_failure
+}
+@test "assert_safe_build_args refuses overriding isopod's own build args" {
+  run assert_safe_build_args --build-arg ISOPOD_BASE=evil/image
+  assert_failure
+  assert_output --partial "cache tag"
+  run assert_safe_build_args --build-arg=ISOPOD_DEV_TOOLS=1
+  assert_failure
+  assert_output --partial "cache tag"
+}
+@test "assert_safe_build_args allows ordinary build flags" {
+  run assert_safe_build_args --network=host --build-arg http_proxy=http://proxy:3128
+  assert_success
+}
+@test "assert_safe_build_args honours the unsafe override" {
+  ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 run assert_safe_build_args -v /:/host
   assert_success
 }
 
@@ -3286,6 +3636,25 @@ ip daddr 1.2.3.4 accept'
     grep -vE '\|\| true|if host_port_sync|host_port_sync\(\)' || true)"
   if [ -n "$hits" ]; then
     printf 'unguarded host_port_sync call(s):\n%s\n' "$hits" >&2
+    return 1
+  fi
+}
+
+# ---- F2: no output may be redirected into a process substitution ------------
+# `cmd > >(filter)` reads like a pipe but is not: bash does not wait for a
+# process substitution, so the filter can outlive cmd still holding the
+# stdout/stderr it inherited. Under `isopod ... 2>&1 | tee log` that never closes
+# the pipe and the reader hangs. This stranded `isopod create` for five hours,
+# leaving two orphaned `tr`. Capture to a file and filter once the writer exits.
+@test "no command redirects its output into a process substitution" {
+  local hits
+  # Strip comments before matching so the prose above (and the notes left at the
+  # fixed call sites) is not mistaken for code, the same way packaging.sh scans.
+  hits="$(awk '{ line = $0; sub(/#.*$/, "", line)
+                     if (line ~ />[[:space:]]*>\(/) printf "%s:%d: %s\n", FILENAME, FNR, $0 }' \
+    "$ISOPOD_ROOT"/isopod "$ISOPOD_ROOT"/lib/isopod.d/*.sh)"
+  if [ -n "$hits" ]; then
+    printf 'output redirected into a process substitution:\n%s\n' "$hits" >&2
     return 1
   fi
 }

@@ -220,6 +220,15 @@ def load_existing(path: Path) -> tuple[dict, str | None]:
             "note: existing .vscode/settings.json could not be parsed; "
             f"backed up to settings.json{BACKUP_SUFFIX}"
         )
+    # Valid JSON that is not an object (a list, a string, a number) parses fine
+    # and then fails on the first dict operation. Treat it like unparseable input
+    # so it is backed up rather than overwritten.
+    if not isinstance(settings, dict):
+        _backup(path)
+        return {}, (
+            "note: existing .vscode/settings.json was not a JSON object; "
+            f"backed up to settings.json{BACKUP_SUFFIX}"
+        )
     if had_comments:
         backup = path.with_name(path.name + BACKUP_SUFFIX)
         try:
@@ -281,6 +290,11 @@ def main() -> int:
     settings, note = load_existing(path)
     if note:
         print(note)
+
+    # load_existing guarantees a dict, but the nested key is whatever the file
+    # held, and a non-object there would crash the update below.
+    if not isinstance(settings.get("workbench.colorCustomizations"), dict):
+        settings["workbench.colorCustomizations"] = {}
 
     settings.setdefault("workbench.colorCustomizations", {}).update(
         color_customizations(hexv)

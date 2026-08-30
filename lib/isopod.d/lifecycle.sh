@@ -22,7 +22,7 @@ cmd_list() {
     # Flags worth seeing without running `isopod info` on each box in turn.
     note=""
     box_is_stale "$name" 2>/dev/null && note="stale"
-    [ "$(meta_get "$name" egress_degraded 2>/dev/null || printf 0)" = 1 ] &&
+    box_egress_degraded "$name" &&
       note="${note:+$note, }egress OPEN"
     names+=("$name") statuses+=("$status") sshs+=("$ssh") ports+=("$port") colors+=("$color") notes+=("$note")
     [ "${#name}" -gt "$nw" ] && nw=${#name}
@@ -325,8 +325,9 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
     "") resolve_runtime "$ENGINE" 0 ;;
     *) export ISOPOD_RUNTIME="$saved_rt" ;;
   esac
-  resolve_egress "$ENGINE"
+  resolve_egress "$ENGINE" "$(meta_get "$name" offline 2>/dev/null || printf 0)"
   egress_preflight "$ENGINE"
+  ensure_box_network "$name"
   runtime_preflight "$ENGINE"
 
   # Everything that can still legitimately fail happens BEFORE the container is
@@ -350,10 +351,18 @@ upgrade_rebase() { # upgrade_rebase <name> <force>
   ws=$(mktemp "${TMPDIR:-/tmp}/isopod-upgrade-$name-XXXXXX.tar")
   info "Copying $WORKSPACE out of '$name'..."
   local -a rc
+  local errf
+  errf=$(mktemp "${TMPDIR:-/tmp}/isopod-tarerr-XXXXXX")
   set +e
-  box_tar_out "$name" "$WORKSPACE" 2> >(grep -v 'file changed as we read it' >&2) >"$ws"
+  # stderr to a file, not `2> >(grep ...)`: bash does not wait for a process
+  # substitution, so the filter can outlive this command still holding the stderr
+  # it inherited. Under `isopod ... 2>&1 | tee log` that never closes the pipe and
+  # the reader hangs. Filter once the writer has exited.
+  box_tar_out "$name" "$WORKSPACE" 2>"$errf" >"$ws"
   rc=("${PIPESTATUS[@]}")
   set -e
+  grep -v 'file changed as we read it' <"$errf" >&2 || true
+  rm -f "$errf"
   if [ "${rc[0]}" -gt 1 ]; then
     rm -f "$ws"
     die "could not read $WORKSPACE out of '$name' — nothing has been changed."
@@ -510,7 +519,7 @@ cmd_migrate() {
     "") resolve_runtime "$ENGINE" 0 ;;
     *) export ISOPOD_RUNTIME="$saved_rt" ;;
   esac
-  resolve_egress "$ENGINE"
+  resolve_egress "$ENGINE" "$(meta_get "$name" offline 2>/dev/null || printf 0)"
   runtime_preflight "$ENGINE"
   base="$(meta_get "$name" base)"
   dev="$(meta_get "$name" dev 2>/dev/null || printf 0)"
@@ -527,10 +536,18 @@ cmd_migrate() {
   ws=$(mktemp "${TMPDIR:-/tmp}/isopod-migrate-$name-XXXXXX.tar")
   info "Copying $WORKSPACE out of '$name'..."
   local -a rc
+  local errf
+  errf=$(mktemp "${TMPDIR:-/tmp}/isopod-tarerr-XXXXXX")
   set +e
-  box_tar_out "$name" "$WORKSPACE" 2> >(grep -v 'file changed as we read it' >&2) >"$ws"
+  # stderr to a file, not `2> >(grep ...)`: bash does not wait for a process
+  # substitution, so the filter can outlive this command still holding the stderr
+  # it inherited. Under `isopod ... 2>&1 | tee log` that never closes the pipe and
+  # the reader hangs. Filter once the writer has exited.
+  box_tar_out "$name" "$WORKSPACE" 2>"$errf" >"$ws"
   rc=("${PIPESTATUS[@]}")
   set -e
+  grep -v 'file changed as we read it' <"$errf" >&2 || true
+  rm -f "$errf"
   if [ "${rc[0]}" -gt 1 ]; then
     rm -f "$ws"
     die "could not read $WORKSPACE out of '$name' — nothing has been changed."
@@ -549,6 +566,7 @@ cmd_migrate() {
   newtag=$(build_image "$base" "$dev" "$nested") ||
     die "image build failed in the target store (workspace kept at $ws)"
 
+  ensure_box_network "$name"
   local BOX_SUDO BOX_HARDEN BOX_DISK BOX_NESTED BOX_SECRETS BOX_GUEST_EGRESS BOX_GUEST_EGRESS_ALLOW BOX_HOST_PORTS
   BOX_SUDO="$(meta_get "$name" sudo 2>/dev/null || true)"
   [ -n "$BOX_SUDO" ] || BOX_SUDO=1
@@ -683,7 +701,7 @@ cmd_reconfigure() {
     *) export ISOPOD_RUNTIME="$saved_rt" ;;
   esac
   # Degrade default-on egress gracefully instead of blocking the recreate.
-  resolve_egress "$ENGINE"
+  resolve_egress "$ENGINE" "$(meta_get "$name" offline 2>/dev/null || printf 0)"
 
   # config.yaml is the source of truth (synthesize it for pre-feature boxes),
   # with any flags overriding individual fields.
@@ -715,6 +733,13 @@ cmd_reconfigure() {
       on | off) ;;
       *) die "invalid --guest-egress '$guest_egress' (use: on | off)" ;;
     esac
+    # An offline box has no route out, so an in-guest filter would be recorded in
+    # meta and enforced by nothing. create refuses the same pair; refuse it here
+    # rather than store a posture the box does not have.
+    if [ "$guest_egress" = on ] && [ "$(meta_get "$name" offline 2>/dev/null || true)" = 1 ]; then
+      die "'$name' is offline, so it has no route out for guest egress to filter.
+     Drop --guest-egress: an offline box already reaches nothing."
+    fi
     if [ "$guest_egress" = on ] && box_is_stale "$name" 2>/dev/null; then
       die "'$name' was built from an older isopod, so its image has no egress ruleset to load —
      turning guest egress on would leave it unable to start sshd. Rebuild it first:
@@ -740,6 +765,7 @@ cmd_reconfigure() {
   # Re-check egress enforcement + network before recreating (the profile may have
   # changed since create; no-op unless `egress lan-deny` is configured).
   egress_preflight "$ENGINE"
+  ensure_box_network "$name"
   # Re-check the runtime too — the profile's `runtime` directive may have changed.
   runtime_preflight "$ENGINE"
 
@@ -896,10 +922,12 @@ flatpak_access_hint() { # flatpak_access_hint <app-id>
   fi
   warn "the '$id' Flatpak does not appear to have access to your home dir.
          The Remote-SSH extension needs to read ~/.ssh/config and isopod's keys.
-         Grant read access with:
-           flatpak override --user --filesystem=\$HOME/.ssh:ro \\
+         Grant read access, then restart the editor and retry:
+           flatpak override --user --filesystem=\$HOME/.ssh/config:ro \\
              --filesystem=$CONFIG_DIR:ro $id
-         then restart VSCodium and retry."
+         That grants the config FILE, not all of ~/.ssh, so your other private keys
+         stay outside the editor sandbox. isopod's own per-box keys live under
+         $CONFIG_DIR and are the only keys the extension needs."
 }
 
 # Administrative root shell in a box, over SSH with the host-held root key.

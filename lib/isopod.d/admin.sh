@@ -412,7 +412,8 @@ doctor_boxes() {
     name=$(basename "$d")
     stale=0
     box_is_stale "$name" 2>/dev/null && stale=1
-    degraded="$(meta_get "$name" egress_degraded 2>/dev/null || printf 0)"
+    degraded=0
+    box_egress_degraded "$name" && degraded=1
     [ "$stale" = 1 ] || [ "$degraded" = 1 ] || continue
     [ "$any" = 0 ] && printf '\nBoxes needing attention:\n' && any=1
     [ "$stale" = 1 ] &&

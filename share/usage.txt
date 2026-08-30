@@ -135,6 +135,29 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         filesystem a microVM box boots from. Also hands the box
                         user /dev/fuse and /dev/net/tun. Adds real attack
                         surface inside the box — off by default.
+  --offline             Give the box no route off the host. It goes on a
+                        dedicated internal engine network, so isopod still
+                        reaches it over loopback SSH and copy-in/export/shell
+                        all work, but nothing in the box can reach the internet
+                        or your LAN. Host services bound to all interfaces do
+                        still answer on the bridge gateway, so bind those to a
+                        specific address if an offline box should not see them.
+                        Offline boxes also share one network and can reach each
+                        other, so treat two of them as a single trust domain.
+                        Enforced by the engine, so the box cannot
+                        undo it, and it needs no firewall, no root and no
+                        /dev/kvm, which makes it the strongest network boundary
+                        available on a stock rootless install. Turns any egress
+                        mode off (there is no traffic left to filter) and rules
+                        out --repo, which would have nothing to clone from:
+                        copy the work in with --copy instead. To reach one host
+                        service from an offline box, use 'isopod host-port'.
+                        A microVM box needs an engine that can put a default
+                        route on an internal network, which is what passt
+                        follows to reach the guest: podman 5 and later, or
+                        podman 4 with netavark 1.7 or newer. Where the engine
+                        cannot, isopod refuses the pair rather than leave you a
+                        box that boots and stays unreachable.
   --dev                 Add the dev/test toolchain (nested podman/docker, the
                         docker group, shellcheck/shfmt/pexpect/nftables) so the
                         box can run isopod's own test suite. Off by default —
