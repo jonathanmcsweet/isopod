@@ -45,6 +45,11 @@ iso() { "$ISOPOD" "$@" </dev/null; }
 BOX_SSHD_PORT="$(ISOPOD_SOURCED=1 bash -c 'source "$1" >/dev/null 2>&1; printf %s "${BOX_SSHD_PORT:-}"' _ "$ISOPOD" 2>/dev/null)"
 [ -n "$BOX_SSHD_PORT" ] || BOX_SSHD_PORT=2222
 
+# For reading a box's container log directly. isopod has no `logs` command, and
+# sshd runs with -e, so its "Connection from <ip>" lines land there. That is the
+# one place the source address a guest actually sees is recorded.
+ENGINE_BIN="$(command -v podman || command -v docker || true)"
+
 # Can this box open a TCP connection to <ip>:<port>?
 #
 # curl, not bash's /dev/tcp. That redirection is a build option a distribution
@@ -254,6 +259,27 @@ elif iso create hv-offline2 --offline ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-of
     skip "neighbour isolation (the box cannot reach even its own sshd, so a refusal would prove nothing)"
   elif box_can_connect hv-offline "$B_IP" "$BOX_SSHD_PORT"; then
     bad "offline box REACHED its neighbour's sshd at $B_IP:$BOX_SSHD_PORT"
+    # Answer the obvious next question in the same run instead of another round
+    # trip. Two things distinguish the causes:
+    #
+    #   no table          the entrypoint never loaded it, so the box came up
+    #                     unprotected and the fail-closed path did not fire.
+    #   table, but the    the rule loaded and did not match. Under passt a
+    #   sshd saw the      forwarded connection is a NEW connection opened by
+    #   gateway address   passt itself, so it arrives from passt's address,
+    #                     which IS the gateway the rule trusts. No in-guest
+    #                     saddr rule can tell the host from a neighbour then,
+    #                     and the layer cannot work as designed on this runtime.
+    note "the neighbour's inbound chain (nothing here means it never loaded):"
+    iso root-shell hv-offline2 -- 'nft list table inet isopod_inbound' 2>&1 |
+      sed 's/^/        /' | head -20
+    note "source address the neighbour's sshd recorded for that probe:"
+    if [ -n "$ENGINE_BIN" ]; then
+      "$ENGINE_BIN" logs "$(iso info hv-offline2 2>/dev/null | awk -F': *' '/^container/{print $2; exit}')" 2>&1 |
+        grep -iE 'connection from|neighbour isolation' | tail -5 | sed 's/^/        /'
+    else
+      printf '        (no podman or docker on PATH to read the log)\n'
+    fi
   else
     ok "offline box cannot reach its neighbour's sshd at $B_IP:$BOX_SSHD_PORT"
     # Positive control. Without it, "cannot reach" could equally mean the two
