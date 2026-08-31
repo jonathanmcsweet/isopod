@@ -38,6 +38,13 @@ note() { printf '  [note] %s\n' "$1"; }
 # their non-interactive flag explicitly below.
 iso() { "$ISOPOD" "$@" </dev/null; }
 
+# The box sshd does NOT listen on 22: isopod publishes the host port onto
+# BOX_SSHD_PORT inside the box. Probing 22 connects to nothing, which reads
+# exactly like a blocked neighbour. Read the real value from the script instead
+# of keeping a copy here that can drift out of step with it.
+BOX_SSHD_PORT="$(ISOPOD_SOURCED=1 bash -c 'source "$1" >/dev/null 2>&1; printf %s "${BOX_SSHD_PORT:-}"' _ "$ISOPOD" 2>/dev/null)"
+[ -n "$BOX_SSHD_PORT" ] || BOX_SSHD_PORT=2222
+
 # Run one shell command inside a box.
 #
 # `isopod shell <box> -- a b c` reaches the box as the joined string "a b c":
@@ -209,20 +216,20 @@ elif iso create hv-offline2 --offline ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-of
   B_IP="$(in_box hv-offline2 'hostname -I' 2>/dev/null | awk '{print $1}')"
   if [ -z "${B_IP:-}" ]; then
     skip "neighbour isolation (could not read the second box's address)"
-  elif ! in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/22'" >/dev/null 2>&1; then
+  elif ! in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$BOX_SSHD_PORT'" >/dev/null 2>&1; then
     # Control: a box that cannot open TCP at all would read as isolated.
     skip "neighbour isolation (the box cannot reach even its own sshd, so a refusal would prove nothing)"
-  elif in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$B_IP/22'" >/dev/null 2>&1; then
-    bad "offline box REACHED its neighbour's sshd at $B_IP:22"
+  elif in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$B_IP/$BOX_SSHD_PORT'" >/dev/null 2>&1; then
+    bad "offline box REACHED its neighbour's sshd at $B_IP:$BOX_SSHD_PORT"
   else
-    ok "offline box cannot reach its neighbour's sshd at $B_IP:22"
+    ok "offline box cannot reach its neighbour's sshd at $B_IP:$BOX_SSHD_PORT"
     # Positive control. Without it, "cannot reach" could equally mean the two
     # boxes were never on the same network, and the pass above would be empty.
     # With the filter off, the identical probe must connect.
     if iso create hv-offline3 --offline --guest-inbound off ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-offline3.log 2>&1; then
       C_IP="$(in_box hv-offline3 'hostname -I' 2>/dev/null | awk '{print $1}')"
       if [ -n "${C_IP:-}" ] &&
-        in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$C_IP/22'" >/dev/null 2>&1; then
+        in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$C_IP/$BOX_SSHD_PORT'" >/dev/null 2>&1; then
         ok "control: the same probe DOES reach a neighbour created with --guest-inbound off"
       else
         bad "control failed: the probe cannot reach an unprotected neighbour either, so the pass above proves nothing"
