@@ -98,6 +98,11 @@ if iso create hv-offline --offline >/tmp/hv-offline.log 2>&1 ||
   { grep -q -- '--offline needs a plain container' /tmp/hv-offline.log &&
     iso create hv-offline --offline --container >>/tmp/hv-offline.log 2>&1; }; then
   ok "offline box created and reachable over SSH"
+  # Scalar, not `[ -z "${OFF_EXTRA+x}" ]` on the array below: for an array that
+  # expansion tests element 0, so an EMPTY array reads as unset and B2 skipped
+  # itself on every host where --offline did not need the --container fallback,
+  # which is precisely where B2 can run.
+  OFF_READY=1
   OFF_EXTRA=()
   grep -q -- '--offline needs a plain container' /tmp/hv-offline.log && {
     OFF_EXTRA=(--container)
@@ -121,14 +126,20 @@ if iso create hv-offline --offline >/tmp/hv-offline.log 2>&1 ||
   fi
 
   # ...nor the LAN. The image has no ping (no iputils-ping in the Dockerfile),
-  # so ICMP is not available to probe with. The route table is the determinate
-  # check: an internal network gives the box no default route, and without one
-  # nothing off its own subnet is addressable. Field 2 of /proc/net/route is the
-  # destination; 00000000 is the default route.
+  # so ICMP is not available to probe with.
+  #
+  # The route table is NOT the check it looks like. Where the engine can install
+  # static routes, ensure_offline_network creates the internal network WITH
+  # `--route 0.0.0.0/0`, because a microVM reaches its guest through passt and
+  # passt picks its template interface by following the default route. So an
+  # offline microVM box has a default route by design, pointing at a bridge with
+  # no path off the host. Its presence proves nothing either way; report it and
+  # let the reachability probes decide. Field 2 of /proc/net/route is the
+  # destination, 00000000 being the default route.
   if in_box hv-offline 'cut -f2 /proc/net/route | grep -qx 00000000' >/dev/null 2>&1; then
-    bad "offline box HAS a default route (it can address the LAN)"
+    note "the box has a default route: expected here, the internal network is created with --route so passt can find its interface"
   else
-    ok "offline box has no default route"
+    note "the box has no default route (this engine cannot install one, so the box is a plain container)"
   fi
 
   # Corroboration, not proof: a gateway that refuses TCP/22 looks the same as one
@@ -185,7 +196,7 @@ hdr "B2. Box-to-box isolation on a shared network"
 # box: a plain container has no CAP_NET_ADMIN to load a ruleset with. Where
 # --offline had to fall back to --container, the protection is absent by
 # construction, and this section says so instead of reporting a pass.
-if [ -z "${OFF_EXTRA+x}" ]; then
+if [ "${OFF_READY:-0}" != 1 ]; then
   skip "neighbour isolation (no offline box to test from)"
 elif iso create hv-offline2 --offline ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-offline2.log 2>&1; then
   ok "second offline box created"
@@ -232,10 +243,18 @@ else
   if iso create hv-nest --nested-containers >/tmp/hv-nest.log 2>&1; then
     ok "nested-containers box created"
     # The attack: redirect an intermediate component of the mountpoint path.
-    in_box hv-nest 'rm -rf ~/.local/share && ln -s /etc ~/.local/share' >/dev/null 2>&1
+    #
+    # Staging it needs the volume unmounted first. ~/.local/share/containers is a
+    # live mountpoint on a running box, so `rm -rf ~/.local/share` fails with
+    # EBUSY and the && drops the symlink, which is why this section tested
+    # nothing. Unmount from the administrative root shell. What is under test is
+    # the entrypoint refusing the redirect at the NEXT boot, not who created the
+    # symlink, and the box user reaches the same state on a box whose volume is
+    # not mounted yet.
+    iso root-shell hv-nest -- 'umount /home/dev/.local/share/containers 2>/dev/null; rm -rf /home/dev/.local/share && ln -s /etc /home/dev/.local/share' >/dev/null 2>&1
     # Confirm the redirect is actually in place. It was not, before the quoting
     # fix, which made everything below this a test of nothing.
-    if in_box hv-nest '[ -L ~/.local/share ]' >/dev/null 2>&1; then
+    if in_box hv-nest '[ -L /home/dev/.local/share ]' >/dev/null 2>&1; then
       ok "attack set up: ~/.local/share redirected to /etc"
     else
       bad "could not set up the redirect, so the checks below prove nothing"
