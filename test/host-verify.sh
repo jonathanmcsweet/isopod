@@ -45,6 +45,26 @@ iso() { "$ISOPOD" "$@" </dev/null; }
 BOX_SSHD_PORT="$(ISOPOD_SOURCED=1 bash -c 'source "$1" >/dev/null 2>&1; printf %s "${BOX_SSHD_PORT:-}"' _ "$ISOPOD" 2>/dev/null)"
 [ -n "$BOX_SSHD_PORT" ] || BOX_SSHD_PORT=2222
 
+# Can this box open a TCP connection to <ip>:<port>?
+#
+# curl, not bash's /dev/tcp. That redirection is a build option a distribution
+# can ship disabled, and a probe that fails because the shell lacks a feature is
+# indistinguishable from one the network dropped: it reads as isolation either
+# way. curl is in the box image and section B already proves it runs there.
+# Exit 7 is "could not connect" and 28 is "timed out"; anything else means the
+# connection was established, since sshd answers with its banner rather than
+# HTTP and curl then complains about the protocol. 255 is ssh's own failure,
+# which is no answer at all.
+box_can_connect() { # box_can_connect <box> <ip> <port>; 0 open, 1 closed, 2 no answer
+  local rc=0
+  in_box "$1" "curl -sS -m 5 -o /dev/null http://$2:$3/" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    7 | 28) return 1 ;;
+    255) return 2 ;;
+    *) return 0 ;;
+  esac
+}
+
 # Run one shell command inside a box.
 #
 # `isopod shell <box> -- a b c` reaches the box as the joined string "a b c":
@@ -149,12 +169,25 @@ if iso create hv-offline --offline >/tmp/hv-offline.log 2>&1 ||
     note "the box has no default route (this engine cannot install one, so the box is a plain container)"
   fi
 
+  # Establish ONCE that the box can open a TCP connection at all, by reaching its
+  # own sshd. Every "could not connect" result below is meaningless without it:
+  # a broken probe refuses everything and reads as perfect isolation.
+  PROBE_OK=0
+  box_can_connect hv-offline 127.0.0.1 "$BOX_SSHD_PORT" && PROBE_OK=1
+  if [ "$PROBE_OK" = 1 ]; then
+    ok "probe works: the box can open TCP to its own sshd on $BOX_SSHD_PORT"
+  else
+    bad "probe does NOT work: the box cannot open TCP to its own sshd on $BOX_SSHD_PORT, so every connection check below would pass for the wrong reason"
+  fi
+
   # Corroboration, not proof: a gateway that refuses TCP/22 looks the same as one
   # the box cannot reach. Only the connecting case is conclusive, and that case
   # is a real failure.
   GW="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
-  if [ -n "${GW:-}" ]; then
-    if in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$GW/22'" >/dev/null 2>&1; then
+  if [ "$PROBE_OK" != 1 ]; then
+    skip "LAN gateway probe (the probe itself does not work)"
+  elif [ -n "${GW:-}" ]; then
+    if box_can_connect hv-offline "$GW" 22; then
       bad "offline box OPENED TCP to the LAN gateway $GW"
     else
       ok "offline box could not open TCP to the LAN gateway $GW"
@@ -216,10 +249,10 @@ elif iso create hv-offline2 --offline ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-of
   B_IP="$(in_box hv-offline2 'hostname -I' 2>/dev/null | awk '{print $1}')"
   if [ -z "${B_IP:-}" ]; then
     skip "neighbour isolation (could not read the second box's address)"
-  elif ! in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$BOX_SSHD_PORT'" >/dev/null 2>&1; then
-    # Control: a box that cannot open TCP at all would read as isolated.
+  elif [ "${PROBE_OK:-0}" != 1 ]; then
+    # Established in section B: a box that cannot open TCP at all reads as isolated.
     skip "neighbour isolation (the box cannot reach even its own sshd, so a refusal would prove nothing)"
-  elif in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$B_IP/$BOX_SSHD_PORT'" >/dev/null 2>&1; then
+  elif box_can_connect hv-offline "$B_IP" "$BOX_SSHD_PORT"; then
     bad "offline box REACHED its neighbour's sshd at $B_IP:$BOX_SSHD_PORT"
   else
     ok "offline box cannot reach its neighbour's sshd at $B_IP:$BOX_SSHD_PORT"
@@ -229,7 +262,7 @@ elif iso create hv-offline2 --offline ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-of
     if iso create hv-offline3 --offline --guest-inbound off ${OFF_EXTRA+"${OFF_EXTRA[@]}"} >/tmp/hv-offline3.log 2>&1; then
       C_IP="$(in_box hv-offline3 'hostname -I' 2>/dev/null | awk '{print $1}')"
       if [ -n "${C_IP:-}" ] &&
-        in_box hv-offline "timeout 5 bash -c 'exec 3<>/dev/tcp/$C_IP/$BOX_SSHD_PORT'" >/dev/null 2>&1; then
+        box_can_connect hv-offline "$C_IP" "$BOX_SSHD_PORT"; then
         ok "control: the same probe DOES reach a neighbour created with --guest-inbound off"
       else
         bad "control failed: the probe cannot reach an unprotected neighbour either, so the pass above proves nothing"
