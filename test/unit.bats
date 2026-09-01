@@ -2553,6 +2553,62 @@ entrypoint_fn() { # entrypoint_fn <name>
   assert_failure
 }
 
+# Restoring in-box privilege the box was created without. On a rootful docker
+# `--user 0` is root in the container namespace, so this is not only an in-box
+# concern.
+@test "assert_safe_run_args refuses restored in-box identity" {
+  run assert_safe_run_args --user 0
+  assert_failure
+  run assert_safe_run_args -u root
+  assert_failure
+  run assert_safe_run_args --user=0
+  assert_failure
+  run assert_safe_run_args --group-add sudo
+  assert_failure
+}
+
+# --entrypoint skips every boot-time guard (the /.krun_config.json removal, the
+# fail-closed egress load, the sudo policy); --runtime on a rootful daemon is an
+# arbitrary binary run as root.
+@test "assert_safe_run_args refuses replacing the entrypoint or the runtime" {
+  run assert_safe_run_args --entrypoint /bin/sh
+  assert_failure
+  run assert_safe_run_args --entrypoint=/bin/sh
+  assert_failure
+  run assert_safe_run_args --runtime /home/me/evil
+  assert_failure
+  run assert_safe_run_args --runtime=/home/me/evil
+  assert_failure
+}
+
+# isopod passes the box's whole security policy in ISOPOD_* environment
+# variables and appends ISOPOD_RUN_ARGS after them, where a duplicate key wins.
+# Refusing that namespace is the point; every other -e is ordinary use and must
+# still work, or the escape hatch stops being usable for what it exists for.
+@test "assert_safe_run_args refuses overriding isopod's own env, in both spellings" {
+  run assert_safe_run_args -e ISOPOD_SUDO=1
+  assert_failure
+  run assert_safe_run_args --env ISOPOD_SUDO=1
+  assert_failure
+  run assert_safe_run_args --env=ISOPOD_HARDEN=
+  assert_failure
+  run assert_safe_run_args -e ISOPOD_GUEST_INBOUND=0
+  assert_failure
+  # --env-file can carry the same names in a file this check cannot read.
+  run assert_safe_run_args --env-file /tmp/e
+  assert_failure
+}
+
+@test "assert_safe_run_args still allows an ordinary env var" {
+  run assert_safe_run_args -e HTTP_PROXY=http://proxy:3128
+  assert_success
+  run assert_safe_run_args --env=TZ=UTC
+  assert_success
+  # The lookahead must not swallow the flag that follows a benign -e value.
+  run assert_safe_run_args -e TZ=UTC --privileged
+  assert_failure
+}
+
 @test "assert_safe_run_args refuses shared host namespaces" {
   run assert_safe_run_args --userns=host
   assert_failure
