@@ -2453,14 +2453,22 @@ entrypoint_fn() { # entrypoint_fn <name>
   assert_output "$long\\.com"
 }
 
-# Non-ASCII is escaped byte by byte. POSIX ERE leaves `\` before an ordinary
-# character undefined, so a hand-typed IDN most likely matches nothing: it fails
-# CLOSED, which is the safe direction. Real IDNs reach the list punycoded
-# (xn--...), which is plain ASCII and unaffected. Pinned so a future change to
-# the escaping cannot start letting raw bytes through instead.
+# Non-ASCII is escaped, and the LOCALE decides how much: in a UTF-8 locale sed
+# sees one character and puts one backslash in front of it, in the C locale it
+# sees two bytes and escapes each. Both are safe and neither lets anything
+# through raw, so assert that property rather than one locale's byte layout. The
+# earlier check here was `output != *"ü"*`, which only holds when the bytes get
+# split, so it passed in the C locale and failed on any ordinary UTF-8 desktop.
+#
+# POSIX ERE leaves `\` before an ordinary character undefined, so a hand-typed
+# IDN most likely matches nothing: it fails CLOSED, the safe direction. Real IDNs
+# reach the list punycoded (xn--...), which is plain ASCII and unaffected.
 @test "egress_regex_escape escapes non-ASCII rather than passing it through" {
   run egress_regex_escape "münchen.de"
-  [[ "$output" != *"ü"* ]]
+  # Strip the backslashes and the original comes back: nothing was dropped.
+  [ "${output//\\/}" = "münchen.de" ]
+  # And something WAS escaped, so nothing passed through untouched.
+  [ "$output" != "münchen.de" ]
   [[ "$output" == *'\.de' ]]
   [[ "$output" == m* ]]
 }
