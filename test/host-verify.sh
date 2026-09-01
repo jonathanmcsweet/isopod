@@ -4,8 +4,9 @@
 # Run this from the isopod repo on a machine with a working container engine.
 # It creates throwaway boxes named hv-* and removes them at the end.
 #
-#   bash test/host-verify.sh            # everything the host supports
+#   bash test/host-verify.sh              # everything the host supports
 #   SKIP_LIVE=1 bash test/host-verify.sh  # skip the slow live bats suite
+#   AUDIT_BOX=mybox bash test/host-verify.sh   # audit a box you already have (F)
 #
 # Deliberately does NOT use `set -e`: every check runs and reports, so one
 # failure does not hide the rest.
@@ -86,7 +87,7 @@ in_box() { # in_box <box> <shell-command>
 cleanup_box() { iso rm "$1" --force >/dev/null 2>&1 || true; }
 cleanup_all() {
   local b r
-  for b in hv-offline hv-offline2 hv-offline3 hv-disk hv-nest hv-remap hv-upg; do cleanup_box "$b"; done
+  for b in hv-offline hv-offline2 hv-offline3 hv-disk hv-nest hv-remap hv-upg hv-audit; do cleanup_box "$b"; done
   # `iso fetch` and `iso remap` write into the repo this runs from. Drop what
   # they left so a verification run does not accumulate refs in your checkout.
   for r in $(git for-each-ref --format='%(refname)' 'refs/remotes/hv-remap/*' \
@@ -407,6 +408,194 @@ if iso create hv-upg >/tmp/hv-upg.log 2>&1; then
   rm -rf "$TMPD"
 else
   bad "upgrade test box failed to create"
+fi
+
+# --- F. box posture audit ----------------------------------------------------
+hdr "F. Box posture (what a box actually came up with)"
+# The 2026-09-01 adversarial review read this posture out of one box by hand and
+# wrote it up as prose. Prose does not re-run, and the box it described is not
+# the box today's `create` produces. These are the same observations as checks.
+#
+# By default it audits a box created here, so a plain run says what current
+# isopod builds. Point it at a box you already have to audit that one instead:
+#
+#   AUDIT_BOX=mybox bash test/host-verify.sh
+#
+# Every check reads a file inside the box, so the section is hollow if the box
+# cannot be reached: each probe carries a control file that must appear in the
+# same read, and an absence with no control is reported as a skip, not a pass.
+AUDIT_BOX="${AUDIT_BOX:-}"
+if [ -n "$AUDIT_BOX" ]; then
+  if iso info "$AUDIT_BOX" >/dev/null 2>&1; then
+    note "auditing the existing box '$AUDIT_BOX'"
+  else
+    bad "AUDIT_BOX='$AUDIT_BOX' is not a box isopod knows about"
+    AUDIT_BOX=""
+  fi
+elif iso create hv-audit >/tmp/hv-audit.log 2>&1; then
+  AUDIT_BOX="hv-audit"
+  ok "audit box created with today's defaults"
+else
+  bad "audit box failed to create - see /tmp/hv-audit.log"
+fi
+
+AUDIT_STATUS=""
+[ -n "$AUDIT_BOX" ] && AUDIT_STATUS="$(in_box "$AUDIT_BOX" 'cat /proc/self/status' 2>/dev/null)"
+if [ -z "$AUDIT_BOX" ]; then
+  : # already reported above
+elif ! printf '%s\n' "$AUDIT_STATUS" | grep -q '^CapBnd:'; then
+  skip "box posture (cannot read /proc/self/status in '$AUDIT_BOX', so nothing below would mean anything)"
+else
+  AUDIT_INFO="$(iso info "$AUDIT_BOX" 2>/dev/null)"
+  ainfo() { printf '%s\n' "$AUDIT_INFO" | awk -F': *' -v k="^$1" '$0 ~ k {print $2; exit}'; }
+  A_TIER="$(ainfo isolation)"
+  A_SUDO="$(ainfo sudo)"
+  note "runtime:   ${A_TIER:-unknown}"
+  note "built:     $(ainfo built)"
+  note "neighbors: $(ainfo neighbors)"
+  note "sudo:      ${A_SUDO:-unknown}"
+
+  # F1. crun's krun handler writes the container's OCI config into the rootfs,
+  # which on a microVM box IS the guest filesystem, readable by every process in
+  # it. The entrypoint removes it on every start. Listed together with a file
+  # that must exist, so "not there" cannot come from `ls` failing to run.
+  A_LS="$(in_box "$AUDIT_BOX" 'ls -d /.krun_config.json /etc/isopod-user' 2>/dev/null)"
+  if ! printf '%s\n' "$A_LS" | grep -q '/etc/isopod-user'; then
+    skip "/.krun_config.json (the control file did not list, so an absence proves nothing)"
+  elif printf '%s\n' "$A_LS" | grep -q '/\.krun_config\.json'; then
+    bad "/.krun_config.json is readable in the box: host username, home layout and UID leak to every process in it"
+  else
+    ok "/.krun_config.json absent"
+  fi
+
+  # F2. A search domain hands the box the host's internal naming, which is both a
+  # disclosure and a way for an unqualified name to resolve somewhere internal.
+  A_RESOLV="$(in_box "$AUDIT_BOX" 'cat /etc/resolv.conf' 2>/dev/null)"
+  if [ -z "$A_RESOLV" ]; then
+    skip "resolv.conf (empty read)"
+  elif printf '%s\n' "$A_RESOLV" | grep -qiE '^[[:space:]]*search[[:space:]]'; then
+    bad "resolv.conf carries a search domain, so the host's internal naming reached the box"
+    printf '%s\n' "$A_RESOLV" | sed 's/^/        /'
+  else
+    ok "resolv.conf has no search domain"
+    note "resolvers the box was handed: $(printf '%s\n' "$A_RESOLV" | awk '/^nameserver/{printf "%s ", $2}')"
+  fi
+
+  # F3. no-new-privileges is set at run time, and only for a box with no sudo
+  # policy. On a --sudo box its absence is the documented design, not a finding.
+  A_NNP="$(printf '%s\n' "$AUDIT_STATUS" | awk '/^NoNewPrivs:/{print $2; exit}')"
+  case "$A_SUDO" in
+    no*)
+      if [ "$A_NNP" = 1 ]; then
+        ok "no-sudo box has NoNewPrivs=1"
+      else
+        bad "box declares no sudo but NoNewPrivs=$A_NNP, so the setuid gate is not on"
+      fi
+      ;;
+    *) note "NoNewPrivs=$A_NNP (expected on a sudo box: isopod sets the gate only where sudo is off)" ;;
+  esac
+  note "Seccomp=$(printf '%s\n' "$AUDIT_STATUS" | awk '/^Seccomp:/{print $2; exit}') CapBnd=$(printf '%s\n' "$AUDIT_STATUS" | awk '/^CapBnd:/{print $2; exit}')  (isopod installs no in-guest seccomp filter; the VM is the boundary)"
+
+  # F4. The policy isopod reports and the policy the box is actually running.
+  # These drift on an old box: the entrypoint applies whatever meta says, and
+  # meta defaults to sudo=1 for boxes created before the key existed.
+  A_USER="$(in_box "$AUDIT_BOX" 'cat /etc/isopod-user' 2>/dev/null | tr -d '\r\n ')"
+  A_SUDOERS="$(in_box "$AUDIT_BOX" 'ls -a /etc/sudoers.d' 2>/dev/null)"
+  A_SUDOBIN="$(in_box "$AUDIT_BOX" 'ls -l /usr/bin/sudo' 2>/dev/null)"
+  case "$A_SUDO" in
+    no*) A_WANT=0 ;;
+    *) A_WANT=1 ;;
+  esac
+  if ! printf '%s\n' "$A_SUDOERS" | grep -qx '\.'; then
+    skip "sudo policy (/etc/sudoers.d did not list, so an empty result proves nothing)"
+  else
+    A_HAS=0
+    [ -n "$A_USER" ] && printf '%s\n' "$A_SUDOERS" | grep -qx "$A_USER" && A_HAS=1
+    if [ "$A_HAS" = "$A_WANT" ]; then
+      ok "in-box sudo policy matches what isopod reports (sudoers entry $([ "$A_HAS" = 1 ] && printf present || printf absent))"
+    else
+      bad "isopod reports sudo='$A_SUDO' but /etc/sudoers.d/$A_USER is $([ "$A_HAS" = 1 ] && printf present || printf absent)"
+    fi
+    # A no-sudo box that kept a setuid-root sudo is standing escalation surface:
+    # a sudo LPE would be root-in-box, the exact path --no-sudo removes.
+    A_MODE="$(printf '%s\n' "$A_SUDOBIN" | awk 'NR==1{print $1}')"
+    A_SETUID=0
+    case "$A_MODE" in ???[sS]*) A_SETUID=1 ;; esac
+    if [ -z "$A_MODE" ]; then
+      note "no /usr/bin/sudo in this image, so there is no setuid bit to keep in step"
+    elif [ "$A_SETUID" = "$A_WANT" ]; then
+      ok "sudo's setuid bit is in step with the policy ($A_MODE)"
+    else
+      bad "sudo is $A_MODE but the policy is $([ "$A_WANT" = 1 ] && printf sudo || printf no-sudo): standing escalation surface"
+    fi
+  fi
+
+  # F5. isopod's own files in the box. A box whose image predates one of these
+  # silently loses the feature it backs, with nothing in `info` to say so.
+  A_ETC="$(in_box "$AUDIT_BOX" 'ls -a /etc/isopod' 2>/dev/null)"
+  if ! printf '%s\n' "$A_ETC" | grep -qx '\.'; then
+    bad "/etc/isopod does not list at all, so this box predates isopod's in-box files entirely"
+  else
+    for f in hardening-sysctl.conf egress-guest.nft; do
+      if printf '%s\n' "$A_ETC" | grep -qx "$f"; then
+        ok "/etc/isopod/$f present"
+      else
+        bad "/etc/isopod/$f missing (image predates it - run: isopod upgrade $AUDIT_BOX)"
+      fi
+    done
+  fi
+
+  # F6. Does the shipped hardening profile actually land? Read the keys out of
+  # the profile rather than copying them here, so this cannot drift from it.
+  # microVM only: a container shares the host kernel and is never asked to.
+  HCONF=share/hardening-sysctl.conf
+  case "${A_TIER:-}" in
+    microVM*)
+      if [ ! -f "$HCONF" ]; then
+        skip "hardening profile (no $HCONF here)"
+      else
+        A_PATHS=""
+        while IFS='=' read -r hk _; do
+          case "$hk" in '' | \#*) continue ;; esac
+          A_PATHS="$A_PATHS /proc/sys/$(printf '%s' "$hk" | tr . /)"
+        done <"$HCONF"
+        A_GOT="$(in_box "$AUDIT_BOX" "grep -H . $A_PATHS 2>/dev/null" 2>/dev/null)"
+        A_MISS=""
+        while IFS='=' read -r hk hv; do
+          case "$hk" in '' | \#*) continue ;; esac
+          hp="/proc/sys/$(printf '%s' "$hk" | tr . /)"
+          got="$(printf '%s\n' "$A_GOT" | awk -F: -v k="$hp" '$1==k{print $2; exit}')"
+          if [ -z "$got" ]; then
+            A_MISS="$A_MISS $hk(not exposed)"
+          elif [ "$got" != "$hv" ]; then
+            A_MISS="$A_MISS $hk=$got(want $hv)"
+          fi
+        done <"$HCONF"
+        if [ -z "$A_MISS" ]; then
+          ok "every key in $HCONF is applied in the box"
+        else
+          bad "hardening profile not fully applied:$A_MISS"
+        fi
+      fi
+      ;;
+    *) note "hardening sysctls are microVM-only and this box is ${A_TIER:-unknown}, so the profile is not expected here" ;;
+  esac
+
+  # F7. The four sysctls the 2026-09-01 review proposed adding to the default
+  # profile. Reported, not asserted: hardening-sysctl.conf already rejects two of
+  # them by name as strict-profile material (they break nested containers,
+  # profiling and rootless engines in the box), and a key this guest kernel does
+  # not expose would be a no-op. Measure before adopting any of them.
+  A_PROP="$(in_box "$AUDIT_BOX" 'grep -H . /proc/sys/kernel/unprivileged_bpf_disabled /proc/sys/kernel/yama/ptrace_scope /proc/sys/vm/unprivileged_userfaultfd /proc/sys/user/max_user_namespaces 2>/dev/null' 2>/dev/null)"
+  note "sysctls the 2026-09-01 review proposed adding, as this box has them now:"
+  for k in kernel/unprivileged_bpf_disabled kernel/yama/ptrace_scope vm/unprivileged_userfaultfd user/max_user_namespaces; do
+    v="$(printf '%s\n' "$A_PROP" | awk -F: -v p="/proc/sys/$k" '$1==p{print $2; exit}')"
+    if [ -z "$v" ]; then
+      printf '        %-38s absent or unreadable (adding it would change nothing here)\n' "$k"
+    else
+      printf '        %-38s %s\n' "$k" "$v"
+    fi
+  done
 fi
 
 # --- summary -----------------------------------------------------------------
