@@ -1603,3 +1603,20 @@ box_egress_posture() { # box_egress_posture <name>
     printf 'OPEN — no egress isolation'
   fi
 }
+
+box_inbound_posture() { # box_inbound_posture <name>
+  local want tier
+  want="$(meta_get "$1" guest_inbound 2>/dev/null || true)"
+  tier="$(runtime_tier "$(meta_get "$1" runtime 2>/dev/null || true)" 2>/dev/null || true)"
+  # Gated exactly like the guest egress verdict above: the entrypoint loads the
+  # inbound chain only on a Tier 3 microVM, because a container box has no
+  # CAP_NET_ADMIN to load a ruleset with. create records guest_inbound=on for
+  # every box regardless of runtime, so the meta flag on its own would claim
+  # neighbour isolation a container or gVisor box never got. Tier comes from the
+  # box RECORDED runtime, not whatever is active when `isopod info` runs.
+  if [ "$want" = on ] && [ "$tier" = 3 ]; then
+    printf 'isolated (in-box nft drops inbound that did not come from the host)'
+  else
+    printf 'OPEN, any box sharing this network can reach the ports this box listens on'
+  fi
+}
