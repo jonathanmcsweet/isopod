@@ -98,6 +98,20 @@ sanitize() { # sanitize <string...> -> the same text with control characters rem
 # rather than an argument, where buffering it into a string would be wrong.
 sanitize_stream() { LC_ALL=C tr -d '\000-\010\013-\037\177'; }
 
+# Follow-mode counterpart, for a stream that arrives a line at a time and has no
+# end (tail -f). tr buffers in blocks whenever its stdout is not a terminal, so
+# the plain filter above turns `isopod egress log -f | grep x` into a pipeline
+# that prints nothing until 4KB has accumulated, which reads as a hang. stdbuf
+# drops the buffer. Where it is missing, fall back to the buffered filter rather
+# than to raw box bytes: late output beats unfiltered output.
+sanitize_stream_live() {
+  if have stdbuf; then
+    LC_ALL=C stdbuf -o0 tr -d '\000-\010\013-\037\177'
+  else
+    sanitize_stream
+  fi
+}
+
 # Host OS family isopod is running ON — NOT where boxes run. On macOS the
 # container engine runs boxes inside its own Linux VM (podman machine / Docker
 # Desktop), so the host that runs the `isopod` script and the
