@@ -206,6 +206,24 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
     [ -n "$box_lan_allow" ] &&
       RUN_ARGS+=(-e "ISOPOD_GUEST_EGRESS_ALLOW=$box_lan_allow")
   fi
+  # Neighbour isolation: drop inbound that did not come from the host, so a box
+  # cannot reach the box beside it on the same engine network. microVM boxes only,
+  # for the same reason as guest egress: a container box's entrypoint has no
+  # CAP_NET_ADMIN to load a ruleset with. Deliberately independent of guest egress
+  # and of the network mode, since a box has neighbours in every mode, and an
+  # offline box has guest egress forced off while still sharing a bridge.
+  local box_guest_inbound="${BOX_GUEST_INBOUND:-}"
+  [ -n "$box_guest_inbound" ] ||
+    box_guest_inbound="$(meta_get "$name" guest_inbound 2>/dev/null || true)"
+  # An ABSENT key is a box built before this feature: its image carries an
+  # entrypoint with no inbound block, so the variable would be ignored and the box
+  # would report a protection it does not have. Default such boxes off and let
+  # `isopod upgrade` (a full rebase) be the way onto it, matching guest egress.
+  [ -n "$box_guest_inbound" ] || box_guest_inbound=off
+  if [ "$box_guest_inbound" = on ] && is_microvm_runtime; then
+    RUN_ARGS+=(-e "ISOPOD_GUEST_INBOUND=1")
+  fi
+
   # Secrets tmpfs: memory-backed, owned by the in-box user, gone when the box
   # stops. inject_secrets streams values in over SSH after boot; nothing about
   # a secret (name or value) is visible to the engine or `inspect`. On create

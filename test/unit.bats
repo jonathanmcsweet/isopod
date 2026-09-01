@@ -2395,6 +2395,113 @@ entrypoint_fn() { # entrypoint_fn <name>
   assert_success
 }
 
+# ---- egress_regex_escape -----------------------------------------------------
+# The allow-list feeds a host-security filter and both files can be hand-edited,
+# so an entry must never put a live metacharacter into the trusted filter. This
+# renderer is the one path both files share.
+
+@test "egress_regex_escape leaves hostname characters alone" {
+  run egress_regex_escape "example-host"
+  assert_output "example-host"
+}
+
+@test "egress_regex_escape escapes the label separator" {
+  run egress_regex_escape "example.com"
+  assert_output 'example\.com'
+}
+
+@test "egress_regex_escape neutralises wildcards and quantifiers" {
+  run egress_regex_escape ".*"
+  assert_output '\.\*'
+  run egress_regex_escape 'a+b?'
+  assert_output 'a\+b\?'
+}
+
+@test "egress_regex_escape neutralises alternation and grouping" {
+  run egress_regex_escape "a.com|b.com"
+  assert_output 'a\.com\|b\.com'
+  run egress_regex_escape "(evil)"
+  assert_output '\(evil\)'
+  run egress_regex_escape "[a-z]"
+  assert_output '\[a-z\]'
+}
+
+@test "egress_regex_escape neutralises anchors" {
+  run egress_regex_escape '^a$'
+  assert_output '\^a\$'
+}
+
+@test "egress_regex_escape escapes a backslash rather than passing it through" {
+  run egress_regex_escape 'a\b'
+  assert_output 'a\\b'
+}
+
+@test "egress_regex_escape escapes whitespace and underscore" {
+  run egress_regex_escape "a b_c"
+  assert_output 'a\ b\_c'
+}
+
+@test "egress_regex_escape returns nothing for empty input" {
+  run egress_regex_escape ""
+  assert_output ""
+}
+
+@test "egress_regex_escape handles a very long label" {
+  local long
+  long="$(printf 'a%.0s' $(seq 1 300))"
+  run egress_regex_escape "$long.com"
+  assert_output "$long\\.com"
+}
+
+# Non-ASCII is escaped, and the LOCALE decides how much: in a UTF-8 locale sed
+# sees one character and puts one backslash in front of it, in the C locale it
+# sees two bytes and escapes each. Both are safe and neither lets anything
+# through raw, so assert that property rather than one locale's byte layout. The
+# earlier check here was `output != *"ü"*`, which only holds when the bytes get
+# split, so it passed in the C locale and failed on any ordinary UTF-8 desktop.
+#
+# POSIX ERE leaves `\` before an ordinary character undefined, so a hand-typed
+# IDN most likely matches nothing: it fails CLOSED, the safe direction. Real IDNs
+# reach the list punycoded (xn--...), which is plain ASCII and unaffected.
+@test "egress_regex_escape escapes non-ASCII rather than passing it through" {
+  run egress_regex_escape "münchen.de"
+  # Strip the backslashes and the original comes back: nothing was dropped.
+  [ "${output//\\/}" = "münchen.de" ]
+  # And something WAS escaped, so nothing passed through untouched.
+  [ "$output" != "münchen.de" ]
+  [[ "$output" == *'\.de' ]]
+  [[ "$output" == m* ]]
+}
+
+# The property the function exists for, end to end: a metacharacter entry must
+# not widen the filter. Without escaping, '.*' renders a regex matching any host.
+@test "an allow-list entry of .* cannot match an arbitrary host" {
+  ISOPOD_EGRESS_ALLOWLIST="$TEST_TMP/sys-allow.conf"
+  USER_EGRESS_ALLOWLIST="$TEST_TMP/user-allow.conf"
+  printf '.*\n' >"$ISOPOD_EGRESS_ALLOWLIST"
+  : >"$USER_EGRESS_ALLOWLIST"
+  local re
+  re="$(egress_filter_regexes)"
+  [ -n "$re" ]
+  printf 'evil.example.net\n' | grep -Eq "$re" && return 1
+  return 0
+}
+
+@test "an ordinary allow-list entry still matches its own host and subdomains" {
+  ISOPOD_EGRESS_ALLOWLIST="$TEST_TMP/sys-allow.conf"
+  USER_EGRESS_ALLOWLIST="$TEST_TMP/user-allow.conf"
+  printf 'example.com\n' >"$ISOPOD_EGRESS_ALLOWLIST"
+  : >"$USER_EGRESS_ALLOWLIST"
+  local re
+  re="$(egress_filter_regexes)"
+  printf 'example.com\n' | grep -Eq "$re"
+  printf 'api.example.com\n' | grep -Eq "$re"
+  # and must not match a look-alike that merely ends with the same text
+  printf 'notexample.com\n' | grep -Eq "$re" && return 1
+  printf 'example.com.evil.net\n' | grep -Eq "$re" && return 1
+  return 0
+}
+
 # ---- assert_safe_build_args --------------------------------------------------
 # The build-args counterpart. Overriding a build arg isopod sets itself is the
 # interesting one: image_tag_for hashes the base image and the dev/nested flags
@@ -2686,6 +2793,90 @@ setup_run_args_box() { # setup_run_args_box <name> <meta-line...>
   setup_run_args_box demo 'harden=off'
   build_run_args demo localhost/img 127.0.0.1::2222 '' ''
   [[ " ${RUN_ARGS[*]} " != *"no-new-privileges"* ]]
+}
+
+# ---- neighbour isolation (--guest-inbound) ----------------------------------
+# Boxes sharing an engine network can reach each other's listening ports. This
+# layer drops inbound that did not come from the host. It is independent of guest
+# egress on purpose: an offline box has guest egress forced off and still has
+# neighbours, which is the case that motivated it.
+@test "neighbour isolation is on for a microVM box by default" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_inbound=on'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_GUEST_INBOUND=1"* ]]
+}
+
+@test "neighbour isolation stays off when the box asked for off" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_inbound=off'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_INBOUND* ]]
+}
+
+# The case the feature exists for: offline forces guest egress off, so tying
+# inbound isolation to guest egress would have left offline boxes uncovered.
+@test "neighbour isolation is on for an offline microVM box" {
+  setup_run_args_box demo 'harden=off' 'sudo=0' 'guest_inbound=on' 'guest_egress=off' 'offline=1'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " == *"ISOPOD_GUEST_INBOUND=1"* ]]
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_EGRESS* ]]
+}
+
+# A box built before this feature has an entrypoint with no inbound block, so
+# setting the variable would claim a protection the image cannot apply.
+@test "neighbour isolation is off for a box whose meta predates it" {
+  setup_run_args_box demo 'harden=off' 'sudo=0'
+  build_run_args demo localhost/img 127.0.0.1::2222 '' ''
+  [[ " ${RUN_ARGS[*]} " != *ISOPOD_GUEST_INBOUND* ]]
+}
+
+# The posture line is the only place a user sees whether this layer is in force.
+# It has to follow the same rule as the guest egress verdict: report what the box
+# GOT, not what create recorded. A container box keeps guest_inbound=on in meta
+# and never loads the chain, so reporting from meta alone would promise neighbour
+# isolation on exactly the tier that does not have it.
+@test "box_inbound_posture reports isolation for a microVM box" {
+  mk_meta demo 'guest_inbound=on' 'runtime=krun'
+  run box_inbound_posture demo
+  assert_output --partial 'isolated'
+}
+
+@test "box_inbound_posture reports OPEN for a container box despite guest_inbound=on" {
+  mk_meta demo 'guest_inbound=on' 'runtime=container'
+  run box_inbound_posture demo
+  assert_output --partial 'OPEN'
+  refute_output --partial 'isolated'
+}
+
+@test "box_inbound_posture reports OPEN for a gVisor box" {
+  mk_meta demo 'guest_inbound=on' 'runtime=runsc'
+  run box_inbound_posture demo
+  assert_output --partial 'OPEN'
+}
+
+@test "box_inbound_posture reports OPEN when the box asked for off" {
+  mk_meta demo 'guest_inbound=off' 'runtime=krun'
+  run box_inbound_posture demo
+  assert_output --partial 'OPEN'
+}
+
+# A box built before the feature has no guest_inbound line and an entrypoint with
+# no inbound block, so absent must read as OPEN, never as protected.
+@test "box_inbound_posture reports OPEN for a box whose meta predates the feature" {
+  mk_meta demo 'runtime=krun'
+  run box_inbound_posture demo
+  assert_output --partial 'OPEN'
+}
+
+# An offline box is the case the feature exists for, and its egress posture
+# returns early with OFFLINE, so the neighbour verdict has to be its own line or
+# it would never be shown for exactly the boxes that need it.
+@test "box_inbound_posture reports an offline microVM box as isolated" {
+  mk_meta demo 'guest_inbound=on' 'runtime=krun' 'offline=1'
+  run box_inbound_posture demo
+  assert_output --partial 'isolated'
+  run box_egress_posture demo
+  assert_output --partial 'OFFLINE'
+  refute_output --partial 'isolated'
 }
 
 @test "guest egress is switched on for a microVM box that asked for it" {
