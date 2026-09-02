@@ -1502,12 +1502,17 @@ egress_allow() { # egress_allow <domain>
   fi
 }
 
+# Every line here carries a hostname or URL the BOX asked for, so this is
+# box-chosen text on its way to the host terminal: the same ANSI/OSC injection
+# channel as the export and git-identity prints, on the one command a user runs
+# precisely to audit what a box is reaching. Sanitize it. A box that wants its
+# traffic unseen would otherwise forge log lines or hide its own with CSI.
 egress_log() { # egress_log [-f]
   [ -f "$ISOPOD_EGRESS_PROXY_LOG" ] ||
     die "no proxy log at $ISOPOD_EGRESS_PROXY_LOG (has 'sudo isopod egress apply' run?)"
   if [ "${1:-}" = "-f" ]; then
-    egr_run_root tail -f "$ISOPOD_EGRESS_PROXY_LOG"
-  else egr_run_root tail -n 200 "$ISOPOD_EGRESS_PROXY_LOG"; fi
+    egr_run_root tail -f "$ISOPOD_EGRESS_PROXY_LOG" | sanitize_stream_live
+  else egr_run_root tail -n 200 "$ISOPOD_EGRESS_PROXY_LOG" | sanitize_stream; fi
 }
 
 # Best-effort: pull the host names of refused (filtered) connections out of the

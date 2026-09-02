@@ -76,14 +76,19 @@ parse_disk_spec() { # parse_disk_spec <spec>
 # because there are legitimate one-off reasons to need these.
 assert_safe_run_args() { # assert_safe_run_args <arg...>
   [ "${ISOPOD_ALLOW_UNSAFE_RUN_ARGS:-0}" = 1 ] && return 0
-  local a bare val want_net=0
+  local a bare val want_net=0 want_env=0
   for a in "$@"; do
     # A flag's value may arrive as `--opt=value` OR as the NEXT token. want_net
-    # carries that state for --net/--network, the only pair here whose safety
-    # depends on the value; every other flag below is refused whatever it is.
+    # and want_env carry that state for the two flags whose safety depends on
+    # the value; every other flag below is refused whatever it is.
     if [ "$want_net" = 1 ]; then
       want_net=0
       case "$a" in host | container:*) die_unsafe_run_arg "--network $a" ;; esac
+      continue
+    fi
+    if [ "$want_env" = 1 ]; then
+      want_env=0
+      case "$a" in ISOPOD_*) die_unsafe_run_arg "--env $a" ;; esac
       continue
     fi
     bare="${a%%=*}"
@@ -100,7 +105,28 @@ assert_safe_run_args() { # assert_safe_run_args <arg...>
           case "$val" in host | container:*) die_unsafe_run_arg "$a" ;; esac
         fi
         ;;
-      -v | --volume | --mount | --privileged | --userns | --pid | --ipc | --uts | --cap-add | --device | --security-opt | --systemd)
+      -e | --env)
+        # isopod's own -e flags carry the box's security policy into the
+        # entrypoint (ISOPOD_SUDO, ISOPOD_HARDEN, ISOPOD_GUEST_INBOUND, the
+        # authorized keys), and ISOPOD_RUN_ARGS is appended AFTER them, where a
+        # duplicate key wins on podman and docker. So `-e ISOPOD_SUDO=1` re-arms
+        # sudo on a --no-sudo box, and `-e ISOPOD_HARDEN=` drops the guest
+        # sysctls, with the box still reporting the policy it was created with.
+        # Only isopod's own namespace is refused; other env vars are the ordinary
+        # reason to reach for this variable.
+        if [ -z "$val" ]; then
+          want_env=1
+        else
+          case "$val" in ISOPOD_*) die_unsafe_run_arg "$a" ;; esac
+        fi
+        ;;
+      # --user/--group-add restore in-box privilege the box was created without
+      # (and on a rootful docker, --user 0 is root in the container namespace);
+      # --entrypoint skips the boot-time guards entirely, including the
+      # /.krun_config.json removal and the fail-closed egress load; --runtime on
+      # a rootful daemon is an arbitrary binary executed as root; --env-file is
+      # the -e case with the names in a file this check cannot see.
+      -v | --volume | --mount | --privileged | --userns | --pid | --ipc | --uts | --cap-add | --device | --security-opt | --systemd | -u | --user | --group-add | --entrypoint | --runtime | --env-file)
         die_unsafe_run_arg "$a"
         ;;
     esac
@@ -109,7 +135,8 @@ assert_safe_run_args() { # assert_safe_run_args <arg...>
 
 die_unsafe_run_arg() { # die_unsafe_run_arg <arg>
   die "ISOPOD_RUN_ARGS contains '$1', which would break the sandbox isolation isopod
-     provides (host mounts, restored privileges, or a shared host namespace).
+     provides (host mounts, restored privileges, a shared host namespace, or an
+     override of the box's own security policy).
      If you genuinely need it, set ISOPOD_ALLOW_UNSAFE_RUN_ARGS=1 to confirm."
 }
 

@@ -98,7 +98,12 @@ takes the box off the loopback publish isopod reaches sshd through, and any
 `--network` is refused when isopod already chose the box's network for an egress
 mode or `--offline`. A custom network is yours to set where isopod chose none. Args that would undo the sandbox
 (`-v`, `--mount`, `--privileged`, `--userns`, `--pid`, `--cap-add`,
-`--security-opt`, `--network host`) are refused.
+`--security-opt`, `--network host`), restore in-box privilege (`--user`,
+`--group-add`), or replace what runs the box (`--entrypoint`, `--runtime`) are
+refused. So is any `-e ISOPOD_*` (and `--env-file`): isopod passes the box's
+security policy in those variables and these args land after them, where a
+duplicate key wins, so `-e ISOPOD_SUDO=1` would re-arm sudo on a `--no-sudo` box
+while `isopod info` still reported it as one. Other env vars are fine.
 `ISOPOD_ALLOW_UNSAFE_RUN_ARGS` — set to `1` to confirm you mean one of the
 refused args above, for the rare environment that genuinely needs it.
 `ISOPOD_RUNTIME` — sandboxed runtime overriding the hardening profile: Tier 2 (`runsc`) or a Tier 3 microVM (`kata` or `krun`; needs `/dev/kvm`). A configured runtime that isn't registered with the engine fails `create` closed with a clear error. Setup, krun networking, and the `crun-vm` exclusion: [docs/security-model.md](security-model.md).
