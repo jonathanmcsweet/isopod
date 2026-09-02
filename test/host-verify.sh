@@ -528,8 +528,8 @@ else
     done
   fi
 
-  # Read the keys out of the profile rather than copying them here, so this 
-  #cannot drift from it.  microVM only: a container shares the host kernel 
+  # Read the keys out of the profile rather than copying them here, so this
+  #cannot drift from it.  microVM only: a container shares the host kernel
   # and is never asked to.
   HCONF=share/hardening-sysctl.conf
   case "${A_TIER:-}" in
