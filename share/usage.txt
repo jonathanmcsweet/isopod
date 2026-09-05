@@ -6,6 +6,7 @@ Usage:
   isopod info <name> [--json]         Show connection details for a sandbox
   isopod code <name> [--app APP]      Open the sandbox in a new VSCodium window (or APP)
   isopod shell <name> [-- cmd...]     Open a shell (or run cmd) inside the sandbox
+  isopod claude-code <name>           Run Claude Code in the sandbox, in a new terminal
   isopod root-shell <name> [-- cmd]   Administrative root shell (host-held key)
                                       --print-ssh-config emits an IDE entry for it
   isopod upgrade <name> [--in-place]  Rebuild the box onto the current image

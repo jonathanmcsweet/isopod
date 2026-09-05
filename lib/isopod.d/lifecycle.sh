@@ -1081,3 +1081,183 @@ Flatpak users: 'flatpak list | grep -i ${app}' to confirm the app ID is installe
        request; quit it and retry)"
   render_tmpl code-note.txt
 }
+
+# Resolved terminal launch command, and the row's canonical name for messages.
+# TERM_MACOS_APP is set instead of TERM_CMD when the match is a macOS .app,
+# which takes a script path via `open -a` rather than a command after a flag.
+TERM_CMD=()
+TERM_NAME=""
+TERM_MACOS_APP=""
+
+# Resolve a terminal name to a launch command via the share/terminal-targets
+# table: PATH binaries, then a macOS app, then flatpak ids. With no name, walk
+# the table in order and take the first one installed. Mirrors find_ide_bin;
+# terminals need one extra column, the flag that introduces a command, because
+# gnome-terminal, konsole and kitty all spell it differently.
+find_term_bin() { # find_term_bin [app] -> sets TERM_CMD/TERM_NAME, returns 0/1
+  local app="${1:-}" f="$ISOPOD_SHARE/terminal-targets"
+  TERM_CMD=()
+  TERM_NAME=""
+  TERM_MACOS_APP=""
+  [ -f "$f" ] || die "missing terminal target table: $f (is your isopod install complete?)"
+  local aliases bins macapp execarg flatpaks b id canon
+  local -a blist flist elist
+  while read -r aliases bins macapp execarg flatpaks; do
+    case "$aliases" in '' | '#'*) continue ;; esac
+    if [ -n "$app" ]; then
+      case ",$aliases," in *",$app,"*) ;; *) continue ;; esac
+    fi
+    canon="${aliases%%,*}"
+    elist=()
+    [ "$execarg" != "-" ] && IFS=',' read -ra elist <<<"$execarg"
+    IFS=',' read -ra blist <<<"$bins"
+    for b in "${blist[@]}"; do
+      have "$b" && {
+        TERM_CMD=("$b" ${elist[@]+"${elist[@]}"})
+        TERM_NAME="$canon"
+        return 0
+      }
+    done
+    if [ "$macapp" != "-" ] && is_macos && [ -d "/Applications/$macapp.app" ]; then
+      TERM_MACOS_APP="$macapp"
+      TERM_NAME="$canon"
+      return 0
+    fi
+    if [ "$flatpaks" != "-" ]; then
+      IFS=',' read -ra flist <<<"$flatpaks"
+      for id in "${flist[@]}"; do
+        if have flatpak && flatpak info "$id" >/dev/null 2>&1; then
+          TERM_CMD=(flatpak run "$id" ${elist[@]+"${elist[@]}"})
+          TERM_NAME="$canon"
+          return 0
+        fi
+      done
+    fi
+    # An explicit --app matched this row and nothing is installed for it; with no
+    # --app, keep walking the table.
+    [ -n "$app" ] && return 1
+  done <"$f"
+  # An explicit name that is not in the table: try it as a plain command.
+  if [ -n "$app" ] && have "$app"; then
+    TERM_CMD=("$app" -e)
+    TERM_NAME="$app"
+    return 0
+  fi
+  return 1
+}
+
+# Can this host open a window at all? A box reached over SSH, or a headless
+# server, has nowhere to put one, and running in place there is correct rather
+# than an error.
+can_open_window() {
+  is_macos && return 0
+  [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]
+}
+
+# isopod claude-code <box> — run Claude Code in a box, in its own terminal window.
+cmd_claude() {
+  local name="" app="${ISOPOD_TERMINAL:-}" attach=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
+    esac
+    case "$1" in
+      -h | --help | help)
+        render_tmpl claude-help.txt
+        return 0
+        ;;
+      --app)
+        app="$2"
+        shift 2
+        ;;
+      --attach)
+        attach=1
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*) die "unknown option for claude-code: $1" ;;
+      *)
+        [ -z "$name" ] && name="$1" && shift || break
+        ;;
+    esac
+  done
+  local -a rcmd=("$@")
+  [ -n "$name" ] || die "usage: isopod claude-code <name> [--app TERMINAL] [--attach] [-- args...]"
+  open_box "$name"
+  [ "$(meta_get "$name" offline 2>/dev/null || true)" = 1 ] &&
+    die "'$name' is offline, so Claude Code could not reach the API from it.
+     Copying the binary in would work, but it would have nothing to talk to."
+
+  # The window opened below re-runs this command with --attach, which is this
+  # branch: no install, no prompts, just the session. Keeping the setup in the
+  # calling terminal is deliberate — a hidden key prompt in a window that just
+  # appeared is easy to miss.
+  if [ "$attach" = 1 ]; then
+    acquire_lock
+    local astatus
+    astatus=$(box_status "$name" 2>/dev/null || true)
+    [ "$astatus" = "running" ] || cmd_start "$name"
+    refresh_port "$name"
+    release_lock
+    claude_ensure_key
+    local keypath="" pre=""
+    if [ -n "$CLAUDE_API_KEY" ]; then
+      keypath="$(claude_stage_key "$name")"
+      # Read once, unlink immediately, so the value lives in the session's
+      # environment and nowhere else.
+      pre="ANTHROPIC_API_KEY=\$(cat $(shq "$keypath")); rm -f $(shq "$keypath"); export ANTHROPIC_API_KEY; "
+    fi
+    box_ssh "$name" -t -- "${pre}cd '$WORKSPACE' 2>/dev/null; PATH=$CLAUDE_BOX_PATH exec claude ${rcmd[*]:-}"
+    return
+  fi
+
+  acquire_lock
+  local status
+  status=$(box_status "$name" 2>/dev/null || true)
+  [ "$status" = "running" ] || cmd_start "$name"
+  refresh_port "$name"
+  release_lock
+
+  claude_ensure_installed "$name"
+  claude_ensure_key
+  claude_egress_note "$name"
+
+  if ! can_open_window || ! find_term_bin "$app"; then
+    if [ -n "$app" ] && can_open_window; then
+      die "could not find the terminal '$app' (checked PATH, /Applications, and Flatpak).
+     Run 'isopod claude-code $name --attach' to use this window instead."
+    fi
+    info "Opening Claude Code in this window (no terminal to open one in)."
+    local -a pass=()
+    [ "${#rcmd[@]}" -gt 0 ] && pass=(-- "${rcmd[@]}")
+    cmd_claude "$name" --attach ${pass[@]+"${pass[@]}"}
+    return
+  fi
+
+  local log
+  log="$(box_dir "$name")/claude-launch.log"
+  if [ -n "$TERM_MACOS_APP" ]; then
+    # macOS has no -e convention: `open -a App <script>` runs a script in a new
+    # window, which beats quoting a command through AppleScript.
+    local launcher
+    launcher="$(box_dir "$name")/claude-launch.command"
+    {
+      printf '#!/bin/sh\n'
+      printf 'exec %s claude-code %s --attach\n' "$(shq "$ISOPOD_BIN")" "$(shq "$name")"
+    } >"$launcher"
+    chmod 755 "$launcher"
+    open -a "$TERM_MACOS_APP" "$launcher" >"$log" 2>&1 ||
+      die "could not open $TERM_NAME — see $log"
+  else
+    local -a pass=()
+    [ "${#rcmd[@]}" -gt 0 ] && pass=(-- "${rcmd[@]}")
+    "${TERM_CMD[@]}" "$ISOPOD_BIN" claude-code "$name" --attach \
+      ${pass[@]+"${pass[@]}"} >"$log" 2>&1 &
+    disown || true
+  fi
+  info "Claude Code opened in a new $TERM_NAME window for '$name'
+       (if no window appears, check $log, or use --attach to run here)"
+}

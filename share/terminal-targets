@@ -1,0 +1,21 @@
+# isopod terminal launch targets — read by find_term_bin().
+# Whitespace-separated columns ('-' means "none"):
+#   aliases   comma-separated names that select this row (first is canonical)
+#   binaries  comma-separated PATH binaries to try, in order
+#   macos-app single macOS .app bundle name to hand to `open -a` (no spaces)
+#   exec-arg  comma-separated args that introduce the command ('-' means none)
+#   flatpak   comma-separated flatpak app-ids to try, in order
+#
+# Order matters: the first row whose binary is present wins when no --app is
+# given, so the modern terminals come before the fallbacks.
+#
+# aliases         binaries        macos-app  exec-arg  flatpak
+ghostty           ghostty         Ghostty    -e        com.mitchellh.ghostty
+kitty             kitty           kitty      -         -
+wezterm           wezterm         WezTerm    start,--  org.wezfurlong.wezterm
+alacritty         alacritty       Alacritty  -e        org.alacritty.Alacritty
+gnome-terminal    gnome-terminal  -          --        org.gnome.Terminal
+konsole           konsole         -          -e        org.kde.konsole
+foot              foot            -          -         -
+xfce4-terminal    xfce4-terminal  -          -x        -
+xterm             xterm           -          -e        -

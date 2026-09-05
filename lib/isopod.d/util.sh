@@ -136,6 +136,12 @@ sha_hex() {
   if have sha256sum; then sha256sum; else shasum -a 256; fi | awk '{print substr($1, 1, 16)}'
 }
 
+# The FULL digest of stdin. sha_hex above truncates to 16 characters because it
+# builds image tags; anything verifying a download needs every bit of it.
+sha256_full() {
+  if have sha256sum; then sha256sum; else shasum -a 256; fi | awk '{print $1}'
+}
+
 # Render a text template from share/ $vars and $(...) inside it resolve against
 # the caller's locals/globals (bash dynamic
 # scope). A sentinel byte protects trailing newlines (command substitution

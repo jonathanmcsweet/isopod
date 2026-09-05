@@ -4300,3 +4300,201 @@ ip daddr 1.2.3.4 accept'
   run egress_can_enforce docker
   assert_failure
 }
+
+# ---- claude-code: platform probe --------------------------------------------
+# box_ssh is redefined per test so the probe runs against a scripted box rather
+# than a real one. The probe's own /bin/sh script is exercised for real: the stub
+# evaluates it with the machine type and libc markers each test wants.
+claude_stub_box() { # claude_stub_box <uname-m> [musl]
+  local arch="$1" musl="${2:-0}"
+  eval "box_ssh() {
+    if [ \"$musl\" = 1 ]; then printf 'linux-%s-musl' \"\$(claude_arch_of $arch)\"
+    else printf 'linux-%s' \"\$(claude_arch_of $arch)\"; fi
+  }"
+}
+claude_arch_of() {
+  case "$1" in
+    x86_64 | amd64) printf 'x64' ;;
+    aarch64 | arm64) printf 'arm64' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+@test "claude_box_platform maps a glibc x86_64 box to linux-x64" {
+  claude_stub_box x86_64 0
+  run claude_box_platform demo
+  assert_success
+  assert_output "linux-x64"
+}
+
+@test "claude_box_platform maps a musl aarch64 box to linux-arm64-musl" {
+  claude_stub_box aarch64 1
+  run claude_box_platform demo
+  assert_success
+  assert_output "linux-arm64-musl"
+}
+
+@test "claude_box_platform refuses an architecture with no published build" {
+  box_ssh() { printf 'linux-riscv64'; }
+  run claude_box_platform demo
+  assert_failure
+  assert_output --partial "no build for"
+}
+
+@test "claude_box_platform refuses an empty answer rather than building a URL from it" {
+  box_ssh() { printf ''; }
+  run claude_box_platform demo
+  assert_failure
+}
+
+# ---- claude-code: verified download -----------------------------------------
+@test "sha256_full emits the whole digest, unlike the 16-char tag helper" {
+  run bash -c 'printf hello | sha256sum | awk "{print \$1}"'
+  local want="$output"
+  run bash -c "printf hello | { $(declare -f have); $(declare -f sha256_full); sha256_full; }"
+  assert_success
+  assert_output "$want"
+  assert_equal "${#output}" 64
+}
+
+@test "claude_fetch_verified refuses a mismatched download and leaves no file" {
+  export CACHE_DIR="$TEST_TMP/cache"
+  claude_checksum() { printf 'a%.0s' {1..64}; }
+  claude_curl() {
+    # -o <file> form: write content whose digest will not match.
+    local out=""
+    while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+    printf 'not-the-expected-bytes' >"$out"
+  }
+  run claude_fetch_verified 1.2.3 linux-x64
+  assert_failure
+  assert_output --partial "checksum mismatch"
+  # Nothing may survive under the version dir, or a later run would treat the
+  # bad download as a cache hit.
+  run find "$CACHE_DIR/claude/1.2.3" -type f
+  assert_output ""
+}
+
+@test "claude_fetch_verified keeps a matching download and reuses it as a cache hit" {
+  export CACHE_DIR="$TEST_TMP/cache"
+  local body="claude-binary-bytes"
+  local sum
+  sum="$(printf '%s' "$body" | sha256_full)"
+  eval "claude_checksum() { printf '%s' $(printf '%q' "$sum"); }"
+  CURL_CALLS="$TEST_TMP/curl-calls"
+  : >"$CURL_CALLS"
+  eval "claude_curl() {
+    echo call >> '$CURL_CALLS'
+    local out=\"\"
+    while [ \$# -gt 0 ]; do [ \"\$1\" = \"-o\" ] && out=\"\$2\"; shift; done
+    printf '%s' $(printf '%q' "$body") > \"\$out\"
+  }"
+  # Command substitution, not `run`: the caller reads this function's STDOUT as a
+  # path, and bats' `run` would merge the progress line on stderr into it.
+  local got
+  got="$(claude_fetch_verified 1.2.3 linux-x64)"
+  assert_equal "$got" "$CACHE_DIR/claude/1.2.3/linux-x64/claude"
+  [ -x "$CACHE_DIR/claude/1.2.3/linux-x64/claude" ]
+  assert_equal "$(wc -l <"$CURL_CALLS")" "1"
+  # Second call must not download again.
+  got="$(claude_fetch_verified 1.2.3 linux-x64)"
+  assert_equal "$got" "$CACHE_DIR/claude/1.2.3/linux-x64/claude"
+  assert_equal "$(wc -l <"$CURL_CALLS")" "1"
+}
+
+@test "claude_latest_version refuses a version string that is not one" {
+  claude_curl() { printf 'not a version; rm -rf /'; }
+  run claude_latest_version
+  assert_failure
+  assert_output --partial "not a version"
+}
+
+# ---- claude-code: terminal detection ----------------------------------------
+@test "find_term_bin resolves a named terminal and its exec flag" {
+  make_stub konsole 0
+  find_term_bin konsole
+  assert_equal "${TERM_CMD[*]}" "konsole -e"
+  assert_equal "$TERM_NAME" "konsole"
+}
+
+@test "find_term_bin carries a multi-token exec arg from the table" {
+  make_stub wezterm 0
+  find_term_bin wezterm
+  assert_equal "${TERM_CMD[*]}" "wezterm start --"
+}
+
+@test "find_term_bin emits no exec flag for a terminal that takes none" {
+  make_stub kitty 0
+  find_term_bin kitty
+  assert_equal "${TERM_CMD[*]}" "kitty"
+}
+
+@test "find_term_bin with no name takes the first terminal installed" {
+  make_stub foot 0
+  find_term_bin ""
+  assert_equal "$TERM_NAME" "foot"
+}
+
+@test "find_term_bin prefers the earlier table row when several are installed" {
+  make_stub foot 0
+  make_stub alacritty 0
+  find_term_bin ""
+  assert_equal "$TERM_NAME" "alacritty"
+}
+
+@test "find_term_bin falls back to an unknown name as a bare command" {
+  make_stub st 0
+  find_term_bin st
+  assert_equal "${TERM_CMD[*]}" "st -e"
+}
+
+@test "find_term_bin fails when no terminal is installed at all" {
+  run find_term_bin ""
+  assert_failure
+}
+
+@test "find_term_bin fails for a known terminal that is not installed" {
+  run find_term_bin ghostty
+  assert_failure
+}
+
+# ---- claude-code: guards ----------------------------------------------------
+@test "cmd_claude refuses an offline box before touching the network" {
+  mkdir -p "$(box_dir off)"
+  printf 'engine=podman\nport=2222\noffline=1\n' >"$(box_dir off)/meta"
+  open_box() { :; }
+  run cmd_claude off
+  assert_failure
+  assert_output --partial "offline"
+}
+
+@test "claude_egress_note stays quiet when the domains are already allowed" {
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
+  export ISOPOD_EGRESS=allow-list
+  export ISOPOD_CLAUDE_DOMAINS="example.com"
+  printf 'example.com\n' >"$USER_EGRESS_ALLOWLIST"
+  run claude_egress_note demo
+  assert_success
+  assert_output ""
+}
+
+@test "claude_egress_note names the missing domain for an allow-list box" {
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
+  export ISOPOD_EGRESS=allow-list
+  export ISOPOD_CLAUDE_DOMAINS="example.com"
+  : >"$USER_EGRESS_ALLOWLIST"
+  run claude_egress_note demo
+  assert_success
+  assert_output --partial "isopod egress allow example.com"
+}
+
+@test "claude_egress_note stays quiet for a box with egress off" {
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
+  export ISOPOD_EGRESS=off
+  run claude_egress_note demo
+  assert_success
+  assert_output ""
+}

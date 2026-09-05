@@ -1,0 +1,6 @@
+This box uses the egress allow-list, which does not yet include:
+$(printf '  %s\n' $CLAUDE_MISSING_DOMAINS)
+Claude Code needs the first to call the API and the second to update itself.
+Allow them when you want that (this widens the list for every allow-list box on
+this host, not just '$name'):
+$(printf '  isopod egress allow %s\n' $CLAUDE_MISSING_DOMAINS)
