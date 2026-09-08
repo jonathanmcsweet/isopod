@@ -45,40 +45,47 @@ isopod install <name> jq ripgrep    # runs the box's package manager as root, fr
 
 Two caveats. Installs are **ephemeral** — a fresh `create` starts without them (`reconfigure` snapshots the box, so they survive *that*). For a dependency you always need, bake it into a [`--dockerfile`](#customizing-the-container) instead. And `isopod install` needs a **container** box: the engine can't exec into a microVM guest, so on a microVM runtime add the package with `--dockerfile` and recreate.
 
-## Running Claude Code in a box (`isopod claude-code`)
+## Running a coding agent in a box (`isopod claude-code`, `isopod codex`)
 
 ```sh
 isopod claude-code myproj              # new terminal window, session in the box
+isopod codex myproj                    # the same, with Codex
 isopod claude-code myproj --app kitty  # pick the terminal
-isopod claude-code myproj --attach     # run in this window instead
+isopod codex myproj --attach           # run in this window instead
 ```
 
-The first run puts Claude Code in the box, later runs just open a session. isopod
-downloads the build matching the box's own architecture, checks its SHA-256 on
-your machine, then copies it in over SSH, so the box never fetches or runs an
-installer and needs no network for the install itself. It goes in as the box
-user, not root.
+Both commands work the same way. The first run puts the agent in the box, later
+runs just open a session. isopod downloads the build matching the box's own
+architecture, checks its SHA-256 on your machine, then copies it in over SSH, so
+the box never fetches or runs an installer and needs no network for the install
+itself. It goes in as the box user, not root.
 
 isopod installs whatever is newest at that moment and then leaves it alone.
-Updating afterwards is Claude Code's own job, from inside the box, on your
+Updating afterwards is the agent's own job, from inside the box, on your
 schedule.
 
-The first time, isopod offers to store an `ANTHROPIC_API_KEY`, which it keeps in
-your host keychain and hands to the box in memory rather than on a command line.
-Press enter to skip that and let Claude Code sign you in its own way. The stored
-key is shared by every box; change it with `isopod secret set ANTHROPIC_API_KEY`.
+The first time, isopod offers to store an API key (`ANTHROPIC_API_KEY` for Claude
+Code, `OPENAI_API_KEY` for Codex), which it keeps in your host keychain and hands
+to the box in memory rather than on a command line. Press enter to skip that and
+sign in the agent's own way instead. A stored key is shared by every box; change
+it with `isopod secret set <NAME>`.
 
-A box on the egress allow-list needs `anthropic.com` for the API and
-`downloads.claude.ai` for Claude Code's own updates. isopod prints those and
-leaves your allow-list alone, since one list covers every box on the host:
+On a box using the egress allow-list, isopod prints the hostnames the agent needs
+and leaves your allow-list alone, since one list covers every box on the host.
+Claude Code needs `anthropic.com` and `downloads.claude.ai`; Codex needs
+`api.openai.com` and `chatgpt.com`, and it updates itself from GitHub, which the
+shipped baseline already allows.
 
 ```sh
 isopod egress allow anthropic.com
-isopod egress allow downloads.claude.ai
 ```
 
 Offline boxes are refused. Copying the binary in would work, but it would have
 nothing to talk to.
+
+Codex is a large first download, around 100 MB compressed, cached afterwards and
+shared by every box of the same architecture. Its Linux builds are static, so one
+of them serves a Debian box and an Alpine box alike.
 
 ## Reaching a server in the box (port forwarding)
 

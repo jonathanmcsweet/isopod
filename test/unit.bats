@@ -4301,53 +4301,90 @@ ip daddr 1.2.3.4 accept'
   assert_failure
 }
 
-# ---- claude-code: platform probe --------------------------------------------
-# box_ssh is redefined per test so the probe runs against a scripted box rather
-# than a real one. The probe's own /bin/sh script is exercised for real: the stub
-# evaluates it with the machine type and libc markers each test wants.
-claude_stub_box() { # claude_stub_box <uname-m> [musl]
-  local arch="$1" musl="${2:-0}"
-  eval "box_ssh() {
-    if [ \"$musl\" = 1 ]; then printf 'linux-%s-musl' \"\$(claude_arch_of $arch)\"
-    else printf 'linux-%s' \"\$(claude_arch_of $arch)\"; fi
-  }"
-}
-claude_arch_of() {
-  case "$1" in
-    x86_64 | amd64) printf 'x64' ;;
-    aarch64 | arm64) printf 'arm64' ;;
-    *) printf 'unknown' ;;
-  esac
+# ---- agents: box facts probe ------------------------------------------------
+# box_ssh is redefined per test so the probe runs against a scripted box. The
+# adapters' own mapping is exercised for real against those facts.
+@test "agent_box_facts refuses an answer that is not arch plus libc" {
+  box_ssh() { printf 'x86_64; rm -rf /'; }
+  run agent_box_facts demo
+  assert_failure
+  assert_output --partial "does not recognize"
 }
 
-@test "claude_box_platform maps a glibc x86_64 box to linux-x64" {
-  claude_stub_box x86_64 0
-  run claude_box_platform demo
+@test "agent_box_facts refuses an empty answer rather than building a URL from it" {
+  box_ssh() { printf ''; }
+  run agent_box_facts demo
+  assert_failure
+}
+
+@test "agent_box_facts passes through a well formed answer" {
+  box_ssh() { printf 'aarch64 musl'; }
+  run agent_box_facts demo
+  assert_success
+  assert_output "aarch64 musl"
+}
+
+# ---- claude-code: platform mapping ------------------------------------------
+@test "claude_platform maps a glibc x86_64 box to linux-x64" {
+  run claude_platform x86_64 glibc
   assert_success
   assert_output "linux-x64"
 }
 
-@test "claude_box_platform maps a musl aarch64 box to linux-arm64-musl" {
-  claude_stub_box aarch64 1
-  run claude_box_platform demo
+@test "claude_platform maps a musl aarch64 box to linux-arm64-musl" {
+  run claude_platform aarch64 musl
   assert_success
   assert_output "linux-arm64-musl"
 }
 
-@test "claude_box_platform refuses an architecture with no published build" {
-  box_ssh() { printf 'linux-riscv64'; }
-  run claude_box_platform demo
+@test "claude_platform refuses an architecture with no published build" {
+  run claude_platform riscv64 glibc
   assert_failure
-  assert_output --partial "no build for"
+  assert_output --partial "no build"
 }
 
-@test "claude_box_platform refuses an empty answer rather than building a URL from it" {
-  box_ssh() { printf ''; }
-  run claude_box_platform demo
-  assert_failure
+# ---- codex: platform mapping ------------------------------------------------
+@test "codex_target maps x86_64 to the musl triple" {
+  run codex_target x86_64
+  assert_success
+  assert_output "x86_64-unknown-linux-musl"
 }
 
-# ---- claude-code: verified download -----------------------------------------
+@test "codex_target maps aarch64 to the musl triple" {
+  run codex_target aarch64
+  assert_success
+  assert_output "aarch64-unknown-linux-musl"
+}
+
+@test "codex_target ignores libc: a glibc box still gets the static musl build" {
+  # Codex publishes Linux only as static musl, which runs on a glibc box too, so
+  # the adapter takes arch alone. Claude's does not, which is why the shared probe
+  # reports both facts and each adapter uses what it needs.
+  run codex_target x86_64
+  assert_output "x86_64-unknown-linux-musl"
+  run claude_platform x86_64 glibc
+  assert_output "linux-x64"
+  run claude_platform x86_64 musl
+  assert_output "linux-x64-musl"
+}
+
+@test "codex_target refuses an architecture with no Linux build" {
+  run codex_target s390x
+  assert_failure
+  assert_output --partial "no Linux build"
+}
+
+@test "codex_box_install substitutes the artifact and its inner binary name" {
+  run codex_box_install codex-x86_64-unknown-linux-musl.tar.gz
+  assert_success
+  assert_output --partial "tar -xzf 'codex-x86_64-unknown-linux-musl.tar.gz'"
+  assert_output --partial 'mv -f '"'"'codex-x86_64-unknown-linux-musl'"'"' "$HOME/.local/bin/codex"'
+  # The script runs as `sh -c <script>` with no positional args, so an unexpanded
+  # $1 would silently install nothing.
+  refute_output --partial '"$1"'
+}
+
+# ---- agents: verified download ----------------------------------------------
 @test "sha256_full emits the whole digest, unlike the 16-char tag helper" {
   run bash -c 'printf hello | sha256sum | awk "{print \$1}"'
   local want="$output"
@@ -4357,33 +4394,32 @@ claude_arch_of() {
   assert_equal "${#output}" 64
 }
 
-@test "claude_fetch_verified refuses a mismatched download and leaves no file" {
+@test "agent_fetch_verified refuses a mismatched download and leaves no file" {
+  agent_select claude
   export CACHE_DIR="$TEST_TMP/cache"
-  claude_checksum() { printf 'a%.0s' {1..64}; }
-  claude_curl() {
-    # -o <file> form: write content whose digest will not match.
+  agent_curl() {
     local out=""
     while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
     printf 'not-the-expected-bytes' >"$out"
   }
-  run claude_fetch_verified 1.2.3 linux-x64
+  local want
+  want="$(printf 'a%.0s' {1..64})"
+  run agent_fetch_verified 1.2.3 x86_64-glibc https://example.invalid/x "$want" claude
   assert_failure
   assert_output --partial "checksum mismatch"
-  # Nothing may survive under the version dir, or a later run would treat the
-  # bad download as a cache hit.
+  # Nothing may survive, or a later run would treat the bad download as a hit.
   run find "$CACHE_DIR/claude/1.2.3" -type f
   assert_output ""
 }
 
-@test "claude_fetch_verified keeps a matching download and reuses it as a cache hit" {
+@test "agent_fetch_verified keeps a matching download and reuses it as a cache hit" {
+  agent_select claude
   export CACHE_DIR="$TEST_TMP/cache"
-  local body="claude-binary-bytes"
-  local sum
+  local body="agent-binary-bytes" sum
   sum="$(printf '%s' "$body" | sha256_full)"
-  eval "claude_checksum() { printf '%s' $(printf '%q' "$sum"); }"
   CURL_CALLS="$TEST_TMP/curl-calls"
   : >"$CURL_CALLS"
-  eval "claude_curl() {
+  eval "agent_curl() {
     echo call >> '$CURL_CALLS'
     local out=\"\"
     while [ \$# -gt 0 ]; do [ \"\$1\" = \"-o\" ] && out=\"\$2\"; shift; done
@@ -4392,24 +4428,22 @@ claude_arch_of() {
   # Command substitution, not `run`: the caller reads this function's STDOUT as a
   # path, and bats' `run` would merge the progress line on stderr into it.
   local got
-  got="$(claude_fetch_verified 1.2.3 linux-x64)"
-  assert_equal "$got" "$CACHE_DIR/claude/1.2.3/linux-x64/claude"
-  [ -x "$CACHE_DIR/claude/1.2.3/linux-x64/claude" ]
+  got="$(agent_fetch_verified 1.2.3 x86_64-glibc https://example.invalid/x "$sum" claude)"
+  assert_equal "$got" "$CACHE_DIR/claude/1.2.3/x86_64-glibc/claude"
   assert_equal "$(wc -l <"$CURL_CALLS")" "1"
-  # Second call must not download again.
-  got="$(claude_fetch_verified 1.2.3 linux-x64)"
-  assert_equal "$got" "$CACHE_DIR/claude/1.2.3/linux-x64/claude"
+  got="$(agent_fetch_verified 1.2.3 x86_64-glibc https://example.invalid/x "$sum" claude)"
+  assert_equal "$got" "$CACHE_DIR/claude/1.2.3/x86_64-glibc/claude"
   assert_equal "$(wc -l <"$CURL_CALLS")" "1"
 }
 
 @test "claude_latest_version refuses a version string that is not one" {
-  claude_curl() { printf 'not a version; rm -rf /'; }
+  agent_curl() { printf 'not a version; rm -rf /'; }
   run claude_latest_version
   assert_failure
   assert_output --partial "not a version"
 }
 
-# ---- claude-code: terminal detection ----------------------------------------
+# ---- agents: terminal detection ---------------------------------------------
 @test "find_term_bin resolves a named terminal and its exec flag" {
   make_stub konsole 0
   find_term_bin konsole
@@ -4458,7 +4492,7 @@ claude_arch_of() {
   assert_failure
 }
 
-# ---- claude-code: guards ----------------------------------------------------
+# ---- agents: guards ---------------------------------------------------------
 @test "cmd_claude refuses an offline box before touching the network" {
   mkdir -p "$(box_dir off)"
   printf 'engine=podman\nport=2222\noffline=1\n' >"$(box_dir off)/meta"
@@ -4468,33 +4502,61 @@ claude_arch_of() {
   assert_output --partial "offline"
 }
 
-@test "claude_egress_note stays quiet when the domains are already allowed" {
+@test "cmd_codex refuses an offline box and names Codex, not Claude Code" {
+  mkdir -p "$(box_dir off)"
+  printf 'engine=podman\nport=2222\noffline=1\n' >"$(box_dir off)/meta"
+  open_box() { :; }
+  run cmd_codex off
+  assert_failure
+  assert_output --partial "Codex"
+  refute_output --partial "Claude Code"
+}
+
+@test "agent_select points the shared path at the right secret and binary" {
+  agent_select claude
+  assert_equal "$AGENT_SECRET" "ANTHROPIC_API_KEY"
+  assert_equal "$AGENT_BIN" "claude"
+  agent_select codex
+  assert_equal "$AGENT_SECRET" "OPENAI_API_KEY"
+  assert_equal "$AGENT_BIN" "codex"
+}
+
+@test "agent_select refuses an agent it has no adapter for" {
+  run agent_select gemini
+  assert_failure
+}
+
+@test "agent_egress_note stays quiet when the domains are already allowed" {
+  agent_select claude
   mkdir -p "$(box_dir demo)"
   printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
   export ISOPOD_EGRESS=allow-list
-  export ISOPOD_CLAUDE_DOMAINS="example.com"
+  AGENT_DOMAINS="example.com"
   printf 'example.com\n' >"$USER_EGRESS_ALLOWLIST"
-  run claude_egress_note demo
+  run agent_egress_note demo
   assert_success
   assert_output ""
 }
 
-@test "claude_egress_note names the missing domain for an allow-list box" {
+@test "agent_egress_note names the missing domain for an allow-list box" {
+  agent_select codex
   mkdir -p "$(box_dir demo)"
   printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
   export ISOPOD_EGRESS=allow-list
-  export ISOPOD_CLAUDE_DOMAINS="example.com"
+  AGENT_DOMAINS="api.openai.com"
   : >"$USER_EGRESS_ALLOWLIST"
-  run claude_egress_note demo
+  run agent_egress_note demo
   assert_success
-  assert_output --partial "isopod egress allow example.com"
+  assert_output --partial "isopod egress allow api.openai.com"
+  assert_output --partial "Codex"
 }
 
-@test "claude_egress_note stays quiet for a box with egress off" {
+@test "agent_egress_note stays quiet for a box with egress off" {
+  agent_select claude
   mkdir -p "$(box_dir demo)"
   printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
   export ISOPOD_EGRESS=off
-  run claude_egress_note demo
+  run agent_egress_note demo
   assert_success
   assert_output ""
 }

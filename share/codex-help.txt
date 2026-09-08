@@ -1,0 +1,36 @@
+usage: isopod codex <box> [--app TERMINAL] [--attach] [-- args...]
+
+Run Codex inside a box. Starts the box if it is stopped, installs Codex if it is
+not there yet, then opens a new terminal window with a session in the box's
+workspace, the way 'isopod code' opens an editor window.
+
+  --app <name>   terminal to open (see the list below); ISOPOD_TERMINAL sets a
+                 default. Without either, the first one installed is used.
+  --attach       run in THIS window instead of opening a new one, for a headless
+                 host or when you would rather keep the session where you are.
+  -- args...     passed through to codex, e.g. -- --help
+
+Terminals isopod knows: ghostty, kitty, wezterm, alacritty, gnome-terminal,
+konsole, foot, xfce4-terminal, xterm. A name that is not on the list is tried as
+a plain command, and a host with no terminal at all falls back to --attach.
+
+isopod downloads the release archive for the box's architecture and checks its
+SHA-256 on your machine, then copies it in over SSH and unpacks it there, so the
+box never fetches or runs an installer. It goes in as the box user, not root. The
+Linux builds are static, so one of them serves a Debian box and an Alpine box
+alike. It is a large download the first time, cached afterwards and shared by
+every box of the same architecture.
+
+isopod installs whatever is newest at that moment and then leaves it alone.
+Updating afterwards is Codex's own job, from inside the box, on your schedule.
+
+Signing in: isopod offers to store an OPENAI_API_KEY the first time and hands it
+to the box in memory, out of sight of the process list. Press enter at that
+prompt to skip it and sign in to Codex its own way instead. Change or remove the
+stored key with 'isopod secret set OPENAI_API_KEY' and
+'isopod secret rm OPENAI_API_KEY'.
+
+On a box using the egress allow-list, isopod prints the hostnames Codex needs and
+leaves your allow-list alone, since that list is shared by every box on this
+host. Offline boxes are refused: the install would work, but Codex could not
+reach its API from a box with no route out.

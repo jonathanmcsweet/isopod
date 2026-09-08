@@ -25,6 +25,7 @@ _isopod() {
     'code:Open the sandbox in VSCodium (or another IDE)'
     'shell:Open a shell inside the sandbox'
     'claude-code:Run Claude Code in the sandbox, in a new terminal'
+    'codex:Run Codex in the sandbox, in a new terminal'
     'root-shell:Administrative root shell (host-held key)'
     'upgrade:Rebuild the box onto the current image'
     'start:Start a stopped sandbox'
@@ -114,7 +115,7 @@ _isopod() {
         migrate)
           _arguments '--account[move onto the sandbox account]' '--no-account[move off it]' '--force[skip confirmation]' '1:sandbox:_isopod_boxes'
           ;;
-        info|shell|claude-code|root-shell|upgrade|start|stop|export|copy-in)
+        info|shell|claude-code|codex|root-shell|upgrade|start|stop|export|copy-in)
           _arguments '1:sandbox:_isopod_boxes'
           ;;
       esac

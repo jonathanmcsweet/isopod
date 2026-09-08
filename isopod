@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.11.0"
+ISOPOD_VERSION="3.12.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -214,12 +214,19 @@ ISOPOD_CLAUDE_BASE_URL="${ISOPOD_CLAUDE_BASE_URL:-https://downloads.claude.ai/cl
 ISOPOD_CLAUDE_SECRET="${ISOPOD_CLAUDE_SECRET:-ANTHROPIC_API_KEY}"
 ISOPOD_CLAUDE_DOMAINS="${ISOPOD_CLAUDE_DOMAINS:-anthropic.com downloads.claude.ai}"
 
+# `isopod codex`: the same arrangement for OpenAI Codex, which publishes GitHub
+# releases whose feed carries a sha256 per asset. Its binaries come from GitHub's
+# release CDN, so a box needs that reachable as well as the API.
+ISOPOD_CODEX_API_URL="${ISOPOD_CODEX_API_URL:-https://api.github.com/repos/openai/codex/releases/latest}"
+ISOPOD_CODEX_SECRET="${ISOPOD_CODEX_SECRET:-OPENAI_API_KEY}"
+ISOPOD_CODEX_DOMAINS="${ISOPOD_CODEX_DOMAINS:-api.openai.com chatgpt.com}"
+
 # ---------------------------------------------------------------------------
 # function modules — sourced from lib/isopod.d/ (order: util first, so die()
 # exists for everything after it). Each defines functions and their globals
 # only; no module runs code at source time.
 # ---------------------------------------------------------------------------
-for _mod in util engine ssh color hardening egress hostport account json runargs secret create transfer claude-code-installer lifecycle install admin; do
+for _mod in util engine ssh color hardening egress hostport account json runargs secret create transfer agent claude-code-installer codex-installer lifecycle install admin; do
   if [ ! -f "$ISOPOD_LIB/isopod.d/$_mod.sh" ]; then
     # raw printf, not die: die() itself lives in the first module
     printf 'error: missing module: %s (is your isopod install complete?)\n' \
@@ -249,6 +256,7 @@ main() {
     code | open) cmd_code "$@" ;;
     shell | sh) cmd_shell "$@" ;;
     claude-code | claude) cmd_claude "$@" ;;
+    codex) cmd_codex "$@" ;;
     root-shell | rootsh) cmd_root_shell "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
     migrate) cmd_migrate "$@" ;;
