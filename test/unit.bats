@@ -4560,3 +4560,176 @@ ip daddr 1.2.3.4 accept'
   assert_success
   assert_output ""
 }
+
+# ---- agents: the install actually wires together -----------------------------
+# agent_ensure_installed is where a wiring mistake hides: the transfer, the
+# far-side checksum and the adapter's script are three separate box_ssh calls and
+# a mistake in any of them installs nothing while looking fine. These stub the box
+# and assert what was actually sent to it.
+agent_install_harness() { # agent_install_harness <agent> <body-of-fake-binary>
+  agent_select "$1"
+  export CACHE_DIR="$TEST_TMP/cache"
+  BOX_LOG="$TEST_TMP/box-calls.log"
+  : >"$BOX_LOG"
+  BOX_HAS_AGENT=0
+  export BOX_LOG BOX_HAS_AGENT
+  # The binary the fake release serves, and its real digest.
+  FAKE_BODY="${2:-fake-agent-bytes}"
+  FAKE_SUM="$(printf '%s' "$FAKE_BODY" | sha256_full)"
+  eval "agent_curl() {
+    local out=\"\"
+    while [ \$# -gt 0 ]; do [ \"\$1\" = \"-o\" ] && out=\"\$2\"; shift; done
+    printf '%s' $(printf '%q' "$FAKE_BODY") > \"\$out\"
+  }"
+  agent_box_facts() { printf 'x86_64 glibc'; }
+  # Record every remote command; the last argument is the command string.
+  box_ssh() {
+    local last=""
+    for last in "$@"; do :; done
+    printf '%s\n' "$last" >>"$BOX_LOG"
+    case "$last" in
+      *"command -v"*) [ "$BOX_HAS_AGENT" = 1 ] ;;
+      *"sha256sum -c"*) return "${BOX_SUM_RC:-0}" ;;
+      # The adapter's install script ran, so the box now has the binary. Without
+      # this the post-install PATH check could never pass and the test would be
+      # asserting the wrong thing.
+      *"chmod 755"*)
+        BOX_HAS_AGENT=1
+        return 0
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  box_tar_in() {
+    cat >/dev/null
+    printf 'TAR_IN %s\n' "$2" >>"$BOX_LOG"
+  }
+}
+
+@test "agent_ensure_installed sends the transfer, the far-side checksum and the install script" {
+  agent_install_harness claude
+  eval "claude_resolve() { printf '%s\t%s\t%s\t%s' 9.9.9 $(printf '%q' "$FAKE_SUM") https://example.invalid/claude claude; }"
+  # The box reports the agent missing, then present once installed.
+  run agent_ensure_installed demo
+  assert_success
+  # Staged, transferred, verified on the far side, installed, cleaned up.
+  run grep -c 'TAR_IN .*isopod-agent' "$BOX_LOG"
+  assert_output "1"
+  run grep -F "sha256sum -c" "$BOX_LOG"
+  assert_success
+  assert_output --partial "$FAKE_SUM"
+  run grep -F "install" "$BOX_LOG"
+  assert_success
+  run grep -F 'rm -rf "$HOME/.isopod-agent"' "$BOX_LOG"
+  assert_success
+}
+
+@test "agent_ensure_installed aborts when the far-side checksum disagrees" {
+  agent_install_harness claude
+  eval "claude_resolve() { printf '%s\t%s\t%s\t%s' 9.9.9 $(printf '%q' "$FAKE_SUM") https://example.invalid/claude claude; }"
+  export BOX_SUM_RC=1
+  run agent_ensure_installed demo
+  assert_failure
+  assert_output --partial "corrupted"
+  # The adapter's install script must not have run after a bad transfer.
+  run grep -F "chmod 755" "$BOX_LOG"
+  assert_failure
+}
+
+@test "agent_ensure_installed does nothing when the agent is already in the box" {
+  agent_install_harness claude
+  BOX_HAS_AGENT=1
+  claude_resolve() { die "resolve must not be called when the agent is present"; }
+  run agent_ensure_installed demo
+  assert_success
+  # No transfer, no download: presence is the whole check.
+  run grep -c 'TAR_IN' "$BOX_LOG"
+  assert_output "0"
+}
+
+@test "agent_ensure_installed refuses a resolve that returns no usable checksum" {
+  agent_install_harness claude
+  claude_resolve() { printf '%s\t%s\t%s\t%s' 9.9.9 'not-a-digest' https://example.invalid/c claude; }
+  run agent_ensure_installed demo
+  assert_failure
+  assert_output --partial "no usable checksum"
+  run grep -c 'TAR_IN' "$BOX_LOG"
+  assert_output "0"
+}
+
+@test "agent_ensure_installed runs the codex unpack script in the box" {
+  agent_install_harness codex
+  local artifact="codex-x86_64-unknown-linux-musl.tar.gz"
+  eval "codex_resolve() { printf '%s\t%s\t%s\t%s' 0.1.0 $(printf '%q' "$FAKE_SUM") https://example.invalid/c.tar.gz $(printf '%q' "$artifact"); }"
+  run agent_ensure_installed demo
+  assert_success
+  run grep -F "tar -xzf" "$BOX_LOG"
+  assert_success
+  assert_output --partial "$artifact"
+  run grep -F '"$HOME/.local/bin/codex"' "$BOX_LOG"
+  assert_success
+}
+
+# ---- agents: the release-feed helpers ---------------------------------------
+@test "github_asset.py returns version, digest and url for a known asset" {
+  local feed="$TEST_TMP/rel.json"
+  cat >"$feed" <<'JSON'
+{"name":"0.153.4","tag_name":"rust-v0.153.4","assets":[
+ {"name":"other.tar.gz","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "browser_download_url":"https://github.com/openai/codex/releases/download/x/other.tar.gz"},
+ {"name":"codex-x86_64-unknown-linux-musl.tar.gz",
+  "digest":"sha256:f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30",
+  "browser_download_url":"https://github.com/openai/codex/releases/download/x/codex-x86_64-unknown-linux-musl.tar.gz"}]}
+JSON
+  run bash -c "python3 '$ISOPOD_ROOT/lib/github_asset.py' codex-x86_64-unknown-linux-musl.tar.gz < '$feed'"
+  assert_success
+  assert_output "0.153.4	f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30	https://github.com/openai/codex/releases/download/x/codex-x86_64-unknown-linux-musl.tar.gz"
+}
+
+@test "github_asset.py refuses a digest that is not a sha256" {
+  local feed="$TEST_TMP/rel.json"
+  printf '%s' '{"name":"1","assets":[{"name":"a","digest":"md5:abc","browser_download_url":"https://github.com/x"}]}' >"$feed"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/github_asset.py' a < '$feed'"
+  assert_failure
+  assert_output --partial "no usable sha256"
+}
+
+@test "github_asset.py refuses a download URL pointing off github" {
+  local feed="$TEST_TMP/rel.json"
+  printf '%s' '{"name":"1","assets":[{"name":"a","digest":"sha256:f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30","browser_download_url":"https://evil.example.com/a"}]}' >"$feed"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/github_asset.py' a < '$feed'"
+  assert_failure
+  assert_output --partial "no usable download URL"
+}
+
+@test "github_asset.py fails on a missing asset rather than picking another" {
+  local feed="$TEST_TMP/rel.json"
+  printf '%s' '{"name":"1","assets":[{"name":"a","digest":"sha256:f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30","browser_download_url":"https://github.com/a"}]}' >"$feed"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/github_asset.py' b < '$feed'"
+  assert_failure
+  assert_output --partial "no asset named"
+}
+
+@test "claude_manifest.py returns the checksum for the asked-for platform only" {
+  local m="$TEST_TMP/manifest.json"
+  printf '%s' '{"platforms":{"linux-x64":{"checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"linux-arm64":{"checksum":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}' >"$m"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/claude_manifest.py' linux-arm64 < '$m'"
+  assert_success
+  assert_output "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+
+@test "claude_manifest.py names the platforms it does have when one is missing" {
+  local m="$TEST_TMP/manifest.json"
+  printf '%s' '{"platforms":{"linux-x64":{"checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}' >"$m"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/claude_manifest.py' linux-arm64-musl < '$m'"
+  assert_failure
+  assert_output --partial "linux-x64"
+}
+
+@test "claude_manifest.py refuses a malformed checksum" {
+  local m="$TEST_TMP/manifest.json"
+  printf '%s' '{"platforms":{"linux-x64":{"checksum":"deadbeef"}}}' >"$m"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/claude_manifest.py' linux-x64 < '$m'"
+  assert_failure
+  assert_output --partial "malformed"
+}
