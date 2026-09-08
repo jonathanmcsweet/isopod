@@ -1,0 +1,17 @@
+# How to install python3, per distro family — read by python_install_hint().
+# isopod's core needs no python; the agent commands (claude-code, codex) do, to
+# read a release manifest and check the download's SHA-256 before it goes into a
+# box. `isopod remap` also prefers it when git-filter-repo is absent.
+#
+# Whitespace-separated: <family> then the rest of the line is the command.
+# Families come from distro_family(); 'macos' and 'unknown' are the fallbacks.
+#
+# family   command
+debian     sudo apt install -y python3
+fedora     sudo dnf install -y python3
+arch       sudo pacman -S --needed python
+gentoo     sudo emerge --ask dev-lang/python
+suse       sudo zypper install -y python3
+alpine     sudo apk add python3
+macos      xcode-select --install   (or: brew install python)
+unknown    install python3 with your package manager

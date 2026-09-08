@@ -4733,3 +4733,60 @@ JSON
   assert_failure
   assert_output --partial "malformed"
 }
+
+# ---- doctor: python3 for the agent commands ---------------------------------
+# python3 is not a core dependency, but claude-code and codex cannot verify a
+# download without it. Arch's base and a minimal Debian ship without it, so
+# doctor has to name the package rather than just the missing binary.
+@test "python_install_hint names the right package per distro family" {
+  distro_family() { printf 'arch'; }
+  run python_install_hint
+  assert_output "sudo pacman -S --needed python"
+  distro_family() { printf 'debian'; }
+  run python_install_hint
+  assert_output "sudo apt install -y python3"
+  distro_family() { printf 'macos'; }
+  run python_install_hint
+  assert_output --partial "xcode-select --install"
+}
+
+@test "python_install_hint falls back for a family with no row" {
+  distro_family() { printf 'nixos'; }
+  run python_install_hint
+  assert_success
+  assert_output "install python3 with your package manager"
+}
+
+@test "python_install_hint falls back when the distro is unknown" {
+  distro_family() { printf ''; }
+  run python_install_hint
+  assert_success
+  refute_output ""
+}
+
+@test "distro_family reports macos on Darwin without reading os-release" {
+  is_macos() { return 0; }
+  run distro_family
+  assert_output "macos"
+}
+
+@test "doctor warns and names a package when python3 is missing" {
+  # A stub that exits non-zero makes `have python3` false the way an absent
+  # binary would, without touching the interpreter the suite itself runs on.
+  have() { [ "$1" != python3 ]; }
+  distro_family() { printf 'arch'; }
+  run cmd_doctor
+  assert_output --partial "python3 not found"
+  assert_output --partial "sudo pacman -S --needed python"
+}
+
+@test "doctor reports python3 as present when it is" {
+  run cmd_doctor
+  assert_output --partial "python3 (needed by claude-code, codex)"
+}
+
+@test "doctor --json carries the python3 check" {
+  run cmd_doctor --json
+  assert_success
+  assert_output --partial '"python3"'
+}
