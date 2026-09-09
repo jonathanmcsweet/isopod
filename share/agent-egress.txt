@@ -1,0 +1,5 @@
+This box uses the egress allow-list, which does not yet include:
+$(printf '  %s\n' $AGENT_MISSING_DOMAINS)
+$AGENT_LABEL needs these reachable from inside '$name'. Allow them when you want
+that, keeping in mind one allow-list covers every box on this host:
+$(printf '  isopod egress allow %s\n' $AGENT_MISSING_DOMAINS)

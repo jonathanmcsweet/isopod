@@ -45,6 +45,48 @@ isopod install <name> jq ripgrep    # runs the box's package manager as root, fr
 
 Two caveats. Installs are **ephemeral** — a fresh `create` starts without them (`reconfigure` snapshots the box, so they survive *that*). For a dependency you always need, bake it into a [`--dockerfile`](#customizing-the-container) instead. And `isopod install` needs a **container** box: the engine can't exec into a microVM guest, so on a microVM runtime add the package with `--dockerfile` and recreate.
 
+## Running a coding agent in a box (`isopod claude-code`, `isopod codex`)
+
+```sh
+isopod claude-code myproj              # new terminal window, session in the box
+isopod codex myproj                    # the same, with Codex
+isopod claude-code myproj --app kitty  # pick the terminal
+isopod codex myproj --attach           # run in this window instead
+```
+
+Both commands work the same way. The first run puts the agent in the box, later
+runs just open a session. isopod downloads the build matching the box's own
+architecture, checks its SHA-256 on your machine, then copies it in over SSH, so
+the box never fetches or runs an installer and needs no network for the install
+itself. It goes in as the box user, not root.
+
+isopod installs whatever is newest at that moment and then leaves it alone.
+Updating afterwards is the agent's own job, from inside the box, on your
+schedule.
+
+The first time, isopod offers to store an API key (`ANTHROPIC_API_KEY` for Claude
+Code, `OPENAI_API_KEY` for Codex), which it keeps in your host keychain and hands
+to the box in memory rather than on a command line. Press enter to skip that and
+sign in the agent's own way instead. A stored key is shared by every box; change
+it with `isopod secret set <NAME>`.
+
+On a box using the egress allow-list, isopod prints the hostnames the agent needs
+and leaves your allow-list alone, since one list covers every box on the host.
+Claude Code needs `anthropic.com` and `downloads.claude.ai`; Codex needs
+`api.openai.com` and `chatgpt.com`, and it updates itself from GitHub, which the
+shipped baseline already allows.
+
+```sh
+isopod egress allow anthropic.com
+```
+
+Offline boxes are refused. Copying the binary in would work, but it would have
+nothing to talk to.
+
+Codex is a large first download, around 100 MB compressed, cached afterwards and
+shared by every box of the same architecture. Its Linux builds are static, so one
+of them serves a Debian box and an Alpine box alike.
+
 ## Reaching a server in the box (port forwarding)
 
 A dev server inside the box (say `pnpm run start` on `:3000`) isn't on your host by default. Publish it with **`--expose`**, which maps a container port to a `127.0.0.1` host port — the standard `podman/docker run -p`, loopback-only:

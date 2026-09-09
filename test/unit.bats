@@ -4300,3 +4300,498 @@ ip daddr 1.2.3.4 accept'
   run egress_can_enforce docker
   assert_failure
 }
+
+# ---- agents: box facts probe ------------------------------------------------
+# box_ssh is redefined per test so the probe runs against a scripted box. The
+# adapters' own mapping is exercised for real against those facts.
+@test "agent_box_facts refuses an answer that is not arch plus libc" {
+  box_ssh() { printf 'x86_64; rm -rf /'; }
+  run agent_box_facts demo
+  assert_failure
+  assert_output --partial "does not recognize"
+}
+
+@test "agent_box_facts refuses an empty answer rather than building a URL from it" {
+  box_ssh() { printf ''; }
+  run agent_box_facts demo
+  assert_failure
+}
+
+@test "agent_box_facts passes through a well formed answer" {
+  box_ssh() { printf 'aarch64 musl'; }
+  run agent_box_facts demo
+  assert_success
+  assert_output "aarch64 musl"
+}
+
+# ---- claude-code: platform mapping ------------------------------------------
+@test "claude_platform maps a glibc x86_64 box to linux-x64" {
+  run claude_platform x86_64 glibc
+  assert_success
+  assert_output "linux-x64"
+}
+
+@test "claude_platform maps a musl aarch64 box to linux-arm64-musl" {
+  run claude_platform aarch64 musl
+  assert_success
+  assert_output "linux-arm64-musl"
+}
+
+@test "claude_platform refuses an architecture with no published build" {
+  run claude_platform riscv64 glibc
+  assert_failure
+  assert_output --partial "no build"
+}
+
+# ---- codex: platform mapping ------------------------------------------------
+@test "codex_target maps x86_64 to the musl triple" {
+  run codex_target x86_64
+  assert_success
+  assert_output "x86_64-unknown-linux-musl"
+}
+
+@test "codex_target maps aarch64 to the musl triple" {
+  run codex_target aarch64
+  assert_success
+  assert_output "aarch64-unknown-linux-musl"
+}
+
+@test "codex_target ignores libc: a glibc box still gets the static musl build" {
+  # Codex publishes Linux only as static musl, which runs on a glibc box too, so
+  # the adapter takes arch alone. Claude's does not, which is why the shared probe
+  # reports both facts and each adapter uses what it needs.
+  run codex_target x86_64
+  assert_output "x86_64-unknown-linux-musl"
+  run claude_platform x86_64 glibc
+  assert_output "linux-x64"
+  run claude_platform x86_64 musl
+  assert_output "linux-x64-musl"
+}
+
+@test "codex_target refuses an architecture with no Linux build" {
+  run codex_target s390x
+  assert_failure
+  assert_output --partial "no Linux build"
+}
+
+@test "codex_box_install substitutes the artifact and its inner binary name" {
+  run codex_box_install codex-x86_64-unknown-linux-musl.tar.gz
+  assert_success
+  assert_output --partial "tar -xzf 'codex-x86_64-unknown-linux-musl.tar.gz'"
+  assert_output --partial 'mv -f '"'"'codex-x86_64-unknown-linux-musl'"'"' "$HOME/.local/bin/codex"'
+  # The script runs as `sh -c <script>` with no positional args, so an unexpanded
+  # $1 would silently install nothing.
+  refute_output --partial '"$1"'
+}
+
+# ---- agents: verified download ----------------------------------------------
+@test "sha256_full emits the whole digest, unlike the 16-char tag helper" {
+  run bash -c 'printf hello | sha256sum | awk "{print \$1}"'
+  local want="$output"
+  run bash -c "printf hello | { $(declare -f have); $(declare -f sha256_full); sha256_full; }"
+  assert_success
+  assert_output "$want"
+  assert_equal "${#output}" 64
+}
+
+@test "agent_fetch_verified refuses a mismatched download and leaves no file" {
+  agent_select claude
+  export CACHE_DIR="$TEST_TMP/cache"
+  agent_curl() {
+    local out=""
+    while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+    printf 'not-the-expected-bytes' >"$out"
+  }
+  local want
+  want="$(printf 'a%.0s' {1..64})"
+  run agent_fetch_verified 1.2.3 x86_64-glibc https://example.invalid/x "$want" claude
+  assert_failure
+  assert_output --partial "checksum mismatch"
+  # Nothing may survive, or a later run would treat the bad download as a hit.
+  run find "$CACHE_DIR/claude/1.2.3" -type f
+  assert_output ""
+}
+
+@test "agent_fetch_verified keeps a matching download and reuses it as a cache hit" {
+  agent_select claude
+  export CACHE_DIR="$TEST_TMP/cache"
+  local body="agent-binary-bytes" sum
+  sum="$(printf '%s' "$body" | sha256_full)"
+  CURL_CALLS="$TEST_TMP/curl-calls"
+  : >"$CURL_CALLS"
+  eval "agent_curl() {
+    echo call >> '$CURL_CALLS'
+    local out=\"\"
+    while [ \$# -gt 0 ]; do [ \"\$1\" = \"-o\" ] && out=\"\$2\"; shift; done
+    printf '%s' $(printf '%q' "$body") > \"\$out\"
+  }"
+  # Command substitution, not `run`: the caller reads this function's STDOUT as a
+  # path, and bats' `run` would merge the progress line on stderr into it.
+  local got calls
+  got="$(agent_fetch_verified 1.2.3 x86_64-glibc https://example.invalid/x "$sum" claude)"
+  assert_equal "$got" "$CACHE_DIR/claude/1.2.3/x86_64-glibc/claude"
+  # Numeric compare rather than assert_equal: BSD wc pads its count with spaces,
+  # so matching the string "1" passes on Linux and fails on macOS.
+  calls=$(wc -l <"$CURL_CALLS")
+  [ "$calls" -eq 1 ]
+  # A second call is served from the cache, so the count must not move.
+  got="$(agent_fetch_verified 1.2.3 x86_64-glibc https://example.invalid/x "$sum" claude)"
+  assert_equal "$got" "$CACHE_DIR/claude/1.2.3/x86_64-glibc/claude"
+  calls=$(wc -l <"$CURL_CALLS")
+  [ "$calls" -eq 1 ]
+}
+
+@test "claude_latest_version refuses a version string that is not one" {
+  agent_curl() { printf 'not a version; rm -rf /'; }
+  run claude_latest_version
+  assert_failure
+  assert_output --partial "not a version"
+}
+
+# ---- agents: terminal detection ---------------------------------------------
+@test "find_term_bin resolves a named terminal and its exec flag" {
+  make_stub konsole 0
+  find_term_bin konsole
+  assert_equal "${TERM_CMD[*]}" "konsole -e"
+  assert_equal "$TERM_NAME" "konsole"
+}
+
+@test "find_term_bin carries a multi-token exec arg from the table" {
+  make_stub wezterm 0
+  find_term_bin wezterm
+  assert_equal "${TERM_CMD[*]}" "wezterm start --"
+}
+
+@test "find_term_bin emits no exec flag for a terminal that takes none" {
+  make_stub kitty 0
+  find_term_bin kitty
+  assert_equal "${TERM_CMD[*]}" "kitty"
+}
+
+@test "find_term_bin with no name takes the first terminal installed" {
+  make_stub foot 0
+  find_term_bin ""
+  assert_equal "$TERM_NAME" "foot"
+}
+
+@test "find_term_bin prefers the earlier table row when several are installed" {
+  make_stub foot 0
+  make_stub alacritty 0
+  find_term_bin ""
+  assert_equal "$TERM_NAME" "alacritty"
+}
+
+@test "find_term_bin falls back to an unknown name as a bare command" {
+  make_stub st 0
+  find_term_bin st
+  assert_equal "${TERM_CMD[*]}" "st -e"
+}
+
+@test "find_term_bin fails when no terminal is installed at all" {
+  run find_term_bin ""
+  assert_failure
+}
+
+@test "find_term_bin fails for a known terminal that is not installed" {
+  run find_term_bin ghostty
+  assert_failure
+}
+
+# ---- agents: guards ---------------------------------------------------------
+@test "cmd_claude refuses an offline box before touching the network" {
+  mkdir -p "$(box_dir off)"
+  printf 'engine=podman\nport=2222\noffline=1\n' >"$(box_dir off)/meta"
+  open_box() { :; }
+  run cmd_claude off
+  assert_failure
+  assert_output --partial "offline"
+}
+
+@test "cmd_codex refuses an offline box and names Codex, not Claude Code" {
+  mkdir -p "$(box_dir off)"
+  printf 'engine=podman\nport=2222\noffline=1\n' >"$(box_dir off)/meta"
+  open_box() { :; }
+  run cmd_codex off
+  assert_failure
+  assert_output --partial "Codex"
+  refute_output --partial "Claude Code"
+}
+
+@test "agent_select points the shared path at the right secret and binary" {
+  agent_select claude
+  assert_equal "$AGENT_SECRET" "ANTHROPIC_API_KEY"
+  assert_equal "$AGENT_BIN" "claude"
+  agent_select codex
+  assert_equal "$AGENT_SECRET" "OPENAI_API_KEY"
+  assert_equal "$AGENT_BIN" "codex"
+}
+
+@test "agent_select refuses an agent it has no adapter for" {
+  run agent_select gemini
+  assert_failure
+}
+
+@test "agent_egress_note stays quiet when the domains are already allowed" {
+  agent_select claude
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
+  export ISOPOD_EGRESS=allow-list
+  AGENT_DOMAINS="example.com"
+  printf 'example.com\n' >"$USER_EGRESS_ALLOWLIST"
+  run agent_egress_note demo
+  assert_success
+  assert_output ""
+}
+
+@test "agent_egress_note names the missing domain for an allow-list box" {
+  agent_select codex
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
+  export ISOPOD_EGRESS=allow-list
+  AGENT_DOMAINS="api.openai.com"
+  : >"$USER_EGRESS_ALLOWLIST"
+  run agent_egress_note demo
+  assert_success
+  assert_output --partial "isopod egress allow api.openai.com"
+  assert_output --partial "Codex"
+}
+
+@test "agent_egress_note stays quiet for a box with egress off" {
+  agent_select claude
+  mkdir -p "$(box_dir demo)"
+  printf 'engine=podman\nport=2222\n' >"$(box_dir demo)/meta"
+  export ISOPOD_EGRESS=off
+  run agent_egress_note demo
+  assert_success
+  assert_output ""
+}
+
+# ---- agents: the install actually wires together -----------------------------
+# agent_ensure_installed is where a wiring mistake hides: the transfer, the
+# far-side checksum and the adapter's script are three separate box_ssh calls and
+# a mistake in any of them installs nothing while looking fine. These stub the box
+# and assert what was actually sent to it.
+agent_install_harness() { # agent_install_harness <agent> <body-of-fake-binary>
+  agent_select "$1"
+  export CACHE_DIR="$TEST_TMP/cache"
+  BOX_LOG="$TEST_TMP/box-calls.log"
+  : >"$BOX_LOG"
+  BOX_HAS_AGENT=0
+  export BOX_LOG BOX_HAS_AGENT
+  # The binary the fake release serves, and its real digest.
+  FAKE_BODY="${2:-fake-agent-bytes}"
+  FAKE_SUM="$(printf '%s' "$FAKE_BODY" | sha256_full)"
+  eval "agent_curl() {
+    local out=\"\"
+    while [ \$# -gt 0 ]; do [ \"\$1\" = \"-o\" ] && out=\"\$2\"; shift; done
+    printf '%s' $(printf '%q' "$FAKE_BODY") > \"\$out\"
+  }"
+  agent_box_facts() { printf 'x86_64 glibc'; }
+  # Record every remote command; the last argument is the command string.
+  box_ssh() {
+    local last=""
+    for last in "$@"; do :; done
+    printf '%s\n' "$last" >>"$BOX_LOG"
+    case "$last" in
+      *"command -v"*) [ "$BOX_HAS_AGENT" = 1 ] ;;
+      *"sha256sum -c"*) return "${BOX_SUM_RC:-0}" ;;
+      # The adapter's install script ran, so the box now has the binary. Without
+      # this the post-install PATH check could never pass and the test would be
+      # asserting the wrong thing.
+      *"chmod 755"*)
+        BOX_HAS_AGENT=1
+        return 0
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  box_tar_in() {
+    cat >/dev/null
+    printf 'TAR_IN %s\n' "$2" >>"$BOX_LOG"
+  }
+}
+
+@test "agent_ensure_installed sends the transfer, the far-side checksum and the install script" {
+  agent_install_harness claude
+  eval "claude_resolve() { printf '%s\t%s\t%s\t%s' 9.9.9 $(printf '%q' "$FAKE_SUM") https://example.invalid/claude claude; }"
+  # The box reports the agent missing, then present once installed.
+  run agent_ensure_installed demo
+  assert_success
+  # Staged, transferred, verified on the far side, installed, cleaned up.
+  run grep -c 'TAR_IN .*isopod-agent' "$BOX_LOG"
+  assert_output "1"
+  run grep -F "sha256sum -c" "$BOX_LOG"
+  assert_success
+  assert_output --partial "$FAKE_SUM"
+  run grep -F "install" "$BOX_LOG"
+  assert_success
+  run grep -F 'rm -rf "$HOME/.isopod-agent"' "$BOX_LOG"
+  assert_success
+}
+
+@test "agent_ensure_installed aborts when the far-side checksum disagrees" {
+  agent_install_harness claude
+  eval "claude_resolve() { printf '%s\t%s\t%s\t%s' 9.9.9 $(printf '%q' "$FAKE_SUM") https://example.invalid/claude claude; }"
+  export BOX_SUM_RC=1
+  run agent_ensure_installed demo
+  assert_failure
+  assert_output --partial "corrupted"
+  # The adapter's install script must not have run after a bad transfer.
+  run grep -F "chmod 755" "$BOX_LOG"
+  assert_failure
+}
+
+@test "agent_ensure_installed does nothing when the agent is already in the box" {
+  agent_install_harness claude
+  BOX_HAS_AGENT=1
+  claude_resolve() { die "resolve must not be called when the agent is present"; }
+  run agent_ensure_installed demo
+  assert_success
+  # No transfer, no download: presence is the whole check.
+  run grep -c 'TAR_IN' "$BOX_LOG"
+  assert_output "0"
+}
+
+@test "agent_ensure_installed refuses a resolve that returns no usable checksum" {
+  agent_install_harness claude
+  claude_resolve() { printf '%s\t%s\t%s\t%s' 9.9.9 'not-a-digest' https://example.invalid/c claude; }
+  run agent_ensure_installed demo
+  assert_failure
+  assert_output --partial "no usable checksum"
+  run grep -c 'TAR_IN' "$BOX_LOG"
+  assert_output "0"
+}
+
+@test "agent_ensure_installed runs the codex unpack script in the box" {
+  agent_install_harness codex
+  local artifact="codex-x86_64-unknown-linux-musl.tar.gz"
+  eval "codex_resolve() { printf '%s\t%s\t%s\t%s' 0.1.0 $(printf '%q' "$FAKE_SUM") https://example.invalid/c.tar.gz $(printf '%q' "$artifact"); }"
+  run agent_ensure_installed demo
+  assert_success
+  run grep -F "tar -xzf" "$BOX_LOG"
+  assert_success
+  assert_output --partial "$artifact"
+  run grep -F '"$HOME/.local/bin/codex"' "$BOX_LOG"
+  assert_success
+}
+
+# ---- agents: the release-feed helpers ---------------------------------------
+@test "github_asset.py returns version, digest and url for a known asset" {
+  local feed="$TEST_TMP/rel.json"
+  cat >"$feed" <<'JSON'
+{"name":"0.153.4","tag_name":"rust-v0.153.4","assets":[
+ {"name":"other.tar.gz","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "browser_download_url":"https://github.com/openai/codex/releases/download/x/other.tar.gz"},
+ {"name":"codex-x86_64-unknown-linux-musl.tar.gz",
+  "digest":"sha256:f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30",
+  "browser_download_url":"https://github.com/openai/codex/releases/download/x/codex-x86_64-unknown-linux-musl.tar.gz"}]}
+JSON
+  run bash -c "python3 '$ISOPOD_ROOT/lib/github_asset.py' codex-x86_64-unknown-linux-musl.tar.gz < '$feed'"
+  assert_success
+  assert_output "0.153.4	f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30	https://github.com/openai/codex/releases/download/x/codex-x86_64-unknown-linux-musl.tar.gz"
+}
+
+@test "github_asset.py refuses a digest that is not a sha256" {
+  local feed="$TEST_TMP/rel.json"
+  printf '%s' '{"name":"1","assets":[{"name":"a","digest":"md5:abc","browser_download_url":"https://github.com/x"}]}' >"$feed"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/github_asset.py' a < '$feed'"
+  assert_failure
+  assert_output --partial "no usable sha256"
+}
+
+@test "github_asset.py refuses a download URL pointing off github" {
+  local feed="$TEST_TMP/rel.json"
+  printf '%s' '{"name":"1","assets":[{"name":"a","digest":"sha256:f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30","browser_download_url":"https://evil.example.com/a"}]}' >"$feed"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/github_asset.py' a < '$feed'"
+  assert_failure
+  assert_output --partial "no usable download URL"
+}
+
+@test "github_asset.py fails on a missing asset rather than picking another" {
+  local feed="$TEST_TMP/rel.json"
+  printf '%s' '{"name":"1","assets":[{"name":"a","digest":"sha256:f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30","browser_download_url":"https://github.com/a"}]}' >"$feed"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/github_asset.py' b < '$feed'"
+  assert_failure
+  assert_output --partial "no asset named"
+}
+
+@test "claude_manifest.py returns the checksum for the asked-for platform only" {
+  local m="$TEST_TMP/manifest.json"
+  printf '%s' '{"platforms":{"linux-x64":{"checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"linux-arm64":{"checksum":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}' >"$m"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/claude_manifest.py' linux-arm64 < '$m'"
+  assert_success
+  assert_output "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+
+@test "claude_manifest.py names the platforms it does have when one is missing" {
+  local m="$TEST_TMP/manifest.json"
+  printf '%s' '{"platforms":{"linux-x64":{"checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}' >"$m"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/claude_manifest.py' linux-arm64-musl < '$m'"
+  assert_failure
+  assert_output --partial "linux-x64"
+}
+
+@test "claude_manifest.py refuses a malformed checksum" {
+  local m="$TEST_TMP/manifest.json"
+  printf '%s' '{"platforms":{"linux-x64":{"checksum":"deadbeef"}}}' >"$m"
+  run bash -c "python3 '$ISOPOD_ROOT/lib/claude_manifest.py' linux-x64 < '$m'"
+  assert_failure
+  assert_output --partial "malformed"
+}
+
+# ---- doctor: python3 for the agent commands ---------------------------------
+# python3 is not a core dependency, but claude-code and codex cannot verify a
+# download without it. Arch's base and a minimal Debian ship without it, so
+# doctor has to name the package rather than just the missing binary.
+@test "python_install_hint names the right package per distro family" {
+  distro_family() { printf 'arch'; }
+  run python_install_hint
+  assert_output "sudo pacman -S --needed python"
+  distro_family() { printf 'debian'; }
+  run python_install_hint
+  assert_output "sudo apt install -y python3"
+  distro_family() { printf 'macos'; }
+  run python_install_hint
+  assert_output --partial "xcode-select --install"
+}
+
+@test "python_install_hint falls back for a family with no row" {
+  distro_family() { printf 'nixos'; }
+  run python_install_hint
+  assert_success
+  assert_output "install python3 with your package manager"
+}
+
+@test "python_install_hint falls back when the distro is unknown" {
+  distro_family() { printf ''; }
+  run python_install_hint
+  assert_success
+  refute_output ""
+}
+
+@test "distro_family reports macos on Darwin without reading os-release" {
+  is_macos() { return 0; }
+  run distro_family
+  assert_output "macos"
+}
+
+@test "doctor warns and names a package when python3 is missing" {
+  # A stub that exits non-zero makes `have python3` false the way an absent
+  # binary would, without touching the interpreter the suite itself runs on.
+  have() { [ "$1" != python3 ]; }
+  distro_family() { printf 'arch'; }
+  run cmd_doctor
+  assert_output --partial "python3 not found"
+  assert_output --partial "sudo pacman -S --needed python"
+}
+
+@test "doctor reports python3 as present when it is" {
+  run cmd_doctor
+  assert_output --partial "python3 (needed by claude-code, codex)"
+}
+
+@test "doctor --json carries the python3 check" {
+  run cmd_doctor --json
+  assert_success
+  assert_output --partial '"python3"'
+}

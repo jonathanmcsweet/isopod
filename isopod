@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.10.1"
+ISOPOD_VERSION="3.12.1"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -39,6 +39,10 @@ _resolve_script_dir() {
 }
 ISOPOD_DIR="$(_resolve_script_dir)"
 ISOPOD_LIB="$ISOPOD_DIR/lib"
+# This script's own path, so a command that spawns a terminal window can re-run
+# isopod inside it (see cmd_claude). _resolve_script_dir already followed any
+# symlink, so this is the real file rather than whatever was on PATH.
+ISOPOD_BIN="$ISOPOD_DIR/isopod"
 # Long user-facing text and data tables live as files under share/ rather than
 # inline heredocs;
 ISOPOD_SHARE="${ISOPOD_SHARE:-$ISOPOD_DIR/share}"
@@ -73,6 +77,10 @@ USER_EGRESS_ALLOWLIST="$CONFIG_DIR/egress-allowlist.conf"
 # names-only index here; the file backend also keeps 0600 value files.
 SECRETS_DIR="$CONFIG_DIR/secrets"
 SECRETS_INDEX="$SECRETS_DIR/index"
+# Downloads isopod verifies once and reuses across boxes (currently the Claude
+# Code binary, keyed by version and platform). Cache, not config: deleting it
+# costs a re-download and nothing else.
+CACHE_DIR="${ISOPOD_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/isopod}"
 # Subordinate UID/GID ranges rootless podman maps the box's users through. Read
 # (never written) by the subid check in engine detection and `isopod doctor`;
 # overridable so the test suite can point at fixtures.
@@ -197,12 +205,28 @@ ISOPOD_ACCOUNT="${ISOPOD_ACCOUNT:-sandbox}"
 ISOPOD_ACCOUNT_STATE_DIR="${ISOPOD_ACCOUNT_STATE_DIR:-/etc/isopod/account}"
 ISOPOD_ACCOUNT_NFT_UNIT="isopod-account-nft.service"
 
+# `isopod claude-code`: where the release artifacts live, the secret name the API
+# key is stored under, and the hostnames a box needs reachable to use Claude Code
+# (the API, and the endpoint its own updater pulls from). isopod prints these for
+# an allow-list box rather than adding them, since that list is shared by every
+# box on the host.
+ISOPOD_CLAUDE_BASE_URL="${ISOPOD_CLAUDE_BASE_URL:-https://downloads.claude.ai/claude-code-releases}"
+ISOPOD_CLAUDE_SECRET="${ISOPOD_CLAUDE_SECRET:-ANTHROPIC_API_KEY}"
+ISOPOD_CLAUDE_DOMAINS="${ISOPOD_CLAUDE_DOMAINS:-anthropic.com downloads.claude.ai}"
+
+# `isopod codex`: the same arrangement for OpenAI Codex, which publishes GitHub
+# releases whose feed carries a sha256 per asset. Its binaries come from GitHub's
+# release CDN, so a box needs that reachable as well as the API.
+ISOPOD_CODEX_API_URL="${ISOPOD_CODEX_API_URL:-https://api.github.com/repos/openai/codex/releases/latest}"
+ISOPOD_CODEX_SECRET="${ISOPOD_CODEX_SECRET:-OPENAI_API_KEY}"
+ISOPOD_CODEX_DOMAINS="${ISOPOD_CODEX_DOMAINS:-api.openai.com chatgpt.com}"
+
 # ---------------------------------------------------------------------------
 # function modules — sourced from lib/isopod.d/ (order: util first, so die()
 # exists for everything after it). Each defines functions and their globals
 # only; no module runs code at source time.
 # ---------------------------------------------------------------------------
-for _mod in util engine ssh color hardening egress hostport account json runargs secret create transfer lifecycle install admin; do
+for _mod in util engine ssh color hardening egress hostport account json runargs secret create transfer agent claude-code-installer codex-installer lifecycle install admin; do
   if [ ! -f "$ISOPOD_LIB/isopod.d/$_mod.sh" ]; then
     # raw printf, not die: die() itself lives in the first module
     printf 'error: missing module: %s (is your isopod install complete?)\n' \
@@ -231,6 +255,8 @@ main() {
     info) cmd_info "$@" ;;
     code | open) cmd_code "$@" ;;
     shell | sh) cmd_shell "$@" ;;
+    claude-code | claude) cmd_claude "$@" ;;
+    codex) cmd_codex "$@" ;;
     root-shell | rootsh) cmd_root_shell "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
     migrate) cmd_migrate "$@" ;;

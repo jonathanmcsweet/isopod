@@ -264,6 +264,16 @@ cmd_doctor() {
   else
     printf '  [warn]    no remap backend — install git-filter-repo or python3 for isopod remap\n'
   fi
+  # python3 is not needed by the core, but the agent commands cannot verify a
+  # download without it: they read a release manifest to get the SHA-256 that is
+  # checked before anything goes into a box. Arch and a minimal Debian ship
+  # without it, so name the package rather than just the binary.
+  if have python3; then
+    printf '  [ok]      python3 (needed by claude-code, codex)\n'
+  else
+    printf '  [warn]    python3 not found — isopod claude-code/codex need it to verify their download\n'
+    printf '            %s\n' "$(python_install_hint)"
+  fi
   if have podman; then
     if podman info >/dev/null 2>&1; then
       printf '  [ok]      podman (working)\n'
