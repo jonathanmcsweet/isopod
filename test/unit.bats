@@ -4070,6 +4070,21 @@ ip daddr 1.2.3.4 accept'
   fi
 }
 
+# ---- BSD wc pads its counts, GNU wc does not --------------------------------
+# `wc -l < f` prints "       1" on macOS and "1" on Linux, so comparing its
+# output as a string is a test that passes here and fails on the macOS runner.
+# It has already cost two CI rounds. Compare numerically (n=$(wc -l <f); [ "$n"
+# -eq 1 ]), or ask the question directly with [ ! -s f ].
+@test "no test compares raw wc output as a string" {
+  local hits
+  hits="$(grep -nE 'assert_(equal|output).*\$\(wc[[:space:]]|run[[:space:]]+wc[[:space:]]' \
+    "$ISOPOD_ROOT"/test/*.bats || true)"
+  if [ -n "$hits" ]; then
+    printf 'wc output compared as a string (BSD pads it):\n%s\n' "$hits" >&2
+    return 1
+  fi
+}
+
 # ---- F2: no output may be redirected into a process substitution ------------
 # `cmd > >(filter)` reads like a pipe but is not: bash does not wait for a
 # process substitution, so the filter can outlive cmd still holding the
@@ -4732,7 +4747,9 @@ ip daddr 1.2.3.4 accept'
   run agent_ensure_key
   assert_success
   assert_output ""
-  assert_equal "$(wc -c <"$asks")" "0"
+  # -s rather than a wc count: BSD wc pads its output with spaces, so comparing
+  # it as a string passes on Linux and fails on macOS.
+  [ ! -s "$asks" ]
   assert_equal "$AGENT_API_KEY" ""
 }
 
