@@ -29,7 +29,7 @@ load_libs() {
 # binaries, so a half-installed kata on the host silently changes which runtime
 # unrelated create tests select. These names are left out of the mirrored PATH
 # below; a test that wants one present installs its own stub, as before.
-ISOPOD_TEST_HIDDEN_BINS="kata kata-runtime kata-qemu kata-clh kata-fc krun runsc runsc-kvm crun-vm codium vscodium code cursor windsurf flatpak git-filter-repo"
+ISOPOD_TEST_HIDDEN_BINS="kata kata-runtime kata-qemu kata-clh kata-fc krun runsc runsc-kvm crun-vm codium vscodium code cursor windsurf flatpak git-filter-repo ghostty kitty wezterm alacritty gnome-terminal konsole foot xfce4-terminal xterm"
 
 # A PATH that mirrors the host's, minus ISOPOD_TEST_HIDDEN_BINS. Mirroring —
 # rather than listing the tools the suite needs — means nothing can go missing:

@@ -125,6 +125,59 @@ os_kind() {
     *) printf 'other' ;;
   esac
 }
+# The host's distro family, for package hints. Mirrors install.sh's function of
+# the same name; kept separate because install.sh runs before lib/ is in place.
+# Prints nothing on a distro with no hint of its own, which the callers treat as
+# "unknown" rather than guessing a package manager.
+distro_family() {
+  is_macos && {
+    printf 'macos'
+    return 0
+  }
+  local id like d
+  [ -r /etc/os-release ] || return 0
+  # shellcheck disable=SC1091
+  id="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID:-}")"
+  like="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID_LIKE:-}")"
+  for d in $id $like; do
+    case "$d" in
+      fedora | rhel | centos) printf 'fedora' && return 0 ;;
+      debian | ubuntu) printf 'debian' && return 0 ;;
+      arch | archlinux) printf 'arch' && return 0 ;;
+      gentoo) printf 'gentoo' && return 0 ;;
+      suse | opensuse* | sles) printf 'suse' && return 0 ;;
+      alpine) printf 'alpine' && return 0 ;;
+    esac
+  done
+  return 0
+}
+
+# The command that installs python3 here, from share/python-pkg.
+python_install_hint() {
+  local f="$ISOPOD_SHARE/python-pkg" fam key cmd
+  fam="$(distro_family)"
+  [ -n "$fam" ] || fam=unknown
+  [ -f "$f" ] || {
+    printf 'install python3 with your package manager'
+    return 0
+  }
+  while read -r key cmd; do
+    case "$key" in '' | '#'*) continue ;; esac
+    [ "$key" = "$fam" ] && {
+      printf '%s' "$cmd"
+      return 0
+    }
+  done <"$f"
+  # A family with no row falls back to the generic line rather than saying nothing.
+  while read -r key cmd; do
+    [ "$key" = unknown ] && {
+      printf '%s' "$cmd"
+      return 0
+    }
+  done <"$f"
+  printf 'install python3 with your package manager'
+}
+
 is_macos() { [ "$(uname -s 2>/dev/null)" = Darwin ]; }
 is_linux() { [ "$(uname -s 2>/dev/null)" = Linux ]; }
 
@@ -134,6 +187,12 @@ is_linux() { [ "$(uname -s 2>/dev/null)" = Linux ]; }
 # Linux, `shasum -a 256` on macOS.
 sha_hex() {
   if have sha256sum; then sha256sum; else shasum -a 256; fi | awk '{print substr($1, 1, 16)}'
+}
+
+# The FULL digest of stdin. sha_hex above truncates to 16 characters because it
+# builds image tags; anything verifying a download needs every bit of it.
+sha256_full() {
+  if have sha256sum; then sha256sum; else shasum -a 256; fi | awk '{print $1}'
 }
 
 # Render a text template from share/ $vars and $(...) inside it resolve against

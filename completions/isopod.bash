@@ -13,7 +13,7 @@ _isopod() {
   cword="$COMP_CWORD"
   words=("${COMP_WORDS[@]}")
 
-  local cmds="create list info code shell root-shell upgrade start stop config reconfigure migrate export fetch remap copy-in rm egress host-port account secret doctor help version"
+  local cmds="create list info code shell claude-code codex root-shell upgrade start stop config reconfigure migrate export fetch remap copy-in rm egress host-port account secret doctor help version"
   local colors="red orange amber green teal blue purple magenta gray grey"
   local apps="codium vscodium cursor windsurf code"
 
@@ -73,7 +73,7 @@ _isopod() {
 
   # First positional for most subcommands is an existing box name.
   case "$sub" in
-    info | code | shell | root-shell | upgrade | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
+    info | code | shell | claude-code | codex | root-shell | upgrade | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
       mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
       ;;
     egress)
