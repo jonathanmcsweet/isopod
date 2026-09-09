@@ -353,6 +353,183 @@ remap_python_rewrite() { # remap_python_rewrite <top> <mailmap> <ref>...
     git -C "$top" fast-import --force --quiet
 }
 
+# ---- signing the rewritten commits -------------------------------------------
+#
+# Neither backend carries a signature across the rewrite, and neither could: a
+# signature covers the commit object it was made over, and the rewrite makes a
+# new one. So a remapped commit arrives UNSIGNED, which is what a forge is told
+# when nobody signed it at all. With GitHub's vigilant mode on, or a branch rule
+# that requires signatures, that shows the commits as unverified under the very
+# identity the remap just wrote. Re-signing here is the only point in the flow
+# where the finished commits and the user's signing key are in the same place.
+
+# The new-side emails of the mailmap, folded to lower case. A forge checks a
+# signature against the COMMITTER, so these are the only identities isopod may
+# sign for: putting the host's key on a commit committed by someone else reads as
+# a mismatch, not as verification. Every line isopod generates carries two <...>
+# groups (a rename-only rule repeats the old email) and the first is the new one.
+remap_signable_emails() { # remap_signable_emails <mailmap>
+  sed -n 's/^[^<]*<\([^>]*\)>.*/\1/p' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' | sort -u
+}
+
+# Split "Name <email> 1700000000 +0000" the way git does: the FIRST '<', then the
+# first '>' after it. Same rule as lib/remap_identity_filter.py and for the same
+# reason: a box writes its own commit objects, so a name containing '<' must not
+# be able to move where the email is read from.
+REMAP_IDENT_NAME=""
+REMAP_IDENT_EMAIL=""
+REMAP_IDENT_DATE=""
+remap_split_ident() { # remap_split_ident <the part after "author "/"committer ">
+  [[ "$1" =~ ^([^\<]*)\<([^\>]*)\>\ (.*)$ ]] || return 1
+  REMAP_IDENT_NAME="${BASH_REMATCH[1]}"
+  # git reads the run of spaces before '<' as the separator, not as the name.
+  REMAP_IDENT_NAME="${REMAP_IDENT_NAME%"${REMAP_IDENT_NAME##*[![:space:]]}"}"
+  REMAP_IDENT_EMAIL="${BASH_REMATCH[2]}"
+  REMAP_IDENT_DATE="${BASH_REMATCH[3]}"
+}
+
+# Prove the host can sign BEFORE any history is touched. Signing fails for
+# reasons that have nothing to do with isopod (no key configured, gpg.format=ssh
+# with no user.signingkey, a locked smartcard), and discovering that halfway
+# through would leave the refs rewritten and unsigned for no reason. Objects go
+# to a throwaway store with the real one read through alternates, so a probe that
+# succeeds leaves nothing behind in the user's repo.
+remap_sign_probe() { # remap_sign_probe <top> <keyid|''> <ref-to-borrow-a-tree-from>
+  local top="$1" key="$2" ref="$3" objdir tmp err
+  objdir="$(git -C "$top" rev-parse --git-path objects)"
+  # git printed it relative to the repo it was pointed at; the env var is read
+  # relative to the process's own directory.
+  case "$objdir" in /*) ;; *) objdir="$top/$objdir" ;; esac
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/isopod-sign-XXXXXX")" || die "could not create a temp dir"
+  if GIT_OBJECT_DIRECTORY="$tmp" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objdir" \
+    git -C "$top" commit-tree "-S$key" -m "isopod signing probe" "$ref^{tree}" \
+    >/dev/null 2>"$tmp/err"; then
+    rm -rf "$tmp"
+    return 0
+  fi
+  err="$(sanitize "$(cat "$tmp/err" 2>/dev/null || true)")"
+  rm -rf "$tmp"
+  die "git cannot sign a commit in this repo, so nothing was rewritten:
+${err:+     $err
+}     Set up signing (git config user.signingkey, gpg.format, an unlocked key),
+     or pass --no-sign to rewrite the identity without signing it."
+}
+
+# Which commits did this rewrite create? Everything reachable from any OTHER ref
+# (a local branch, a tag, origin, or this run's own refs/remap-backup snapshot)
+# is history that already exists elsewhere, and giving it a new SHA would detach
+# it from there. What is left is exactly what the rewrite produced, so signing
+# can never widen what the rewrite touched.
+remap_new_commits() { # remap_new_commits <top> <ref>...
+  local top="$1"
+  shift
+  local -a boxrefs=("$@") others=() notargs=()
+  local r
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    case " ${boxrefs[*]} " in *" $r "*) continue ;; esac
+    others+=("$r")
+  done < <(git -C "$top" for-each-ref --format='%(refname)')
+  [ "${#others[@]}" -gt 0 ] && notargs=(--not "${others[@]}")
+  # Parent-first, so a commit is rebuilt only once its new parents are known.
+  git -C "$top" rev-list --topo-order --reverse "${boxrefs[@]}" ${notargs[@]+"${notargs[@]}"}
+}
+
+# Sign the commits the rewrite just created. Signing changes a commit's SHA, so
+# its children have to be rebuilt too, which is why this walks the whole set
+# parent-first and rebuilds every commit in it, signing the ones it may sign and
+# leaving the rest identical apart from their parent list.
+remap_sign_refs() { # remap_sign_refs <top> <mailmap> <keyid|''> <ref>...
+  local top="$1" mm="$2" key="$3"
+  shift 3
+  local -a boxrefs=("$@") todo=()
+  local c r signable
+  mapfile -t todo < <(remap_new_commits "$top" "${boxrefs[@]}")
+  if [ "${#todo[@]}" -eq 0 ]; then
+    warn "nothing to sign: the rewrite produced no new commits on these refs"
+    return 0
+  fi
+  signable="$(remap_signable_emails "$mm")"
+
+  local -A map=()
+  local hdr hline tree enc author committer newsha email
+  local -a parents=() sargs=() encargs=() envs=()
+  local signed=0 rebuilt=0 mergetags=0
+  for c in "${todo[@]}"; do
+    # Read only the header block. `sed -n '1,/^$/p'` rather than `sed '/^$/q'`:
+    # quitting early would close the pipe on a commit whose message is larger
+    # than the pipe buffer, and pipefail would then report that as a failure.
+    hdr="$(git -C "$top" cat-file commit "$c" | sed -n '1,/^$/p')"
+    tree=""
+    enc=""
+    author=""
+    committer=""
+    parents=()
+    while IFS= read -r hline; do
+      # A gpgsig or mergetag header continues on lines that start with a space,
+      # so none of these prefixes can match inside one.
+      case "$hline" in
+        "tree "*) tree="${hline#tree }" ;;
+        "parent "*)
+          hline="${hline#parent }"
+          parents+=(-p "${map[$hline]:-$hline}")
+          ;;
+        "author "*) author="${hline#author }" ;;
+        "committer "*) committer="${hline#committer }" ;;
+        "encoding "*) enc="${hline#encoding }" ;;
+        "mergetag "*) mergetags=$((mergetags + 1)) ;;
+      esac
+    done <<<"$hdr"
+    [ -n "$tree" ] && [ -n "$author" ] && [ -n "$committer" ] ||
+      die "commit $c has no tree, author or committer, so it will not be rebuilt"
+
+    remap_split_ident "$author" || die "commit $c has an author line git would not accept"
+    envs=("GIT_AUTHOR_NAME=$REMAP_IDENT_NAME")
+    envs+=("GIT_AUTHOR_EMAIL=$REMAP_IDENT_EMAIL")
+    envs+=("GIT_AUTHOR_DATE=$REMAP_IDENT_DATE")
+    remap_split_ident "$committer" || die "commit $c has a committer line git would not accept"
+    envs+=("GIT_COMMITTER_NAME=$REMAP_IDENT_NAME")
+    envs+=("GIT_COMMITTER_EMAIL=$REMAP_IDENT_EMAIL")
+    envs+=("GIT_COMMITTER_DATE=$REMAP_IDENT_DATE")
+
+    email="$(printf '%s' "$REMAP_IDENT_EMAIL" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    if printf '%s\n' "$signable" | grep -qxF "$email"; then
+      sargs=("-S$key")
+      signed=$((signed + 1))
+    else
+      sargs=(--no-gpg-sign)
+    fi
+    # An encoding header is the box's statement about its own message bytes;
+    # commit-tree writes one back out from this config, so it survives.
+    encargs=()
+    [ -n "$enc" ] && encargs=(-c "i18n.commitEncoding=$enc")
+
+    # The message goes straight from one git to the other. It is box-authored
+    # text that may hold anything, and commit-tree wants it verbatim.
+    if ! newsha="$(git -C "$top" cat-file commit "$c" | sed -e '1,/^$/d' |
+      env "${envs[@]}" git -C "$top" ${encargs[@]+"${encargs[@]}"} commit-tree \
+        "${sargs[@]}" ${parents[@]+"${parents[@]}"} "$tree")"; then
+      warn "signing stopped at $c; the identity rewrite stands, unsigned"
+      return 1
+    fi
+    map["$c"]="$newsha"
+    rebuilt=$((rebuilt + 1))
+  done
+
+  for r in "${boxrefs[@]}"; do
+    c="$(git -C "$top" rev-parse "$r" 2>/dev/null || true)"
+    [ -n "$c" ] && [ -n "${map[$c]:-}" ] || continue
+    git -C "$top" update-ref "$r" "${map[$c]}" ||
+      warn "could not move $r onto its signed rewrite"
+  done
+
+  [ "$mergetags" -eq 0 ] ||
+    warn "$mergetags merged signed tag(s) lost their embedded tag header in the rebuild"
+  info "Signed $signed of $rebuilt rewritten commit(s)."
+  [ "$signed" -gt 0 ] && render_tmpl remap-sign-note.txt
+  return 0
+}
+
 # Prefers `git filter-repo`; falls back to a python3 fast-export rewrite.
 
 # Can `git filter-repo` actually run here? Its presence on PATH is not proof: it
@@ -376,7 +553,20 @@ filter_repo_usable() { # filter_repo_usable [repo-toplevel]
 
 cmd_remap() {
   local name="" target="" new_name="" new_email="" old_email="" old_name="" remap_file="" force=0
+  # sign: 1 / 0 / "" for "follow the repo's commit.gpgsign".
+  local sign="" sign_key=""
   while [ $# -gt 0 ]; do
+    # --sign takes an OPTIONAL key id, so it is read BEFORE the generic
+    # --opt=value split below: that split would turn "--sign=<key>" into two
+    # arguments and the key would land where the box name is expected.
+    case "$1" in
+      --sign=*)
+        sign=1
+        sign_key="${1#*=}"
+        shift
+        continue
+        ;;
+    esac
     # accept --opt=value as an alias for --opt value (e.g. --name="John Doe")
     case "$1" in
       --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
@@ -401,6 +591,14 @@ cmd_remap() {
       --old-name)
         old_name="$2"
         shift 2
+        ;;
+      --sign)
+        sign=1
+        shift
+        ;;
+      --no-sign)
+        sign=0
+        shift
         ;;
       --force | -f)
         force=1
@@ -430,6 +628,17 @@ cmd_remap() {
     die "'$target' is not a git repo — run this in (or point it at) the repo you fetched into"
   local top
   top=$(git -C "$target" rev-parse --show-toplevel)
+
+  # Signing defaults to what the repo already asks for. A rewrite makes new
+  # commit objects and no signature survives that, so on a repo configured to
+  # sign, NOT re-signing is the surprising outcome, not the safe one.
+  if [ -z "$sign" ]; then
+    if [ "$(git -C "$top" config --bool commit.gpgsign 2>/dev/null || true)" = true ]; then
+      sign=1
+    else
+      sign=0
+    fi
+  fi
 
   # NOTE: the new-identity defaults + "no new author" checks live in the
   # single-pair branch below ONLY. A --remap-file run supplies every identity
@@ -537,6 +746,10 @@ cmd_remap() {
     esac
   fi
 
+  # Ask git to sign one throwaway commit before any ref moves, so a signing setup
+  # that cannot work is a refusal rather than a half-finished rewrite.
+  [ "$sign" = 1 ] && remap_sign_probe "$top" "$sign_key" "${boxrefs[0]}"
+
   # Safety net: snapshot the box refs so the user can undo (git update-ref -d
   # refs/remap-backup/... to discard, or reset a ref back to its backup).
   for r in "${boxrefs[@]}"; do
@@ -591,6 +804,9 @@ cmd_remap() {
      lost. Restore by hand with
        git update-ref refs/remotes/$name/<branch> refs/remap-backup/remotes/$name/<branch>"
   fi
+  # Signing runs on the finished rewrite, and reads the mailmap to decide which
+  # identities it may sign for, so it has to come before the mailmap is dropped.
+  [ "$sign" = 1 ] && { remap_sign_refs "$top" "$mm" "$sign_key" "${boxrefs[@]}" || true; }
   [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
 
   info "Done. Rewritten box branches:"
