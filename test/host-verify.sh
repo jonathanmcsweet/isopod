@@ -121,7 +121,6 @@ else
   fi
 fi
 
-# --- B. offline boxes (the newest code, least proven) ------------------------
 hdr "B. Offline box (--offline)"
 # Prefer whatever runtime this host resolves to. Where the engine cannot put a
 # route on an internal network, create refuses on purpose and names --container:
@@ -231,7 +230,6 @@ else
   bad "offline box failed to create - see /tmp/hv-offline.log (this is the one to send back)"
 fi
 
-# --- B2. neighbour isolation (--guest-inbound, new in 3.10) ------------------
 hdr "B2. Box-to-box isolation on a shared network"
 # Offline boxes share one internal engine network, so with nothing filtering
 # inbound traffic box A can open a connection to box B's sshd. 3.10 loads an nft
@@ -302,7 +300,7 @@ else
   bad "second offline box failed to create - see /tmp/hv-offline2.log"
 fi
 
-# --- C. data volume startup fix (needs a microVM runtime) --------------------
+# --- needs a microVM runtime --------------------
 hdr "C. Data volume mountpoint fix (--disk / --nested-containers)"
 if [ "$HAS_KVM" != 1 ]; then
   skip "microVM tests (no /dev/kvm on this host)"
@@ -347,7 +345,6 @@ else
   fi
 fi
 
-# --- D. identity rewrite (remap) --------------------------------------------
 hdr "D. Identity rewrite (isopod remap)"
 if iso create hv-remap >/tmp/hv-remap.log 2>&1; then
   # The repo has to be AT the workspace root: that is where isopod looks for the
@@ -390,7 +387,7 @@ else
   bad "remap test box failed to create"
 fi
 
-# --- E. upgrade rebase (never exercised against a real engine) ---------------
+# upgrade rebase (never exercised against a real engine) ---------------
 hdr "E. upgrade (rebase path)"
 if iso create hv-upg >/tmp/hv-upg.log 2>&1; then
   TMPD="$(mktemp -d)"
