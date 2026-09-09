@@ -337,3 +337,83 @@ _microvm_runtime_or_skip() {
   assert_failure
   "$ISOPOD_ROOT/isopod" secret rm LIVE_TOKEN
 }
+
+# ---- agents actually install and run inside a real box ----------------------
+# These are the tests that matter for the agent feature: unlike the IDE, which
+# runs on the HOST, an agent binary is fetched on the host and then executed
+# INSIDE the sandbox, so the only proof that works is a real box running it.
+# They download a real release (Codex is around 100MB), so they are opt-in with
+# the rest of the live suite and skip when the network is not there.
+_agent_net_or_skip() {
+  command -v curl >/dev/null 2>&1 || skip "curl is needed to download an agent"
+  curl -fsS --max-time 20 -o /dev/null "$1" 2>/dev/null ||
+    skip "cannot reach $1 (no network, or it is blocking this host)"
+}
+
+@test "live: claude-code installs into a box and runs there" {
+  _agent_net_or_skip "https://downloads.claude.ai/claude-code-releases/latest"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
+  # --attach keeps the session in this process; `-- --version` makes it a
+  # one-shot command instead of an interactive TUI.
+  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  assert_success
+  # The binary is really there, on the box user's PATH, and executable by them.
+  run bssh -- 'PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH" command -v claude'
+  assert_success
+  refute_output ""
+  # It went in as the box user, not root: an agent running as root would leave
+  # config and workspace files the user cannot write.
+  run bssh -- 'stat -c %U "$(PATH=$HOME/.local/bin:$HOME/.claude/bin:$PATH command -v claude)"'
+  assert_success
+  assert_output "dev"
+  # Nothing is left in the staging directory.
+  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  assert_failure
+}
+
+@test "live: a second claude-code run reuses the install and does not refetch" {
+  _agent_net_or_skip "https://downloads.claude.ai/claude-code-releases/latest"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
+  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  assert_success
+  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  assert_success
+  # Presence is the whole check on a later run, so nothing is downloaded again.
+  refute_output --partial "Downloading"
+  refute_output --partial "Installing"
+}
+
+@test "live: codex installs into a box and runs there" {
+  _agent_net_or_skip "https://api.github.com/repos/openai/codex/releases/latest"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
+  run "$ISOPOD_ROOT/isopod" codex "$BOX" --attach -- --version
+  assert_success
+  run bssh -- 'PATH="$HOME/.local/bin:$PATH" command -v codex'
+  assert_success
+  assert_output --partial "/.local/bin/codex"
+  # The static musl build has to actually execute on this glibc box, which is the
+  # whole reason the adapter ignores the box's libc.
+  run bssh -- 'PATH="$HOME/.local/bin:$PATH" codex --version'
+  assert_success
+  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  assert_failure
+}
+
+@test "live: an agent install survives a stop and start" {
+  _agent_net_or_skip "https://api.github.com/repos/openai/codex/releases/latest"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
+  run "$ISOPOD_ROOT/isopod" codex "$BOX" --attach -- --version
+  assert_success
+  "$ISOPOD_ROOT/isopod" stop "$BOX" >/dev/null
+  "$ISOPOD_ROOT/isopod" start "$BOX" >/dev/null
+  # The binary lives in the container layer, not a tmpfs, so it is still there.
+  run bssh -- 'PATH="$HOME/.local/bin:$PATH" codex --version'
+  assert_success
+}
+
+@test "live: an agent refuses to install into an offline box" {
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container --offline >/dev/null
+  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  assert_failure
+  assert_output --partial "offline"
+}
