@@ -271,9 +271,9 @@ doctor_json() {
     checks+=("$(doctor_check_json warn remap "remap backend" "install git-filter-repo or python3")")
   fi
   if have python3; then
-    checks+=("$(doctor_check_json ok python3 "python3 (claude-code, codex)" "present")")
+    checks+=("$(doctor_check_json ok python3 "python3 (agent commands)" "present")")
   else
-    checks+=("$(doctor_check_json warn python3 "python3 (claude-code, codex)" "$(python_install_hint)")")
+    checks+=("$(doctor_check_json warn python3 "python3 (agent commands)" "$(python_install_hint)")")
   fi
   local have_engine=0
   if have podman; then

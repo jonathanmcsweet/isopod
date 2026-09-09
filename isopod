@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.12.1"
+ISOPOD_VERSION="3.13.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -221,12 +221,26 @@ ISOPOD_CODEX_API_URL="${ISOPOD_CODEX_API_URL:-https://api.github.com/repos/opena
 ISOPOD_CODEX_SECRET="${ISOPOD_CODEX_SECRET:-OPENAI_API_KEY}"
 ISOPOD_CODEX_DOMAINS="${ISOPOD_CODEX_DOMAINS:-api.openai.com chatgpt.com}"
 
+# `isopod opencode`: also GitHub releases. No secret by default, because opencode
+# signs itself in with its own provider picker and asks for no key of its own;
+# set ISOPOD_OPENCODE_SECRET to a stored secret name to have one handed in.
+ISOPOD_OPENCODE_API_URL="${ISOPOD_OPENCODE_API_URL:-https://api.github.com/repos/anomalyco/opencode/releases/latest}"
+ISOPOD_OPENCODE_SECRET="${ISOPOD_OPENCODE_SECRET:-}"
+ISOPOD_OPENCODE_DOMAINS="${ISOPOD_OPENCODE_DOMAINS:-opencode.ai models.dev anthropic.com api.openai.com}"
+
+# `isopod pi`: the Pi coding agent, again from GitHub releases, and again no
+# secret by default: it signs in with /login. Its own installer wants npm and
+# Node; isopod takes the release build, which carries its own runtime.
+ISOPOD_PI_API_URL="${ISOPOD_PI_API_URL:-https://api.github.com/repos/earendil-works/pi/releases/latest}"
+ISOPOD_PI_SECRET="${ISOPOD_PI_SECRET:-}"
+ISOPOD_PI_DOMAINS="${ISOPOD_PI_DOMAINS:-pi.dev anthropic.com api.openai.com}"
+
 # ---------------------------------------------------------------------------
 # function modules — sourced from lib/isopod.d/ (order: util first, so die()
 # exists for everything after it). Each defines functions and their globals
 # only; no module runs code at source time.
 # ---------------------------------------------------------------------------
-for _mod in util engine ssh color hardening egress hostport account json runargs secret create transfer agent claude-code-installer codex-installer lifecycle install admin; do
+for _mod in util engine ssh color hardening egress hostport account json runargs secret create transfer agent claude-code-installer codex-installer opencode-installer pi-installer lifecycle install admin; do
   if [ ! -f "$ISOPOD_LIB/isopod.d/$_mod.sh" ]; then
     # raw printf, not die: die() itself lives in the first module
     printf 'error: missing module: %s (is your isopod install complete?)\n' \
@@ -257,6 +271,8 @@ main() {
     shell | sh) cmd_shell "$@" ;;
     claude-code | claude) cmd_claude "$@" ;;
     codex) cmd_codex "$@" ;;
+    opencode) cmd_opencode "$@" ;;
+    pi) cmd_pi "$@" ;;
     root-shell | rootsh) cmd_root_shell "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
     migrate) cmd_migrate "$@" ;;

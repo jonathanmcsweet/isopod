@@ -1082,8 +1082,8 @@ Flatpak users: 'flatpak list | grep -i ${app}' to confirm the app ID is installe
   render_tmpl code-note.txt
 }
 
-# isopod claude-code <box> / isopod codex <box> — run a coding agent in a box.
-# Both are the same command with a different adapter; the work is in agent.sh.
+# isopod claude-code / codex / opencode / pi <box>: run a coding agent in a box.
+# One command with four adapters; the work is in agent.sh.
 cmd_claude() {
   agent_select claude
   agent_run "$@"
@@ -1091,5 +1091,15 @@ cmd_claude() {
 
 cmd_codex() {
   agent_select codex
+  agent_run "$@"
+}
+
+cmd_opencode() {
+  agent_select opencode
+  agent_run "$@"
+}
+
+cmd_pi() {
+  agent_select pi
   agent_run "$@"
 }

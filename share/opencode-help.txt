@@ -1,0 +1,38 @@
+usage: isopod opencode <box> [--app TERMINAL] [--attach] [-- args...]
+
+Run opencode inside a box. Starts the box if it is stopped, installs opencode if
+it is not there yet, then opens a new terminal window with a session in the box's
+workspace, the way 'isopod code' opens an editor window.
+
+  --app <name>   terminal to open (see the list below); ISOPOD_TERMINAL sets a
+                 default. Without either, the first one installed is used.
+  --attach       run in THIS window instead of opening a new one, for a headless
+                 host or when you would rather keep the session where you are.
+  -- args...     passed through to opencode, e.g. -- --help
+
+Terminals isopod knows: ghostty, kitty, wezterm, alacritty, gnome-terminal,
+konsole, foot, xfce4-terminal, xterm. A name that is not on the list is tried as
+a plain command, and a host with no terminal at all falls back to --attach.
+
+isopod downloads the release archive for the box's architecture and checks its
+SHA-256 on your machine, then copies it in over SSH and unpacks it there, so the
+box never fetches or runs an installer. It goes in as the box user, not root, and
+lands in ~/.opencode/bin so 'opencode upgrade' inside the box replaces it. Which
+build a box gets follows the box, not the host: its architecture, its libc, and
+whether its CPU has AVX2 (the x64 build needs it; upstream's baseline build is
+used when it is missing). It is a large download the first time, cached
+afterwards and shared by every box that needs the same build.
+
+isopod installs whatever is newest at that moment and then leaves it alone.
+Updating afterwards is opencode's own job, from inside the box, on your schedule.
+
+Signing in: opencode talks to many providers and keeps its own credentials, so
+isopod asks for nothing and leaves 'opencode auth login' to it. To hand a key in
+anyway, name a stored secret with ISOPOD_OPENCODE_SECRET=OPENAI_API_KEY (any name
+'isopod secret' can store); it reaches the box in memory, out of sight of the
+process list.
+
+On a box using the egress allow-list, isopod prints the hostnames opencode needs
+and leaves your allow-list alone, since that list is shared by every box on this
+host. Offline boxes are refused: the install would work, but opencode could not
+reach a model from a box with no route out.

@@ -2,37 +2,41 @@
 #
 # agent — the shared path for running a coding agent inside a box.
 #
-# Claude Code and Codex are delivered the same way, and the parts worth getting
-# right are the parts they share: fetch on the HOST, verify the digest before
-# anything crosses the boundary, stream it in over the existing SSH channel, then
-# open a session in a new terminal window. Nothing in the box downloads or runs an
+# Every agent is delivered the same way, and the parts worth getting right are
+# the parts they share: fetch on the HOST, verify the digest before anything
+# crosses the boundary, stream it in over the existing SSH channel, then open a
+# session in a new terminal window. Nothing in the box downloads or runs an
 # installer, so the box needs no network for the install and the bytes are checked
 # before they arrive.
 #
 # Per-agent differences live in the adapter modules (claude-code-installer.sh,
-# codex-installer.sh), which each supply two things:
+# codex-installer.sh, opencode-installer.sh, pi-installer.sh), which each supply
+# two things:
 #
-#   <agent>_resolve <arch> <libc>   prints: version TAB sha256 TAB url TAB artifact
+#   <agent>_resolve <arch> <libc> <simd>
+#                                   prints: version TAB sha256 TAB url TAB artifact
+#                                   (an adapter uses only the facts it needs)
 #   <agent>_box_install <artifact>  prints the /bin/sh to run in the box after
 #                                   transfer, which must leave $AGENT_BIN on PATH
 #
 # and set their constants through agent_select below. Everything else is here.
 
 # Set by agent_select; read by the shared functions and by share/agent-egress.txt.
-AGENT=""         # adapter prefix, e.g. "claude"
-AGENT_LABEL=""   # what to call it in messages
-AGENT_BIN=""     # the binary's name inside the box
-AGENT_SECRET=""  # host secret holding its API key
-AGENT_DOMAINS="" # hostnames it needs reachable, space separated
-AGENT_API_KEY="" # filled by agent_ensure_key
+AGENT=""          # adapter prefix, e.g. "claude"
+AGENT_LABEL=""    # what to call it in messages
+AGENT_BIN=""      # the binary's name inside the box
+AGENT_SECRET=""   # host secret holding its API key
+AGENT_DOMAINS=""  # hostnames it needs reachable, space separated
+AGENT_API_KEY=""  # filled by agent_ensure_key
+AGENT_KEY_ASKED=0 # so a fallback to --attach in this process does not ask twice
 AGENT_MISSING_DOMAINS=""
 
-# Where an agent's binary may sit in the box. An installer picks the location and
-# a non-login SSH command sources no shell rc, so both candidates go on PATH
-# rather than being assumed.
-AGENT_BOX_PATH='$HOME/.local/bin:$HOME/.claude/bin:$HOME/bin:$PATH'
+# Where an agent's binary may sit in the box. Each installer picks its own
+# location and a non-login SSH command sources no shell rc, so every candidate
+# goes on PATH rather than being assumed.
+AGENT_BOX_PATH='$HOME/.local/bin:$HOME/.claude/bin:$HOME/.opencode/bin:$HOME/.local/share/pi:$HOME/bin:$PATH'
 
-agent_select() { # agent_select <claude|codex>
+agent_select() { # agent_select <claude|codex|opencode|pi>
   case "$1" in
     claude)
       AGENT=claude
@@ -48,26 +52,49 @@ agent_select() { # agent_select <claude|codex>
       AGENT_SECRET="$ISOPOD_CODEX_SECRET"
       AGENT_DOMAINS="$ISOPOD_CODEX_DOMAINS"
       ;;
+    opencode)
+      AGENT=opencode
+      AGENT_LABEL="opencode"
+      AGENT_BIN=opencode
+      AGENT_SECRET="$ISOPOD_OPENCODE_SECRET"
+      AGENT_DOMAINS="$ISOPOD_OPENCODE_DOMAINS"
+      ;;
+    pi)
+      AGENT=pi
+      AGENT_LABEL="Pi"
+      AGENT_BIN=pi
+      AGENT_SECRET="$ISOPOD_PI_SECRET"
+      AGENT_DOMAINS="$ISOPOD_PI_DOMAINS"
+      ;;
     *) die "unknown agent: $1" ;;
   esac
 }
 
 # Ask the BOX what it is, never the host: isopod runs on macOS and Linux, a box is
-# always Linux, and both sides come in amd64 and arm64. Prints "<arch> <libc>",
-# e.g. "x86_64 glibc". The libc markers are the ones upstream installers use.
-agent_box_facts() { # agent_box_facts <name> -> "<arch> <libc>"
+# always Linux, and both sides come in amd64 and arm64. Prints
+# "<arch> <libc> <simd>", e.g. "x86_64 glibc avx2". The libc markers are the ones
+# upstream installers use; the AVX2 answer is the one opencode's does, because
+# its x64 build needs that instruction set and dies without it. An adapter reads
+# only the facts its own downloads depend on.
+agent_box_facts() { # agent_box_facts <name> -> "<arch> <libc> <simd>"
   local facts
   facts="$(box_ssh "$1" -- 'sh -c '"$(shq '
     a="$(uname -m)"
     if [ -e "/lib/libc.musl-x86_64.so.1" ] || [ -e "/lib/libc.musl-aarch64.so.1" ] ||
        ldd /bin/ls 2>&1 | grep -q musl; then
-      printf "%s musl" "$a"
+      l=musl
     else
-      printf "%s glibc" "$a"
-    fi')" 2>/dev/null)" ||
+      l=glibc
+    fi
+    if grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+      s=avx2
+    else
+      s=noavx2
+    fi
+    printf "%s %s %s" "$a" "$l" "$s"')" 2>/dev/null)" ||
     die "could not read the architecture of box '$1' (is it running?)"
   # This becomes a URL and a cache path, so only plain tokens pass.
-  [[ "$facts" =~ ^[A-Za-z0-9_]+\ (glibc|musl)$ ]] ||
+  [[ "$facts" =~ ^[A-Za-z0-9_]+\ (glibc|musl)\ (avx2|noavx2)$ ]] ||
     die "box '$1' reported an architecture isopod does not recognize: '$(sanitize "$facts")'"
   printf '%s' "$facts"
 }
@@ -114,6 +141,22 @@ agent_fetch_verified() { # agent_fetch_verified <version> <platform> <url> <sha2
   printf '%s' "$cached"
 }
 
+# Three of the four agents ship as a .tar.gz around one binary, and installing it
+# is the same three steps every time. The script runs as `sh -c <script>` with no
+# positional arguments, so every name is substituted in here. The destination
+# directory is isopod's own text and keeps $HOME for the box shell to expand; the
+# archive names come from upstream and are quoted.
+agent_tar_install_script() { # agent_tar_install_script <artifact> <inner> <dir> <name>
+  printf 'set -e
+cd "$HOME/.isopod-agent"
+tar -xzf %s
+[ -f %s ] || { echo "archive did not contain %s" >&2; exit 1; }
+mkdir -p "%s"
+chmod 755 %s
+mv -f %s "%s/%s"' \
+    "$(shq "$1")" "$(shq "$2")" "$2" "$3" "$(shq "$2")" "$(shq "$2")" "$3" "$4"
+}
+
 # Is the agent already in the box? The check is presence, never currency:
 # upgrades belong to the person using the box.
 agent_in_box() { # agent_in_box <name>
@@ -122,12 +165,11 @@ agent_in_box() { # agent_in_box <name>
 
 # Fetch, verify, stream in, verify again, then let the adapter install it.
 agent_ensure_installed() { # agent_ensure_installed <name>
-  local name="$1" facts arch libc resolved ver want url artifact cached script
+  local name="$1" facts arch libc simd resolved ver want url artifact cached script
   agent_in_box "$name" && return 0
   facts="$(agent_box_facts "$name")"
-  arch="${facts%% *}"
-  libc="${facts##* }"
-  resolved="$("${AGENT}_resolve" "$arch" "$libc")" ||
+  read -r arch libc simd <<<"$facts"
+  resolved="$("${AGENT}_resolve" "$arch" "$libc" "$simd")" ||
     die "could not work out which $AGENT_LABEL build this box needs"
   IFS=$'\t' read -r ver want url artifact <<<"$resolved"
   [[ "$want" =~ ^[0-9a-f]{64}$ ]] || die "refusing a $AGENT_LABEL download with no usable checksum"
@@ -152,9 +194,19 @@ agent_ensure_installed() { # agent_ensure_installed <name>
   info "$AGENT_LABEL $ver installed in '$name'"
 }
 
-# Offer to store an API key when there is none. Declining is fine: both agents
-# run their own sign-in, and a subscription login needs no key at all.
+# Offer to store an API key when there is none. Declining is fine: every agent
+# runs its own sign-in, and a subscription login needs no key at all. Asked at
+# most once per run: with no terminal to open, agent_run falls back to --attach
+# in this same process, and a second prompt there looks like the first one failed.
+#
+# An agent with no secret of its own is never asked about one. opencode and Pi
+# sign themselves in, so prompting for a key they did not ask for would name a
+# provider isopod picked rather than the user, and put a key in a box that has no
+# use for it. Setting ISOPOD_OPENCODE_SECRET or ISOPOD_PI_SECRET opts back in.
 agent_ensure_key() {
+  [ -n "$AGENT_SECRET" ] || return 0
+  [ "$AGENT_KEY_ASKED" = 1 ] && return 0
+  AGENT_KEY_ASKED=1
   AGENT_API_KEY=""
   local val
   if val="$(secret_store_get "$AGENT_SECRET" 2>/dev/null)" && [ -n "$val" ]; then

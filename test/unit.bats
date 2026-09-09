@@ -4304,11 +4304,16 @@ ip daddr 1.2.3.4 accept'
 # ---- agents: box facts probe ------------------------------------------------
 # box_ssh is redefined per test so the probe runs against a scripted box. The
 # adapters' own mapping is exercised for real against those facts.
-@test "agent_box_facts refuses an answer that is not arch plus libc" {
+@test "agent_box_facts refuses an answer that is not the facts it asked for" {
   box_ssh() { printf 'x86_64; rm -rf /'; }
   run agent_box_facts demo
   assert_failure
   assert_output --partial "does not recognize"
+  # A short answer is refused too, rather than read as "this box has no AVX2",
+  # which would quietly hand every box the slower build.
+  box_ssh() { printf 'x86_64 glibc'; }
+  run agent_box_facts demo
+  assert_failure
 }
 
 @test "agent_box_facts refuses an empty answer rather than building a URL from it" {
@@ -4318,10 +4323,10 @@ ip daddr 1.2.3.4 accept'
 }
 
 @test "agent_box_facts passes through a well formed answer" {
-  box_ssh() { printf 'aarch64 musl'; }
+  box_ssh() { printf 'aarch64 musl noavx2'; }
   run agent_box_facts demo
   assert_success
-  assert_output "aarch64 musl"
+  assert_output "aarch64 musl noavx2"
 }
 
 # ---- claude-code: platform mapping ------------------------------------------
@@ -4524,6 +4529,33 @@ ip daddr 1.2.3.4 accept'
   agent_select codex
   assert_equal "$AGENT_SECRET" "OPENAI_API_KEY"
   assert_equal "$AGENT_BIN" "codex"
+  # opencode and Pi ask for no key of their own, so isopod has no secret to
+  # offer for them and must not invent one.
+  agent_select opencode
+  assert_equal "$AGENT_BIN" "opencode"
+  assert_equal "$AGENT_LABEL" "opencode"
+  assert_equal "$AGENT_SECRET" ""
+  agent_select pi
+  assert_equal "$AGENT_BIN" "pi"
+  assert_equal "$AGENT_LABEL" "Pi"
+  assert_equal "$AGENT_SECRET" ""
+}
+
+@test "agent_ensure_key asks nothing for an agent that signs itself in" {
+  agent_select pi
+  local asks="$TEST_TMP/asks"
+  : >"$asks"
+  secret_store_get() { echo call >>"$asks"; return 1; }
+  run agent_ensure_key
+  assert_success
+  assert_output ""
+  assert_equal "$(wc -c <"$asks")" "0"
+  assert_equal "$AGENT_API_KEY" ""
+}
+
+@test "naming a secret opts an agent back into the key prompt" {
+  ISOPOD_PI_SECRET=MY_KEY agent_select pi
+  assert_equal "$AGENT_SECRET" "MY_KEY"
 }
 
 @test "agent_select refuses an agent it has no adapter for" {
@@ -4586,7 +4618,7 @@ agent_install_harness() { # agent_install_harness <agent> <body-of-fake-binary>
     while [ \$# -gt 0 ]; do [ \"\$1\" = \"-o\" ] && out=\"\$2\"; shift; done
     printf '%s' $(printf '%q' "$FAKE_BODY") > \"\$out\"
   }"
-  agent_box_facts() { printf 'x86_64 glibc'; }
+  agent_box_facts() { printf 'x86_64 glibc avx2'; }
   # Record every remote command; the last argument is the command string.
   box_ssh() {
     local last=""
@@ -4673,6 +4705,168 @@ agent_install_harness() { # agent_install_harness <agent> <body-of-fake-binary>
   assert_output --partial "$artifact"
   run grep -F '"$HOME/.local/bin/codex"' "$BOX_LOG"
   assert_success
+}
+
+# ---- opencode: which of the many Linux builds a box needs -------------------
+# opencode publishes more Linux artifacts than the other agents, and picking the
+# wrong one is not a clean failure: the x64 build uses AVX2 and dies with an
+# illegal instruction on a CPU without it.
+@test "opencode_asset maps a glibc x86_64 box with AVX2 to the plain x64 build" {
+  run opencode_asset x86_64 glibc avx2
+  assert_success
+  assert_output "opencode-linux-x64.tar.gz"
+}
+
+@test "opencode_asset falls back to the baseline build when the box has no AVX2" {
+  run opencode_asset x86_64 glibc noavx2
+  assert_success
+  assert_output "opencode-linux-x64-baseline.tar.gz"
+}
+
+@test "opencode_asset spells baseline and musl in upstream's order" {
+  run opencode_asset x86_64 musl noavx2
+  assert_output "opencode-linux-x64-baseline-musl.tar.gz"
+  run opencode_asset x86_64 musl avx2
+  assert_output "opencode-linux-x64-musl.tar.gz"
+}
+
+@test "opencode_asset never asks for a baseline arm64 build, which does not exist" {
+  # The AVX2 split is an x86 one; asking for it on arm64 would name an asset
+  # upstream does not publish and fail the resolve.
+  run opencode_asset aarch64 glibc noavx2
+  assert_output "opencode-linux-arm64.tar.gz"
+  run opencode_asset aarch64 musl avx2
+  assert_output "opencode-linux-arm64-musl.tar.gz"
+}
+
+@test "opencode_asset refuses an architecture with no Linux build" {
+  run opencode_asset riscv64 glibc avx2
+  assert_failure
+  assert_output --partial "no Linux build"
+}
+
+# ---- pi ---------------------------------------------------------------------
+@test "pi_asset maps each architecture to its release tarball" {
+  run pi_asset x86_64 glibc
+  assert_success
+  assert_output "pi-linux-x64.tar.gz"
+  run pi_asset aarch64 glibc
+  assert_output "pi-linux-arm64.tar.gz"
+}
+
+@test "pi_asset refuses a musl box, which upstream publishes no build for" {
+  # Pi's Linux binaries link glibc, so an Alpine box gets a clear refusal rather
+  # than a download that cannot run.
+  run pi_asset x86_64 musl
+  assert_failure
+  assert_output --partial "no musl build"
+}
+
+@test "pi_asset refuses an architecture with no Linux build" {
+  run pi_asset s390x glibc
+  assert_failure
+}
+
+# ---- the shared unpack-and-install script -----------------------------------
+@test "agent_tar_install_script moves the archive's binary onto PATH" {
+  run agent_tar_install_script 'a-1.tar.gz' 'a-1' '$HOME/.local/bin' a
+  assert_success
+  assert_output --partial "tar -xzf 'a-1.tar.gz'"
+  assert_output --partial 'mkdir -p "$HOME/.local/bin"'
+  assert_output --partial 'mv -f '"'"'a-1'"'"' "$HOME/.local/bin/a"'
+  # The script runs as `sh -c <script>` with no positional args, so an unexpanded
+  # $1 would silently install nothing.
+  refute_output --partial '"$1"'
+}
+
+@test "opencode_box_install installs where opencode's own upgrade looks" {
+  run opencode_box_install opencode-linux-x64.tar.gz
+  assert_success
+  assert_output --partial "tar -xzf 'opencode-linux-x64.tar.gz'"
+  assert_output --partial 'mkdir -p "$HOME/.opencode/bin"'
+  assert_output --partial 'mv -f '"'"'opencode'"'"' "$HOME/.opencode/bin/opencode"'
+}
+
+# pi reads its themes and a wasm blob from beside the binary, so installing the
+# binary alone gives a pi that starts and dies on the first theme it loads.
+@test "pi_box_install installs the whole directory, not just the binary" {
+  run pi_box_install pi-linux-x64.tar.gz
+  assert_success
+  assert_output --partial "tar -xzf 'pi-linux-x64.tar.gz'"
+  assert_output --partial 'mv -f pi "$HOME/.local/share/pi"'
+  assert_output --partial 'chmod 755 "$HOME/.local/share/pi/pi"'
+  # ~/.pi is pi's own settings directory; the program tree must not land on it,
+  # and the rm that clears an old install must not reach it either.
+  refute_output --partial '"$HOME/.pi"'
+}
+
+@test "the box PATH names every directory an agent installs into" {
+  # A non-login ssh command sources no shell rc, so a directory missing here is
+  # an agent that installs fine and is then reported as not on PATH.
+  [[ "$AGENT_BOX_PATH" == *'$HOME/.local/bin'* ]]
+  [[ "$AGENT_BOX_PATH" == *'$HOME/.claude/bin'* ]]
+  [[ "$AGENT_BOX_PATH" == *'$HOME/.opencode/bin'* ]]
+  [[ "$AGENT_BOX_PATH" == *'$HOME/.local/share/pi'* ]]
+}
+
+# With no terminal to open, agent_run falls back to --attach in this same
+# process. Asking for the key again there reads as the first answer not taking.
+@test "agent_ensure_key asks at most once per run" {
+  agent_select claude
+  ISOPOD_SECRET_BACKEND=file
+  local asks="$TEST_TMP/asks"
+  : >"$asks"
+  secret_store_get() { echo call >>"$asks"; return 1; }
+  agent_ensure_key </dev/null
+  agent_ensure_key </dev/null
+  local n
+  n=$(wc -l <"$asks")
+  [ "$n" -eq 1 ]
+}
+
+@test "agent_ensure_installed runs the pi unpack script in the box" {
+  agent_install_harness pi
+  local artifact="pi-linux-x64.tar.gz"
+  eval "pi_resolve() { printf '%s\t%s\t%s\t%s' 0.85.1 $(printf '%q' "$FAKE_SUM") https://example.invalid/p.tar.gz $(printf '%q' "$artifact"); }"
+  run agent_ensure_installed demo
+  assert_success
+  run grep -F "tar -xzf" "$BOX_LOG"
+  assert_success
+  assert_output --partial "$artifact"
+  run grep -F '"$HOME/.local/share/pi"' "$BOX_LOG"
+  assert_success
+}
+
+@test "agent_ensure_installed asks the opencode adapter for the box's own build" {
+  # The facts the box reported have to reach the adapter, or every box would get
+  # the host's build: the harness box is x86_64 glibc with AVX2.
+  agent_install_harness opencode
+  eval "opencode_resolve() { printf '%s\t%s\t%s\t%s' 1.2.3 $(printf '%q' "$FAKE_SUM") https://example.invalid/o.tar.gz \"opencode-\$1-\$2-\$3.tar.gz\"; }"
+  run agent_ensure_installed demo
+  assert_success
+  # The log holds the install script as box_ssh received it, so match the name
+  # rather than the quoting shq put around it.
+  run grep -F "tar -xzf" "$BOX_LOG"
+  assert_success
+  assert_output --partial "opencode-x86_64-glibc-avx2.tar.gz"
+}
+
+@test "cmd_opencode refuses an offline box and names opencode" {
+  mkdir -p "$(box_dir off)"
+  printf 'engine=podman\nport=2222\noffline=1\n' >"$(box_dir off)/meta"
+  open_box() { :; }
+  run cmd_opencode off
+  assert_failure
+  assert_output --partial "opencode"
+}
+
+@test "cmd_pi refuses an offline box and names Pi" {
+  mkdir -p "$(box_dir off)"
+  printf 'engine=podman\nport=2222\noffline=1\n' >"$(box_dir off)/meta"
+  open_box() { :; }
+  run cmd_pi off
+  assert_failure
+  assert_output --partial "Pi"
 }
 
 # ---- agents: the release-feed helpers ---------------------------------------
@@ -4787,7 +4981,7 @@ JSON
 
 @test "doctor reports python3 as present when it is" {
   run cmd_doctor
-  assert_output --partial "python3 (needed by claude-code, codex)"
+  assert_output --partial "python3 (needed by claude-code, codex, opencode, pi)"
 }
 
 @test "doctor --json carries the python3 check" {
