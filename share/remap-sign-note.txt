@@ -1,0 +1,4 @@
+${c_dim}A forge only shows a signature as verified when the signing key is
+registered on the account the committer email belongs to, on GitHub under
+Settings > SSH and GPG keys, where an SSH key must be added as a SIGNING key
+(an authentication key of the same name does not count).${c_rst}

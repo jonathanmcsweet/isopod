@@ -64,7 +64,7 @@ _isopod() {
       reconfigure) opts="--guest-egress --expose --memory --cpus --color" ;;
       code) opts="--app --reuse-window" ;;
       rm) opts="--force" ;;
-      remap) opts="--name --email --old-email --old-name --remap-file --force" ;;
+      remap) opts="--name --email --old-email --old-name --remap-file --sign --no-sign --force" ;;
       fetch) opts="--path" ;;
     esac
     mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")

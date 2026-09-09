@@ -226,6 +226,10 @@ Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--o
                         'old -> new' lines (e.g. dev@box -> Me <me@real.com>).
                         Overrides the single-pair flags and the default
                         ~/.config/isopod/remap.
+  --sign[=<keyid>]      Sign the rewritten commits, so a forge can show them as
+                        yours. Defaults to the repo's commit.gpgsign; the key
+                        comes from git config unless one is named here.
+  --no-sign             Rewrite the identity without signing.
   --force, -f           Skip the confirmation prompt.
 
 Network egress isolation (host-enforced; an in-box agent cannot turn it off):
