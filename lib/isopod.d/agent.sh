@@ -19,12 +19,12 @@
 # and set their constants through agent_select below. Everything else is here.
 
 # Set by agent_select; read by the shared functions and by share/agent-egress.txt.
-AGENT=""          # adapter prefix, e.g. "claude"
-AGENT_LABEL=""    # what to call it in messages
-AGENT_BIN=""      # the binary's name inside the box
-AGENT_SECRET=""   # host secret holding its API key
-AGENT_DOMAINS=""  # hostnames it needs reachable, space separated
-AGENT_API_KEY=""  # filled by agent_ensure_key
+AGENT=""         # adapter prefix, e.g. "claude"
+AGENT_LABEL=""   # what to call it in messages
+AGENT_BIN=""     # the binary's name inside the box
+AGENT_SECRET=""  # host secret holding its API key
+AGENT_DOMAINS="" # hostnames it needs reachable, space separated
+AGENT_API_KEY="" # filled by agent_ensure_key
 AGENT_MISSING_DOMAINS=""
 
 # Where an agent's binary may sit in the box. An installer picks the location and
