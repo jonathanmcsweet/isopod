@@ -4427,13 +4427,18 @@ ip daddr 1.2.3.4 accept'
   }"
   # Command substitution, not `run`: the caller reads this function's STDOUT as a
   # path, and bats' `run` would merge the progress line on stderr into it.
-  local got
+  local got calls
   got="$(agent_fetch_verified 1.2.3 x86_64-glibc https://example.invalid/x "$sum" claude)"
   assert_equal "$got" "$CACHE_DIR/claude/1.2.3/x86_64-glibc/claude"
-  assert_equal "$(wc -l <"$CURL_CALLS")" "1"
+  # Numeric compare rather than assert_equal: BSD wc pads its count with spaces,
+  # so matching the string "1" passes on Linux and fails on macOS.
+  calls=$(wc -l <"$CURL_CALLS")
+  [ "$calls" -eq 1 ]
+  # A second call is served from the cache, so the count must not move.
   got="$(agent_fetch_verified 1.2.3 x86_64-glibc https://example.invalid/x "$sum" claude)"
   assert_equal "$got" "$CACHE_DIR/claude/1.2.3/x86_64-glibc/claude"
-  assert_equal "$(wc -l <"$CURL_CALLS")" "1"
+  calls=$(wc -l <"$CURL_CALLS")
+  [ "$calls" -eq 1 ]
 }
 
 @test "claude_latest_version refuses a version string that is not one" {
