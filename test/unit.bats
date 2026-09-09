@@ -1845,6 +1845,189 @@ author <box@isopod> 1700000000 +0000
   assert_output "author Me <me@host> 1700000000 +0000"
 }
 
+# ---- remap --sign: the rewritten commits carry a signature -------------------
+# A rewrite makes new commit objects, so no signature can survive it and every
+# remapped commit used to arrive unsigned, which is what a forge reports as
+# unverified under the identity the remap just wrote.
+
+@test "remap_signable_emails takes the new-side email of each mailmap rule" {
+  local mm="$TEST_TMP/mm"
+  printf 'Real Name <ME@Real.com> Box <dev@box>\n<me@real.com> <dev@box2>\nOther <you@real.com> <dev@box3>\n' >"$mm"
+  run remap_signable_emails "$mm"
+  # Folded to lower case and deduped: a forge matches the committer case-blind.
+  assert_line --index 0 'me@real.com'
+  assert_line --index 1 'you@real.com'
+  assert_equal "${#lines[@]}" 2
+}
+
+@test "remap_split_ident splits an identity the way git does" {
+  remap_split_ident 'Box Agent <box@isopod> 1700000000 +0000'
+  assert_equal "$REMAP_IDENT_NAME" "Box Agent"
+  assert_equal "$REMAP_IDENT_EMAIL" "box@isopod"
+  assert_equal "$REMAP_IDENT_DATE" "1700000000 +0000"
+  # No name at all: the form a box can write directly, and the one a pattern
+  # needing " <" skips.
+  remap_split_ident '<box@isopod> 1700000000 +0000'
+  assert_equal "$REMAP_IDENT_NAME" ""
+  assert_equal "$REMAP_IDENT_EMAIL" "box@isopod"
+  # Two bracket pairs: git takes the FIRST, so a name cannot steer the email.
+  remap_split_ident 'A <box@isopod> <keep@evil.example> 1700000000 +0000'
+  assert_equal "$REMAP_IDENT_EMAIL" "box@isopod"
+  run remap_split_ident 'no brackets here'
+  assert_failure
+}
+
+# A repo shaped like one you would run remap in: an upstream ref, a teammate's
+# commit, a box commit, and a box branch under refs/remotes/demo/. Signing is
+# wired up with SSH rather than GPG because it needs no keyring, no agent and no
+# passphrase, so it behaves the same on any host running the suite.
+mk_remap_repo() { # mk_remap_repo -> echoes the repo path
+  local r="$TEST_TMP/repo"
+  git init -q "$r"
+  git -C "$r" config user.name "Real Name"
+  git -C "$r" config user.email me@real.com
+  git -C "$r" config commit.gpgsign false
+  ssh-keygen -q -t ed25519 -N '' -f "$TEST_TMP/sk" </dev/null
+  git -C "$r" config gpg.format ssh
+  git -C "$r" config user.signingkey "$TEST_TMP/sk.pub"
+  printf 'me@real.com %s\n' "$(cat "$TEST_TMP/sk.pub")" >"$TEST_TMP/allowed"
+  git -C "$r" config gpg.ssh.allowedSignersFile "$TEST_TMP/allowed"
+  git -C "$r" commit -q --allow-empty -m upstream
+  git -C "$r" update-ref refs/remotes/origin/main HEAD
+  env GIT_AUTHOR_NAME=Mate GIT_AUTHOR_EMAIL=mate@corp \
+    GIT_COMMITTER_NAME=Mate GIT_COMMITTER_EMAIL=mate@corp \
+    git -C "$r" commit -q --allow-empty -m "teammate work"
+  env GIT_AUTHOR_NAME="Box Dev" GIT_AUTHOR_EMAIL=dev@box \
+    GIT_COMMITTER_NAME="Box Dev" GIT_COMMITTER_EMAIL=dev@box \
+    git -C "$r" commit -q --allow-empty -m "box work"
+  git -C "$r" update-ref refs/remotes/demo/main HEAD
+  git -C "$r" checkout -q --detach
+  git -C "$r" branch -D master >/dev/null 2>&1 || git -C "$r" branch -D main >/dev/null 2>&1 || true
+  # ssh-keygen predating -Y sign, or a git built without it, cannot sign at all;
+  # skip rather than report the platform's limit as isopod's bug.
+  git -C "$r" commit-tree -S -m probe 'HEAD^{tree}' >/dev/null 2>&1 ||
+    skip "git cannot make an ssh signature here"
+  printf '%s' "$r"
+}
+
+@test "remap --sign signs the commits it rewrote, and only those" {
+  local r up
+  r="$(mk_remap_repo)"
+  up="$(git -C "$r" rev-parse refs/remotes/origin/main)"
+  run cmd_remap demo "$r" --old-email dev@box --name "Real Name" --email me@real.com --sign --force
+  assert_success
+  assert_output --partial "Signed 1 of 1"
+  # A good signature over the rewritten commit, checked against the key the repo
+  # names, which is the property the whole feature exists for.
+  run git -C "$r" log --format='%G? %cn <%ce>' refs/remotes/demo/main
+  assert_line --index 0 'G Real Name <me@real.com>'
+  # The teammate's commit is not the remap's to touch: same SHA, still unsigned.
+  assert_line --index 1 'N Mate <mate@corp>'
+  # And the commit shared with origin keeps its SHA, or the branch would detach
+  # from upstream.
+  assert_equal "$(git -C "$r" rev-parse 'refs/remotes/demo/main~2')" "$up"
+  assert_equal "$(git -C "$r" rev-parse refs/remotes/origin/main)" "$up"
+}
+
+@test "remap --sign keeps the author and committer dates verbatim" {
+  local r before after
+  r="$(mk_remap_repo)"
+  before="$(git -C "$r" log -1 --format='%ad %cd' --date=raw refs/remotes/demo/main)"
+  run cmd_remap demo "$r" --old-email dev@box --name "Real Name" --email me@real.com --sign --force
+  assert_success
+  after="$(git -C "$r" log -1 --format='%ad %cd' --date=raw refs/remotes/demo/main)"
+  assert_equal "$after" "$before"
+}
+
+# A commit sitting on top of a rewritten one has to be rebuilt (its parent
+# moved), but signing it would put the host's key on someone else's commit, which
+# a forge reports as a mismatch rather than as verification.
+@test "remap --sign rebuilds a teammate's later commit without signing it" {
+  local r
+  r="$(mk_remap_repo)"
+  env GIT_AUTHOR_NAME=Mate GIT_AUTHOR_EMAIL=mate@corp \
+    GIT_COMMITTER_NAME=Mate GIT_COMMITTER_EMAIL=mate@corp \
+    git -C "$r" commit -q --allow-empty -m "teammate on top" refs/remotes/demo/main 2>/dev/null ||
+    git -C "$r" update-ref refs/remotes/demo/main "$(env GIT_AUTHOR_NAME=Mate GIT_AUTHOR_EMAIL=mate@corp \
+      GIT_COMMITTER_NAME=Mate GIT_COMMITTER_EMAIL=mate@corp \
+      git -C "$r" commit-tree -p refs/remotes/demo/main -m "teammate on top" \
+      'refs/remotes/demo/main^{tree}')"
+  run cmd_remap demo "$r" --old-email dev@box --name "Real Name" --email me@real.com --sign --force
+  assert_success
+  assert_output --partial "Signed 1 of 2"
+  run git -C "$r" log --format='%G? %ce' refs/remotes/demo/main
+  assert_line --index 0 'N mate@corp'
+  assert_line --index 1 'G me@real.com'
+}
+
+@test "remap signs by default when the repo asks for signed commits" {
+  local r
+  r="$(mk_remap_repo)"
+  git -C "$r" config commit.gpgsign true
+  run cmd_remap demo "$r" --old-email dev@box --name "Real Name" --email me@real.com --force
+  assert_success
+  assert_output --partial "Signed 1 of 1"
+}
+
+@test "remap --no-sign overrides the repo's commit.gpgsign" {
+  local r
+  r="$(mk_remap_repo)"
+  git -C "$r" config commit.gpgsign true
+  run cmd_remap demo "$r" --old-email dev@box --name "Real Name" --email me@real.com --no-sign --force
+  assert_success
+  refute_output --partial "Signed"
+  run git -C "$r" log -1 --format='%G?' refs/remotes/demo/main
+  assert_output 'N'
+}
+
+@test "remap leaves commits unsigned when nothing asks for a signature" {
+  local r
+  r="$(mk_remap_repo)"
+  run cmd_remap demo "$r" --old-email dev@box --name "Real Name" --email me@real.com --force
+  assert_success
+  refute_output --partial "Signed"
+}
+
+# The whole point of probing first: a signing setup that cannot work must stop
+# the run BEFORE any ref moves, not halfway through a rewrite.
+@test "remap --sign refuses before rewriting when signing cannot work" {
+  local r before
+  r="$(mk_remap_repo)"
+  git -C "$r" config user.signingkey "$TEST_TMP/no-such-key.pub"
+  before="$(git -C "$r" rev-parse refs/remotes/demo/main)"
+  run cmd_remap demo "$r" --old-email dev@box --name "Real Name" --email me@real.com --sign --force
+  assert_failure
+  assert_output --partial "cannot sign"
+  assert_output --partial "--no-sign"
+  assert_equal "$(git -C "$r" rev-parse refs/remotes/demo/main)" "$before"
+  # Not even a backup ref: the refusal comes before the rewrite starts.
+  run git -C "$r" for-each-ref refs/remap-backup/
+  assert_output ''
+}
+
+@test "the signing probe leaves no object behind in the repo" {
+  local r before
+  r="$(mk_remap_repo)"
+  before="$(find "$r/.git/objects" -type f | wc -l)"
+  remap_sign_probe "$r" "" refs/remotes/demo/main
+  assert_equal "$(find "$r/.git/objects" -type f | wc -l)" "$before"
+}
+
+@test "remap --sign=<key> signs with the key it names" {
+  local r
+  r="$(mk_remap_repo)"
+  ssh-keygen -q -t ed25519 -N '' -f "$TEST_TMP/other" </dev/null
+  printf 'me@real.com %s\n' "$(cat "$TEST_TMP/other.pub")" >"$TEST_TMP/allowed"
+  # The repo still names the FIRST key, so a good signature here can only come
+  # from the key passed on the command line. It is given the way git wants an ssh
+  # signing key: the path to the key, not the key material.
+  run cmd_remap demo "$r" --old-email dev@box --name "Real Name" --email me@real.com \
+    "--sign=$TEST_TMP/other.pub" --force
+  assert_success
+  run git -C "$r" log -1 --format='%G?' refs/remotes/demo/main
+  assert_output 'G'
+}
+
 # ---- entrypoint: iso_mkdir_safe (CWE-59) --------------------------------------
 # mkdir -p follows symlinks in INTERMEDIATE components, and with
 # --nested-containers the data volume mountpoint sits under the box user's own
