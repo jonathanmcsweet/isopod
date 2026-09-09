@@ -205,8 +205,10 @@ agent_egress_note() { # agent_egress_note <name>
     printf '%s\n' "$allowed" | grep -qxF "$d" || missing="$missing $d"
   done
   [ -n "$missing" ] || return 0
+  # Read by share/agent-egress.txt at render time, which shellcheck cannot see.
+  # shellcheck disable=SC2034
   AGENT_MISSING_DOMAINS="${missing# }"
-  # $name and $AGENT_* are read by the template through bash dynamic scope.
+  # $name and $AGENT_* reach the template through bash dynamic scope.
   render_tmpl agent-egress.txt >&2
 }
 
