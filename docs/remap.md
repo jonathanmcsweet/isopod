@@ -107,6 +107,68 @@ wins; the default file is skipped if you pass any of
 - **Dates preserved** — author and committer timestamps are kept verbatim.
 - **Messages preserved** — including any identity-looking text inside a commit
   body (the rewrite is data-block aware, not a blind line replacement).
+- **Signatures cannot be preserved**: a rewrite makes new commit objects, so any
+  signature the originals carried is gone. remap re-signs instead; see
+  [Signing](#signing-why-remapped-commits-show-as-unverified).
+
+## Signing: why remapped commits show as unverified
+
+A rewrite creates **new commit objects**, and no signature can survive that: a
+signature covers the object it was made over. Both backends drop the old one
+(`fast-export` never emits it; `git-filter-repo` strips it), so before this
+existed every remapped commit arrived unsigned. On GitHub that means no
+**Verified** badge, and with
+[vigilant mode](https://docs.github.com/authentication/managing-commit-signature-verification/displaying-verification-statuses-for-all-of-your-commits)
+on, an explicit **Unverified**, under the identity the remap just wrote.
+
+So remap signs what it rewrites:
+
+```sh
+isopod remap myproj --sign               # sign with the key git config names
+isopod remap myproj --sign=ABC123        # ... or with a specific key
+isopod remap myproj --no-sign            # rewrite the identity, sign nothing
+```
+
+Without either flag, remap follows the repo's own `commit.gpgsign`, so a repo
+configured to sign gets signed commits out of a remap, the same as out of a
+`git commit`. The key, its format (`gpg`, `ssh`, `x509`) and any agent come from
+your git config; isopod runs `git commit-tree -S` and configures nothing itself.
+
+Before touching a single ref, remap asks git to sign one throwaway commit. If
+signing cannot work (no key configured, `gpg.format=ssh` with no
+`user.signingkey`, a locked smartcard), you get that error and an untouched
+history, not a half-finished rewrite.
+
+**What gets signed.** Only the commits the rewrite created, and of those, only
+the ones whose **committer** is an identity the remap wrote. Two boundaries, both
+deliberate:
+
+- A commit reachable from any other ref (a local branch, a tag, `origin/*`, or
+  this run's own `refs/remap-backup/*`) already exists elsewhere, so re-signing
+  it would give it a new SHA and detach it from there. Signing never widens
+  what the rewrite touched.
+- A forge checks a signature against the committer. Putting your key on a
+  teammate's commit reads as a mismatch, not as verification. Such a commit is
+  still rebuilt when it sits on top of a rewritten one (its parent moved), just
+  left unsigned.
+
+**A signature is not a badge.** The forge shows *Verified* only when the key is
+registered on the account that owns the committer email: on GitHub under
+*Settings > SSH and GPG keys*, an SSH key has to be added as a **signing** key
+even if the same key is already there for authentication.
+
+Check what you got before pushing:
+
+```sh
+git log --format='%h %G? %GS  %cn <%ce>' refs/remotes/myproj/main
+```
+
+`G` is a good signature. `N` means unsigned, and under SSH signing it also
+covers a `gpg.ssh.allowedSignersFile` you have not configured locally, which
+affects only what your own `git log` can check, not what the forge sees.
+
+> A merge of a signed tag carries the tag inside the commit (`mergetag`). That
+> header does not survive the rebuild, and remap says so when it happens.
 
 ## Undo
 
