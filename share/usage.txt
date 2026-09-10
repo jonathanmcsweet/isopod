@@ -8,6 +8,8 @@ Usage:
   isopod shell <name> [-- cmd...]     Open a shell (or run cmd) inside the sandbox
   isopod claude-code <name>           Run Claude Code in the sandbox, in a new terminal
   isopod codex <name>                 Run Codex in the sandbox, in a new terminal
+  isopod opencode <name>              Run opencode in the sandbox, in a new terminal
+  isopod pi <name>                    Run the Pi agent in the sandbox, in a new terminal
   isopod root-shell <name> [-- cmd]   Administrative root shell (host-held key)
                                       --print-ssh-config emits an IDE entry for it
   isopod upgrade <name> [--in-place]  Rebuild the box onto the current image

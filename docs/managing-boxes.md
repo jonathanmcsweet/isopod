@@ -45,36 +45,55 @@ isopod install <name> jq ripgrep    # runs the box's package manager as root, fr
 
 Two caveats. Installs are **ephemeral** — a fresh `create` starts without them (`reconfigure` snapshots the box, so they survive *that*). For a dependency you always need, bake it into a [`--dockerfile`](#customizing-the-container) instead. And `isopod install` needs a **container** box: the engine can't exec into a microVM guest, so on a microVM runtime add the package with `--dockerfile` and recreate.
 
-## Running a coding agent in a box (`isopod claude-code`, `isopod codex`)
+## Running a coding agent in a box (`claude-code`, `codex`, `opencode`, `pi`)
 
 ```sh
 isopod claude-code myproj              # new terminal window, session in the box
 isopod codex myproj                    # the same, with Codex
+isopod opencode myproj                 # ... with opencode
+isopod pi myproj                       # ... with the Pi agent
 isopod claude-code myproj --app kitty  # pick the terminal
 isopod codex myproj --attach           # run in this window instead
 ```
 
-Both commands work the same way. The first run puts the agent in the box, later
-runs just open a session. isopod downloads the build matching the box's own
+All four commands work the same way. The first run puts the agent in the box,
+later runs just open a session. isopod downloads the build matching the box's own
 architecture, checks its SHA-256 on your machine, then copies it in over SSH, so
 the box never fetches or runs an installer and needs no network for the install
 itself. It goes in as the box user, not root.
+
+The build follows the box, not the host, and "the box" means more than its
+architecture: its libc (a musl box gets a musl build) and, for opencode's x64
+builds, whether its CPU has AVX2. The ordinary build uses it and dies with an
+illegal instruction without it, so a box that lacks it gets upstream's baseline
+build. Pi publishes no musl build, so a musl box is refused rather than handed
+something it cannot run.
 
 isopod installs whatever is newest at that moment and then leaves it alone.
 Updating afterwards is the agent's own job, from inside the box, on your
 schedule.
 
-The first time, isopod offers to store an API key (`ANTHROPIC_API_KEY` for Claude
-Code, `OPENAI_API_KEY` for Codex), which it keeps in your host keychain and hands
-to the box in memory rather than on a command line. Press enter to skip that and
-sign in the agent's own way instead. A stored key is shared by every box; change
-it with `isopod secret set <NAME>`.
+Claude Code and Codex want an API key, so the first run offers to store one,
+which isopod keeps in your host keychain and hands to the box in memory rather
+than on a command line. Press enter to skip that and let the agent sign you in
+its own way. A stored key is shared by every box; change it with `isopod secret
+set <NAME>`.
+
+| command | key it offers | hostnames it names for an allow-list box |
+| --- | --- | --- |
+| `claude-code` | `ANTHROPIC_API_KEY` | `anthropic.com`, `downloads.claude.ai` |
+| `codex` | `OPENAI_API_KEY` | `api.openai.com`, `chatgpt.com` |
+| `opencode` | none | `opencode.ai`, `models.dev`, `anthropic.com`, `api.openai.com` |
+| `pi` | none | `pi.dev`, `anthropic.com`, `api.openai.com` |
+
+opencode and Pi ask for no key of their own, so neither does isopod: they sign in
+with `opencode auth login` and `/login`, which take whichever provider or
+subscription you have. To hand one a stored key anyway, name it in
+`ISOPOD_OPENCODE_SECRET` or `ISOPOD_PI_SECRET`. GitHub is where three of the four
+fetch releases and updates, and the shipped baseline already allows it.
 
 On a box using the egress allow-list, isopod prints the hostnames the agent needs
 and leaves your allow-list alone, since one list covers every box on the host.
-Claude Code needs `anthropic.com` and `downloads.claude.ai`; Codex needs
-`api.openai.com` and `chatgpt.com`, and it updates itself from GitHub, which the
-shipped baseline already allows.
 
 ```sh
 isopod egress allow anthropic.com
@@ -83,9 +102,18 @@ isopod egress allow anthropic.com
 Offline boxes are refused. Copying the binary in would work, but it would have
 nothing to talk to.
 
-Codex is a large first download, around 100 MB compressed, cached afterwards and
-shared by every box of the same architecture. Its Linux builds are static, so one
-of them serves a Debian box and an Alpine box alike.
+These are large first downloads, 40 to 100 MB compressed, cached afterwards and
+shared by every box that needs the same build. Codex's Linux builds are static,
+so one of them serves a Debian box and an Alpine box alike; Pi's carry their own
+Node runtime, so a box needs neither npm nor Node to run it.
+
+Upgrades stay with the box: `claude` and `opencode` update themselves in place
+(opencode goes into `~/.opencode/bin`, where its own upgrade looks). Pi's `pi
+update` expects the npm install it did not get, so upgrade it by removing
+`~/.local/share/pi` in the box and running `isopod pi <box>` again. Pi is
+installed as a whole directory because it reads its themes from beside the
+binary; its settings live in `~/.pi` and neither install nor upgrade touches
+them.
 
 ## Reaching a server in the box (port forwarding)
 

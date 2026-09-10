@@ -269,9 +269,9 @@ cmd_doctor() {
   # checked before anything goes into a box. Arch and a minimal Debian ship
   # without it, so name the package rather than just the binary.
   if have python3; then
-    printf '  [ok]      python3 (needed by claude-code, codex)\n'
+    printf '  [ok]      python3 (needed by claude-code, codex, opencode, pi)\n'
   else
-    printf '  [warn]    python3 not found — isopod claude-code/codex need it to verify their download\n'
+    printf '  [warn]    python3 not found, and the isopod agent commands need it to verify their download\n'
     printf '            %s\n' "$(python_install_hint)"
   fi
   if have podman; then

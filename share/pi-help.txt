@@ -1,0 +1,39 @@
+usage: isopod pi <box> [--app TERMINAL] [--attach] [-- args...]
+
+Run the Pi coding agent inside a box. Starts the box if it is stopped, installs
+Pi if it is not there yet, then opens a new terminal window with a session in the
+box's workspace, the way 'isopod code' opens an editor window.
+
+  --app <name>   terminal to open (see the list below); ISOPOD_TERMINAL sets a
+                 default. Without either, the first one installed is used.
+  --attach       run in THIS window instead of opening a new one, for a headless
+                 host or when you would rather keep the session where you are.
+  -- args...     passed through to pi, e.g. -- --help
+
+Terminals isopod knows: ghostty, kitty, wezterm, alacritty, gnome-terminal,
+konsole, foot, xfce4-terminal, xterm. A name that is not on the list is tried as
+a plain command, and a host with no terminal at all falls back to --attach.
+
+isopod downloads the release archive for the box's architecture and checks its
+SHA-256 on your machine, then copies it in over SSH and unpacks it there, so the
+box never fetches or runs an installer. It goes in as the box user, not root,
+into ~/.local/share/pi: pi reads its themes from beside the binary, so the whole
+directory is installed. Upstream's installer wants npm and Node 22; the build
+isopod installs carries its own runtime, so the box needs neither. Those builds
+link glibc, so a musl box (Alpine) is refused. It is a large download the first
+time, cached afterwards and shared by every box of the same architecture.
+
+isopod installs whatever is newest at that moment and then leaves it alone. 'pi
+update' expects the npm install it did not get, so upgrade by removing the
+install ('rm -rf ~/.local/share/pi' in the box) and running 'isopod pi <box>'
+again. Your settings live in ~/.pi and are untouched by either.
+
+Signing in: Pi signs itself in with '/login', which takes a Claude, ChatGPT or
+Copilot subscription, so isopod asks for nothing. To hand a key in anyway, name a
+stored secret with ISOPOD_PI_SECRET=ANTHROPIC_API_KEY (any name 'isopod secret'
+can store); it reaches the box in memory, out of sight of the process list.
+
+On a box using the egress allow-list, isopod prints the hostnames Pi needs and
+leaves your allow-list alone, since that list is shared by every box on this
+host. Offline boxes are refused: the install would work, but Pi could not reach a
+model from a box with no route out.
