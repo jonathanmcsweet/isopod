@@ -576,10 +576,10 @@ print(m.seq_end(b'\x1b', 0))
   run topbar_py "
 s = m.Scanner()
 print(s.feed(b'text\x1b[2'))   # ends mid-sequence: not safe to inject
-print(s.feed(b'J'))            # completes it: damaging, and now safe
+print(s.feed(b'J'))            # completes it: an erase, and now safe
 "
-  assert_line --index 0 '(False, False)'
-  assert_line --index 1 '(True, True)'
+  assert_line --index 0 "(None, False)"
+  assert_line --index 1 "('erase', True)"
 }
 
 @test "a UTF-8 character split across reads is never painted into" {
@@ -588,27 +588,46 @@ s = m.Scanner()
 print(s.feed('日'.encode()[:2]))
 print(s.feed('日'.encode()[2:]))
 "
-  assert_line --index 0 '(False, False)'
-  assert_line --index 1 '(False, True)'
+  assert_line --index 0 "(None, False)"
+  assert_line --index 1 "(None, True)"
 }
 
-@test "the scanner recognizes what undoes the reserved row" {
+# Which repaint a sequence earns is the difference between a session that reads
+# normally and one whose output is thrown back to the top of the screen: an erase
+# only scrubbed the bar off, so the cursor can be put back, while a reset has to
+# rebuild the arrangement and cannot.
+@test "sequences that rebuild the arrangement are told from ones that only erase" {
   run topbar_py "
-for seq in (b'\x1bc', b'\x1b[r', b'\x1b[2;24r', b'\x1b[!p', b'\x1b[2J', b'\x1b[3J',
+for seq in (b'\x1bc', b'\x1b[r', b'\x1b[2;24r', b'\x1b[!p',
             b'\x1b[?1049h', b'\x1b[?1049l', b'\x1b[?47h', b'\x1b[?6l',
             b'\x1b[?25l;6h'):
-    print(m.damaging(seq))
+    assert m.damage_kind(seq) == 'reset', seq
+for seq in (b'\x1b[2J', b'\x1b[3J', b'\x1b[?2J'):
+    assert m.damage_kind(seq) == 'erase', seq
+print('ok')
 "
-  refute_output --partial 'False'
+  assert_output 'ok'
 }
 
 @test "the scanner leaves ordinary sequences alone" {
   run topbar_py "
 for seq in (b'\x1b[0m', b'\x1b[1;1H', b'\x1b[K', b'\x1b[?25l', b'\x1b[38;2;1;2;3m',
-            b'\x1b]0;title\x07', b'\x1b7'):
-    print(m.damaging(seq))
+            b'\x1b]0;title\x07', b'\x1b7', b'\x1b[0J', b'\x1b[1J'):
+    assert m.damage_kind(seq) is None, seq
+print('ok')
 "
-  refute_output --partial 'True'
+  assert_output 'ok'
+}
+
+# A reset seen alongside an erase in the same read has to win, or the arrangement
+# is never rebuilt.
+@test "a reset outranks an erase in the same read" {
+  run topbar_py "
+s = m.Scanner()
+print(s.feed(b'\x1b[2J\x1b[?1049h')[0])
+print(m.Scanner().feed(b'\x1b[?1049h\x1b[2J')[0])
+"
+  assert_output $'reset\nreset'
 }
 
 # The width matters: a bar short of the terminal leaves a gap, and one over it
@@ -626,6 +645,60 @@ print(len(plain(m.bar_line('a-very-long-box-name - Claude Code', (1, 2, 3), 12))
   assert_line --index 1 'True'
   assert_line --index 2 '20'
   assert_line --index 3 '12'
+}
+
+# A resize is the case that went visibly wrong first: the size was captured once
+# at startup, so after the window changed, every repaint drew a bar sized for the
+# old width, which wrapped onto the row below and left fragments of bar down the
+# screen. The size is read at each paint now, and SIGWINCH wakes the relay
+# through a self-pipe rather than waiting for the agent to write something.
+@test "topbar repaints at the new size when the window is resized" {
+  python3 "$ISOPOD_ROOT/test/ptyrun.py" 24 80 --resize 30x40 \
+    python3 "$(TOPBAR)" 'demo - Codex' '#c2410c' -- sh -c 'sleep 3' >"$TEST_TMP/resize.raw"
+  # A bar drawn at each width, never one wider than the terminal it went into,
+  # and a scroll region that ended up following the new height.
+  run topbar_py "
+import re
+out = open('$TEST_TMP/resize.raw', 'rb').read()
+bars = re.findall(rb'\x1b\\[1;1H\x1b\\[48;2;194;65;12m\x1b\\[38;2;\d+;\d+;\d+m\x1b\\[1m(.*?)\x1b\\[0m', out, re.S)
+widths = [len(b) for b in bars]
+regions = [r.decode() for r in re.findall(rb'\x1b\\[2;(\d+)r', out)]
+assert 80 in widths and 40 in widths, widths
+assert widths.index(40) > widths.index(80), widths
+assert regions[-1] == '30', regions
+print('ok')
+"
+  assert_output 'ok'
+}
+
+@test "the bar cannot spill onto the row below it" {
+  # A bar exactly as wide as the terminal leaves the cursor past the last column,
+  # and terminals differ on when that becomes a wrap, so autowrap is off for the
+  # write and back on straight after.
+  run python3 "$ISOPOD_ROOT/test/ptyrun.py" 24 40 \
+    python3 "$(TOPBAR)" 'demo' '#c2410c' -- true
+  assert_output --partial $'\033[?7l'
+  assert_output --partial $'\033[?7h'
+}
+
+# The defect this exists to prevent: a repaint that homes the cursor throws the
+# agent's next output to the top of the region, interleaving it with whatever was
+# already on screen. After an erase the repaint must put the cursor back.
+@test "an erase mid-session does not move the agent's cursor" {
+  python3 "$ISOPOD_ROOT/test/ptyrun.py" 24 40 \
+    python3 "$(TOPBAR)" 'demo' '#c2410c' -- python3 -c "
+import sys, time
+w = sys.stdout.write
+w('hello'); sys.stdout.flush(); time.sleep(0.15)
+w('\x1b[2J'); sys.stdout.flush(); time.sleep(0.15)
+w('still-here'); sys.stdout.flush(); time.sleep(0.15)
+" >"$TEST_TMP/erase.raw"
+  run cat "$TEST_TMP/erase.raw"
+  # the repaint after the erase is bracketed by save/restore ...
+  assert_output --partial $'\033[2J\0337'
+  assert_output --partial $'\033[?7h\0338still-here'
+  # ... and does not rebuild the arrangement, which would move the cursor
+  refute_output --partial $'\033[?7h\033[2;24r\0338'
 }
 
 # ---- topbar.py: mouse reports ------------------------------------------------

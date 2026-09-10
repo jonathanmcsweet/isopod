@@ -88,24 +88,32 @@ def seq_end(data, i):
     return j + 1  # two-byte sequence, e.g. ESC c or ESC 7
 
 
-def damaging(seq):
-    """Does this sequence move the command onto the bar row, or erase it?"""
+def damage_kind(seq):
+    """'reset' if this undoes the arrangement, 'erase' if it only wipes the bar.
+
+    The distinction decides whether the repaint may preserve the cursor. An erase
+    leaves origin mode and the margins alone, so the bar can be redrawn and the
+    cursor put back exactly. A reset does not, and rebuilding the arrangement
+    moves the cursor whatever we do.
+    """
     if seq == b"\x1bc":  # RIS, a full reset
-        return True
+        return "reset"
     if not seq.startswith(b"\x1b["):
-        return False
+        return None
     params, final = seq[2:-1], seq[-1:]
     if final == b"r":  # a scroll region of the command's own
-        return True
+        return "reset"
     if final == b"p" and params.endswith(b"!"):  # DECSTR, a soft reset
-        return True
-    if final == b"J" and params.lstrip(b"?") in (b"2", b"3"):  # erase all
-        return True
+        return "reset"
     if final in (b"h", b"l") and params.startswith(b"?"):
         # 6 is origin mode; 47/1047/1049 switch screens, which re-homes things.
         modes = params[1:].split(b";")
-        return any(m in (b"6", b"47", b"1047", b"1049") for m in modes)
-    return False
+        if any(m in (b"6", b"47", b"1047", b"1049") for m in modes):
+            return "reset"
+        return None
+    if final == b"J" and params.lstrip(b"?") in (b"2", b"3"):  # erase all
+        return "erase"
+    return None
 
 
 def utf8_cut(data):
@@ -127,9 +135,10 @@ class Scanner:
         self.tail = b""
 
     def feed(self, data):
-        """Returns (damaged, safe_to_inject) for everything fed so far."""
+        """Returns (kind, safe_to_inject): the strongest damage seen, and whether
+        the stream currently ends at a boundary a repaint may be written at."""
         buf = self.tail + data
-        damaged = False
+        kind = None
         i = 0
         while i < len(buf):
             if buf[i] != ESC:
@@ -138,12 +147,13 @@ class Scanner:
             end = seq_end(buf, i)
             if end is None:  # cut off: hold it and wait for the rest
                 self.tail = buf[i:]
-                return damaged, False
-            if damaging(bytes(buf[i:end])):
-                damaged = True
+                return kind, False
+            seen = damage_kind(bytes(buf[i:end]))
+            if seen == "reset" or (seen and kind is None):
+                kind = seen
             i = end
         self.tail = b""
-        return damaged, not utf8_cut(buf)
+        return kind, not utf8_cut(buf)
 
 
 # ---------------------------------------------------------------------------
@@ -212,30 +222,46 @@ def bar_line(label, rgb, cols):
     return ("\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm\x1b[1m%s\x1b[0m" % (r, g, b, fg[0], fg[1], fg[2], text)).encode()
 
 
-def paint(out, label, rgb, rows, cols):
-    """Re-assert the arrangement and redraw the bar.
+def paint(out, label, rgb, preserve=False):
+    """Redraw the bar, rebuilding the arrangement unless the cursor must survive.
 
-    Origin mode has to come off to reach physical row 1 at all, and changing it
-    homes the cursor by definition, so this leaves the cursor at the top of the
-    region rather than where the command had it. Saving and restoring around it
-    does not help: DECRC restores the origin mode saved with the position, which
-    is exactly the setting being changed, and it would also overwrite the
-    command's own saved cursor, since a terminal keeps only one slot.
+    The size is read here rather than passed in: a resize can land between any
+    two reads, and painting a bar sized for the old width wraps it onto the row
+    below, which is how one stale value turns into a screenful of bar fragments.
+    Autowrap goes off around the write for the same reason, since a bar exactly
+    as wide as the terminal leaves the cursor past the last column and terminals
+    differ on when that becomes a wrap.
 
-    That is affordable because a repaint only ever follows damage: a full erase,
-    a screen switch, a reset, or a resize. A command doing any of those redraws
-    from scratch straight afterwards and positions absolutely as it goes.
+    preserve is the difference between a command that erased the screen and one
+    that reset it. After an erase, origin mode and the margins still stand, so
+    DECSC/DECRC put the cursor back exactly: DECRC restores the origin mode saved
+    with the position, which is the setting this toggles, so saving while it is
+    ON is what makes that work. Without this, every repaint homed the cursor and
+    a command printing ordinary lines had its output thrown back to the top of
+    the region, interleaving it with whatever was already there.
+
+    A reset has to rebuild the arrangement, and there is no way to do that
+    without moving the cursor. That is affordable because a command that just
+    reset the terminal is redrawing from scratch anyway.
     """
-    seq = b"".join(
-        [
-            b"\x1b[?6l",  # origin mode off: row 1 means physical row 1
-            b"\x1b[1;1H",
-            bar_line(label, rgb, cols),
+    rows, cols = term_size(out)
+    if rows < 2 or cols < 1:
+        return
+    bar = [
+        b"\x1b[?7l",  # autowrap off: a full-width bar must not spill
+        b"\x1b[?6l",  # origin mode off: row 1 means physical row 1
+        b"\x1b[1;1H",
+        bar_line(label, rgb, cols),
+        b"\x1b[?7h",
+    ]
+    if preserve:
+        seq = [b"\x1b7"] + bar + [b"\x1b8"]  # DECRC brings origin mode back too
+    else:
+        seq = bar + [
             b"\x1b[2;%dr" % rows,  # scroll region: everything below the bar
             b"\x1b[?6h",  # origin mode on: the command's row 1 is row 2
         ]
-    )
-    os.write(out, seq)
+    os.write(out, b"".join(seq))
 
 
 def teardown(out):
@@ -255,48 +281,61 @@ def set_size(fd, rows, cols):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def relay(fd, label, rgb, out):
-    scanner = Scanner()
-    pending_paint = False
-    resized = [False]
-
-    def on_winch(_sig, _frm):
-        resized[0] = True
-
-    signal.signal(signal.SIGWINCH, on_winch)
-
+def resize(fd, out, label, rgb):
+    """Tell the command the terminal is one row shorter, then redraw the bar."""
     rows, cols = term_size(out)
     set_size(fd, max(rows - 1, 1), cols)
-    paint(out, label, rgb, rows, cols)
+    paint(out, label, rgb)
 
-    while True:
-        if resized[0]:
-            resized[0] = False
-            rows, cols = term_size(out)
-            set_size(fd, max(rows - 1, 1), cols)
-            paint(out, label, rgb, rows, cols)
-        try:
-            ready, _, _ = select.select([fd, 0], [], [])
-        except InterruptedError:
-            continue
-        if 0 in ready:
-            data = os.read(0, READ)
-            if not data:
-                break
-            os.write(fd, shift_mouse(data))
-        if fd in ready:
-            try:
-                data = os.read(fd, READ)
-            except OSError:
-                break
-            if not data:
-                break
-            os.write(out, data)
-            damaged, safe = scanner.feed(data)
-            pending_paint = pending_paint or damaged
-            if pending_paint and safe:
-                pending_paint = False
-                paint(out, label, rgb, rows, cols)
+
+def relay(fd, label, rgb, out):
+    scanner = Scanner()
+    pending = None
+
+    # A self-pipe for SIGWINCH. Python restarts an interrupted select rather than
+    # raising (PEP 475), so a handler that only sets a flag is never noticed until
+    # the command happens to write something: the terminal has already been
+    # resized and everything painted until then is sized for the old window.
+    # Waking the select through a pipe is what makes a resize prompt.
+    rpipe, wpipe = os.pipe()
+    os.set_blocking(rpipe, False)
+    os.set_blocking(wpipe, False)
+    signal.set_wakeup_fd(wpipe)
+    signal.signal(signal.SIGWINCH, lambda _sig, _frm: None)
+
+    try:
+        resize(fd, out, label, rgb)
+        while True:
+            ready, _, _ = select.select([fd, 0, rpipe], [], [])
+            if rpipe in ready:
+                try:
+                    os.read(rpipe, 512)
+                except BlockingIOError:
+                    pass
+                resize(fd, out, label, rgb)
+            if 0 in ready:
+                data = os.read(0, READ)
+                if not data:
+                    break
+                os.write(fd, shift_mouse(data))
+            if fd in ready:
+                try:
+                    data = os.read(fd, READ)
+                except OSError:  # the command closed the pty
+                    break
+                if not data:
+                    break
+                os.write(out, data)
+                kind, safe = scanner.feed(data)
+                if kind == "reset" or (kind and pending is None):
+                    pending = kind
+                if pending and safe:
+                    paint(out, label, rgb, preserve=(pending == "erase"))
+                    pending = None
+    finally:
+        signal.set_wakeup_fd(-1)
+        os.close(rpipe)
+        os.close(wpipe)
 
 
 def main(argv):
