@@ -54,6 +54,7 @@ isopod opencode myproj                 # ... with opencode
 isopod pi myproj                       # ... with the Pi agent
 isopod claude-code myproj --app kitty  # pick the terminal
 isopod codex myproj --attach           # run in this window instead
+isopod pi myproj --color box           # use the sandbox's color, not Pi's
 ```
 
 All four commands work the same way. The first run puts the agent in the box,
@@ -91,6 +92,39 @@ with `opencode auth login` and `/login`, which take whichever provider or
 subscription you have. To hand one a stored key anyway, name it in
 `ISOPOD_OPENCODE_SECRET` or `ISOPOD_PI_SECRET`. GitHub is where three of the four
 fetch releases and updates, and the shipped baseline already allows it.
+
+### Telling the windows apart
+
+Four agents in four windows look identical, so each one gets a color, applied to
+the terminal rather than to the agent: the window's background, its cursor, and a
+bar at the top of the session all carry it, and the window title leads with the
+box, since the color has already said which agent.
+
+| agent | color |
+| --- | --- |
+| `claude-code` | orange |
+| `codex` | teal |
+| `opencode` | blue |
+| `pi` | purple |
+
+```sh
+isopod codex myproj --color magenta      # this window only
+isopod pi myproj --color box             # the sandbox's own color instead
+isopod claude-code myproj --no-color     # leave the terminal alone
+export ISOPOD_CODEX_COLOR=magenta        # every Codex window from now on
+export ISOPOD_AGENT_TINT=light           # pale backgrounds for a light terminal
+export ISOPOD_AGENT_TINT=off             # keep the title and bar, not the background
+```
+
+The background is a very dark version of the color rather than the color itself,
+so everything the agent draws stays legible, and `ISOPOD_AGENT_TINT=light` gives
+a pale version for a light-themed terminal. isopod puts the terminal back as it
+found it when the session ends, including on Ctrl-C. Under tmux or screen the
+title and the bar carry the color on their own, since the background there
+belongs to the outer terminal and tinting it would color every pane.
+
+The colors live in `share/agent-colors` and use the same palette as
+`create --color`, and `NO_COLOR` turns all of it off the way it does elsewhere.
 
 On a box using the egress allow-list, isopod prints the hostnames the agent needs
 and leaves your allow-list alone, since one list covers every box on the host.
@@ -180,6 +214,10 @@ refused args above, for the rare environment that genuinely needs it.
 `ISOPOD_MICROVM_MEMORY` — default guest memory when a Tier 3 microVM runtime is active and no `--memory` is given (default `2g`).
 `ISOPOD_MICROVM_ANNOTATIONS` — space-separated `krun.*` OCI annotations passed to a microVM guest (e.g. `krun.nested_virt=1`); Podman only.
 `ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](security-model.md#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
+
+`ISOPOD_TERMINAL` sets the default terminal for the agent commands, taking the same names as `--app`.
+`ISOPOD_AGENT_TINT` (`dark`|`light`|`off`) says how an agent's window is painted: a dark version of its color, a pale one for a light-themed terminal, or title and bar only (default `dark`). `NO_COLOR` turns the whole thing off.
+`ISOPOD_CLAUDE_COLOR`, `ISOPOD_CODEX_COLOR`, `ISOPOD_OPENCODE_COLOR`, `ISOPOD_PI_COLOR` each override one agent's color with a preset name, `#rrggbb`, or `box` for the sandbox's own color.
 
 `ISOPOD_SSH_WAIT_TRIES` — how many 1s attempts `create`/`start` make waiting for sshd before giving up (default `30`).
 

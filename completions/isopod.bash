@@ -16,6 +16,8 @@ _isopod() {
   local cmds="create list info code shell claude-code codex opencode pi root-shell upgrade start stop config reconfigure migrate export fetch remap copy-in rm egress host-port account secret doctor help version"
   local colors="red orange amber green teal blue purple magenta gray grey"
   local apps="codium vscodium cursor windsurf code"
+  local terms="ghostty kitty wezterm alacritty gnome-terminal konsole foot xfce4-terminal xterm"
+  local agents="claude-code claude codex opencode pi"
 
   local boxes_dir="${ISOPOD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/isopod}/boxes"
   _isopod_boxes() {
@@ -35,11 +37,17 @@ _isopod() {
   # Values that follow a specific option.
   case "$prev" in
     --color)
-      mapfile -t COMPREPLY < <(compgen -W "$colors" -- "$cur")
+      # The agent commands take a box's own color as well as a preset.
+      local cvals="$colors"
+      case " $agents " in *" $sub "*) cvals="$colors box" ;; esac
+      mapfile -t COMPREPLY < <(compgen -W "$cvals" -- "$cur")
       return 0
       ;;
     --app)
-      mapfile -t COMPREPLY < <(compgen -W "$apps" -- "$cur")
+      # --app is a terminal for the agent commands and an IDE everywhere else.
+      local avals="$apps"
+      case " $agents " in *" $sub "*) avals="$terms" ;; esac
+      mapfile -t COMPREPLY < <(compgen -W "$avals" -- "$cur")
       return 0
       ;;
     --engine)
@@ -66,6 +74,7 @@ _isopod() {
       rm) opts="--force" ;;
       remap) opts="--name --email --old-email --old-name --remap-file --sign --no-sign --force" ;;
       fetch) opts="--path" ;;
+      claude-code | claude | codex | opencode | pi) opts="--app --attach --color --no-color" ;;
     esac
     mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
     return 0
@@ -73,7 +82,7 @@ _isopod() {
 
   # First positional for most subcommands is an existing box name.
   case "$sub" in
-    info | code | shell | claude-code | codex | opencode | pi | root-shell | upgrade | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
+    info | code | shell | claude-code | claude | codex | opencode | pi | root-shell | upgrade | start | stop | config | reconfigure | export | fetch | remap | copy-in | rm)
       mapfile -t COMPREPLY < <(compgen -W "$(_isopod_boxes)" -- "$cur")
       ;;
     egress)

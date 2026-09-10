@@ -1,4 +1,4 @@
-usage: isopod opencode <box> [--app TERMINAL] [--attach] [-- args...]
+usage: isopod opencode <box> [--app TERMINAL] [--attach] [--color C] [-- args...]
 
 Run opencode inside a box. Starts the box if it is stopped, installs opencode if
 it is not there yet, then opens a new terminal window with a session in the box's
@@ -8,11 +8,21 @@ workspace, the way 'isopod code' opens an editor window.
                  default. Without either, the first one installed is used.
   --attach       run in THIS window instead of opening a new one, for a headless
                  host or when you would rather keep the session where you are.
+  --color <c>    color this window: a preset name, '#rrggbb', or 'box' for the
+                 sandbox's own color. ISOPOD_OPENCODE_COLOR sets a default.
+  --no-color     leave the terminal's own colors alone.
   -- args...     passed through to opencode, e.g. -- --help
 
 Terminals isopod knows: ghostty, kitty, wezterm, alacritty, gnome-terminal,
 konsole, foot, xfce4-terminal, xterm. A name that is not on the list is tried as
 a plain command, and a host with no terminal at all falls back to --attach.
+
+Telling windows apart: each agent has a color of its own, blue for opencode, and
+isopod uses it for the window's background, its cursor and a bar at the top of
+the session, with the box name in the window title. ISOPOD_AGENT_TINT=light
+suits a light-themed terminal, and =off keeps the title and the bar while
+leaving the background as you have it. Under tmux or screen the title and the
+bar carry the color, since the background there belongs to the outer terminal.
 
 isopod downloads the release archive for the box's architecture and checks its
 SHA-256 on your machine, then copies it in over SSH and unpacks it there, so the

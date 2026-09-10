@@ -309,6 +309,9 @@ on_exit() {
     rm -rf "$(box_dir "$CREATE_ROLLBACK_NAME")"
     write_ssh_include 2>/dev/null || true
   fi
+  # Put a terminal isopod tinted for an agent session back the way it was, on
+  # every exit path there is: a clean return, a failed ssh, or Ctrl-C.
+  term_theme_off
   release_lock
   return "$rc"
 }

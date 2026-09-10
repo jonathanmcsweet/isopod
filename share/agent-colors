@@ -1,0 +1,14 @@
+# isopod agent tint palette — which color each coding agent's terminal gets.
+# Read by agent_preset(); the hex behind each preset name lives in share/colors.
+#
+# The point is telling four look-alike windows apart at a glance, so the colors
+# are chosen to be distinct from each other rather than to match anyone's brand.
+# Override one agent with ISOPOD_<AGENT>_COLOR (a preset name, '#rrggbb', or
+# 'box' for the sandbox's own color), one run with --color, and turn the tint
+# off with ISOPOD_AGENT_TINT=off or --no-color.
+#
+# agent     preset
+claude      orange
+codex       teal
+opencode    blue
+pi          purple
