@@ -217,32 +217,55 @@ EOF
   assert_output "2"
 }
 
-# ---- agent terminal theming --------------------------------------------------
-# Four agents in four windows look identical, so each gets a color. It goes on
-# the terminal rather than on the agent, so these cover the palette lookup, the
-# background math, the guards that decide whether anything is emitted at all, and
-# the wiring that carries the resolved color into the session that gets themed.
+
+# ---- agent session color -----------------------------------------------------
+# An agent session is marked by a colored bar across the top row, in the box's
+# own color, the way `isopod code` tints the IDE. These cover which color a
+# session resolves to and how it reaches the process that draws the bar.
 
 mk_box() { # mk_box <name> <meta-line...>
   mkdir -p "$BOXES_DIR/$1"
   printf '%s\n' "${@:2}" >"$BOXES_DIR/$1/meta"
 }
 
-@test "every agent has a color, and no two share one" {
+@test "a session takes the box's own color, like the IDE tint does" {
+  mk_box demo 'engine=podman' 'color=#123456'
+  assert_equal "$(agent_color codex demo)" "#123456"
+  assert_equal "$(agent_color pi demo)" "#123456"
+}
+
+@test "a box with no color falls back to the agent's own" {
+  mk_box plain 'engine=podman'
+  assert_equal "$(agent_color codex plain)" "$(preset_color "$(agent_preset codex)")"
+}
+
+@test "ISOPOD_<AGENT>_COLOR overrides the box color, for that agent only" {
+  mk_box demo 'engine=podman' 'color=#123456'
+  ISOPOD_PI_COLOR=magenta
+  assert_equal "$(agent_color pi demo)" "$(preset_color magenta)"
+  assert_equal "$(agent_color codex demo)" "#123456"
+  ISOPOD_PI_COLOR="#abcdef"
+  assert_equal "$(agent_color pi demo)" "#abcdef"
+}
+
+# Two agents in ONE box would otherwise share a color, which is the case the
+# per-agent palette still exists for.
+@test "a color of 'agent' picks the agent's own, distinct per agent" {
+  mk_box demo 'engine=podman' 'color=#123456'
+  local a b
+  a="$(agent_color_resolve agent demo claude)"
+  b="$(agent_color_resolve agent demo codex)"
+  [ "$a" != "$b" ]
+  assert_equal "$a" "$(preset_color "$(agent_preset claude)")"
+}
+
+@test "every agent has a color in the table, and no two share one" {
   local a hex seen=""
   for a in claude codex opencode pi; do
-    hex="$(agent_color "$a")"
+    hex="$(preset_color "$(agent_preset "$a")")"
     [[ "$hex" =~ ^#[0-9a-f]{6}$ ]]
     case " $seen " in *" $hex "*) return 1 ;; esac
     seen="$seen $hex"
-  done
-}
-
-@test "agent_preset names a preset the shipped palette actually has" {
-  local a
-  for a in claude codex opencode pi; do
-    run preset_color "$(agent_preset "$a")"
-    assert_success
   done
 }
 
@@ -251,190 +274,96 @@ mk_box() { # mk_box <name> <meta-line...>
   assert_failure
 }
 
-@test "ISOPOD_<AGENT>_COLOR overrides the table" {
-  ISOPOD_PI_COLOR=magenta
-  assert_equal "$(agent_color pi)" "$(preset_color magenta)"
-  ISOPOD_PI_COLOR="#abcdef"
-  assert_equal "$(agent_color pi)" "#abcdef"
-  # and only that agent's
-  assert_equal "$(agent_color codex)" "$(preset_color teal)"
-}
-
-@test "a color of 'box' takes the sandbox's own color" {
-  mk_box demo 'engine=podman' 'color=#123456'
-  assert_equal "$(agent_color_resolve box demo)" "#123456"
-  ISOPOD_CLAUDE_COLOR=box
-  assert_equal "$(agent_color claude demo)" "#123456"
-}
-
-@test "a color of 'box' is no color when the box has none" {
-  mk_box plain 'engine=podman'
-  run agent_color_resolve box plain
-  assert_failure
-  run agent_color_resolve box
-  assert_failure
-}
-
 @test "agent_color_resolve refuses an unknown preset and reads 'off' as none" {
-  run agent_color_resolve chartreuse
+  mk_box demo 'engine=podman' 'color=#123456'
+  run agent_color_resolve chartreuse demo codex
   assert_failure
-  run agent_color_resolve off
+  run agent_color_resolve off demo codex
   assert_failure
-  run agent_color_resolve ''
-  assert_failure
-}
-
-# The palette entries are not equally bright, so a flat percentage of each would
-# tint some windows obviously and others barely. Every background is scaled to
-# the same peak channel instead.
-@test "hex_peak scales a color to a fixed peak, keeping its hue" {
-  assert_equal "$(hex_peak '#c2410c' 42)" "#2a0e02"
-  assert_equal "$(hex_peak '#0f766e' 42)" "#052a27"
-  # the brightest channel lands on the target for every palette entry
-  local a hex peak
-  for a in claude codex opencode pi; do
-    hex="$(hex_peak "$(agent_color "$a")" 42)"
-    peak=$((16#${hex:1:2}))
-    [ $((16#${hex:3:2})) -gt "$peak" ] && peak=$((16#${hex:3:2}))
-    [ $((16#${hex:5:2})) -gt "$peak" ] && peak=$((16#${hex:5:2}))
-    assert_equal "$peak" 42
-  done
-}
-
-@test "hex_peak leaves black alone rather than dividing by zero" {
-  run hex_peak '#000000' 42
-  assert_success
-  assert_output '#000000'
-}
-
-@test "hex_blend mixes two colors by percentage" {
-  assert_equal "$(hex_blend '#ffffff' '#000000' 50)" "#7f7f7f"
-  assert_equal "$(hex_blend '#ffffff' '#000000' 100)" "#ffffff"
-  assert_equal "$(hex_blend '#ffffff' '#000000' 0)" "#000000"
-}
-
-@test "the tinted background is a dark version of the color, not the color" {
-  local hex bg
-  hex="$(agent_color claude)"
-  bg="$(term_tint_bg "$hex")"
-  [ "$bg" != "$hex" ]
-  [ $((16#${bg:1:2} + 16#${bg:3:2} + 16#${bg:5:2})) -lt $((16#${hex:1:2} + 16#${hex:3:2} + 16#${hex:5:2})) ]
-  # light mode is the pale counterpart, for a light-themed terminal
-  bg="$(ISOPOD_AGENT_TINT=light term_tint_bg "$hex")"
-  [ $((16#${bg:1:2})) -gt 200 ]
-}
-
-@test "ISOPOD_AGENT_TINT=off leaves the background to whoever set it" {
-  ISOPOD_AGENT_TINT=off run term_tint_bg '#c2410c'
+  run agent_color_resolve '' demo codex
   assert_failure
 }
 
-# Writing escape sequences into a pipe or a file would corrupt it and color
-# nothing, so nothing is emitted unless stdout is a terminal. bats gives the test
-# a pipe, which is exactly that case.
-@test "nothing is emitted when stdout is not a terminal" {
-  run term_theme_on '#c2410c' 'demo - Claude Code'
-  assert_success
-  assert_output ''
-  run term_theme_banner '#c2410c' 'demo - Claude Code'
-  assert_output ''
-}
+# ---- the window title --------------------------------------------------------
 
-@test "a themed window gets a title, a background and a cursor" {
+@test "the title leads with the box, and is sanitized" {
   term_can_theme() { return 0; }
-  term_theme_on '#c2410c' 'demo - Claude Code' >"$TEST_TMP/seq"
-  run cat "$TEST_TMP/seq"
-  assert_output --partial $'\033]0;demo - Claude Code\a'
-  assert_output --partial $'\033]11;#2a0e02\a'
-  assert_output --partial $'\033]12;#c2410c\a'
-  assert_equal "$TERM_THEMED" 1
-}
-
-@test "the terminal is put back the way it was" {
-  term_can_theme() { return 0; }
-  term_theme_on '#c2410c' 'demo' >/dev/null
-  term_theme_off >"$TEST_TMP/seq"
-  run cat "$TEST_TMP/seq"
-  assert_output --partial $'\033]111\a'
-  assert_output --partial $'\033]112\a'
-  assert_equal "$TERM_THEMED" 0
-  # and a second call has nothing to undo
-  term_theme_off >"$TEST_TMP/seq2"
-  run cat "$TEST_TMP/seq2"
-  assert_output ''
-}
-
-# The restore has to survive a failed ssh and a Ctrl-C, so it hangs off the one
-# exit handler rather than off the happy path.
-@test "the exit handler restores a tinted terminal" {
-  term_can_theme() { return 0; }
-  term_theme_on '#c2410c' 'demo' >/dev/null
-  assert_equal "$TERM_THEMED" 1
-  on_exit >"$TEST_TMP/seq" 2>/dev/null || true
-  run cat "$TEST_TMP/seq"
-  assert_output --partial $'\033]111\a'
-}
-
-@test "NO_COLOR and a dumb terminal turn the whole thing off" {
-  NO_COLOR=1 run term_theme_on '#c2410c' 'demo'
-  assert_output ''
-  TERM=dumb run term_theme_on '#c2410c' 'demo'
-  assert_output ''
-}
-
-# Under tmux the background belongs to the OUTER terminal, so setting it would
-# tint every pane of the session instead of this one.
-@test "under tmux only the title and the banner carry the color" {
-  term_can_theme() { return 0; }
-  TMUX=/tmp/tmux-x term_theme_on '#c2410c' 'demo - Codex' >"$TEST_TMP/seq"
-  run cat "$TEST_TMP/seq"
-  assert_output --partial $'\033]0;demo - Codex\a'
-  refute_output --partial $'\033]11;'
-  refute_output --partial $'\033]12;'
-  assert_equal "$TERM_THEMED" 0
-}
-
-@test "ISOPOD_AGENT_TINT=off keeps the title without repainting the background" {
-  term_can_theme() { return 0; }
-  ISOPOD_AGENT_TINT=off term_theme_on '#c2410c' 'demo - Codex' >"$TEST_TMP/seq"
-  run cat "$TEST_TMP/seq"
-  assert_output --partial $'\033]0;demo - Codex\a'
-  refute_output --partial $'\033]11;'
-  assert_equal "$TERM_THEMED" 0
-}
-
-# The banner covers the terminals that ignore OSC 11, and stays in the scrollback
-# as a marker of where the session began.
-@test "the banner is drawn in the agent's own color" {
-  term_can_theme() { return 0; }
-  run term_theme_banner '#c2410c' 'demo - Claude Code'
-  assert_success
-  assert_output --partial $'\033[1;48;2;194;65;12;38;2;255;255;255m'
-  assert_output --partial 'demo - Claude Code'
-}
-
-@test "a box name cannot smuggle control characters into the title" {
-  term_can_theme() { return 0; }
-  run term_theme_on '' "$(printf 'demo\033]0;pwned\a')"
-  assert_success
+  run term_set_title 'demo - Codex'
+  assert_output $'\033]0;demo - Codex\a'
+  # a control character in the label cannot open a second title sequence
+  run term_set_title "$(printf 'demo\033]0;pwned\a')"
   refute_output --partial $'\033]0;pwned'
-  # one title sequence, isopod's, not two
   [ "$(printf '%s' "$output" | grep -c $'\033]0;')" = 1 ]
 }
 
-@test "the window title leads with the box, since the color says which agent" {
-  agent_select codex
-  term_can_theme() { return 0; }
-  agent_theme demo '' >"$TEST_TMP/seq"
-  run cat "$TEST_TMP/seq"
-  assert_output --partial $'\033]0;demo - Codex\a'
+@test "nothing is emitted when stdout is not a terminal" {
+  # bats gives the test a pipe, which is exactly the case being checked.
+  run term_set_title 'demo - Codex'
+  assert_success
+  assert_output ''
 }
 
-# ---- the color reaches the session that gets themed --------------------------
-# agent_run resolves the color once and hands it to the window it opens, so the
-# session the user is looking at is the one that gets painted. With no window to
-# open it re-enters itself with --attach, which is the same handoff and can be
-# driven here without a terminal.
+@test "NO_COLOR and a dumb terminal turn theming off" {
+  NO_COLOR=1 run term_set_title 'demo'
+  assert_output ''
+  TERM=dumb run term_set_title 'demo'
+  assert_output ''
+}
+
+# ---- handing the bar to the session ------------------------------------------
+# The bar has to be drawn by something that owns the pty ssh runs on, so
+# agent_bar_on arranges for topbar.py to wrap ssh rather than printing anything
+# itself. Anything printed into the session is wiped the moment the agent
+# switches to the alternate screen.
+
+@test "agent_bar_on puts topbar in front of ssh with the label and color" {
+  agent_select codex
+  term_can_theme() { return 0; }
+  agent_bar_on demo '#c2410c'
+  assert_equal "${BOX_SSH_WRAP[0]}" "python3"
+  assert_equal "${BOX_SSH_WRAP[1]}" "$ISOPOD_LIB/topbar.py"
+  assert_equal "${BOX_SSH_WRAP[2]}" "demo - Codex"
+  assert_equal "${BOX_SSH_WRAP[3]}" "#c2410c"
+  assert_equal "${BOX_SSH_WRAP[4]}" "--"
+}
+
+@test "agent_bar_on arranges nothing when there is no color" {
+  agent_select codex
+  term_can_theme() { return 0; }
+  agent_bar_on demo ''
+  assert_equal "${#BOX_SSH_WRAP[@]}" 0
+}
+
+@test "agent_bar_on arranges nothing without a terminal or without python3" {
+  agent_select codex
+  term_can_theme() { return 1; }
+  agent_bar_on demo '#c2410c'
+  assert_equal "${#BOX_SSH_WRAP[@]}" 0
+  term_can_theme() { return 0; }
+  have() { [ "$1" != python3 ]; }
+  agent_bar_on demo '#c2410c'
+  assert_equal "${#BOX_SSH_WRAP[@]}" 0
+}
+
+# The hook is only useful if box_ssh actually honors it, and every other caller
+# has to be unaffected.
+@test "box_ssh runs ssh under the wrapper, and plainly without one" {
+  mk_box demo 'engine=podman' 'port=2222'
+  : >"$(box_dir demo)/id_ed25519"
+  : >"$(box_dir demo)/known_hosts"
+  make_stub ssh 0
+  make_stub wrapper 0
+  BOX_SSH_WRAP=(wrapper --)
+  box_ssh demo -- true
+  assert_stub_called "wrapper -- ssh -p 2222"
+  : >"$STUB_LOG"
+  BOX_SSH_WRAP=()
+  box_ssh demo -- true
+  assert_stub_called "ssh -p 2222"
+  assert_stub_not_called "wrapper"
+}
+
+# ---- the color reaches the session that draws the bar ------------------------
 agent_color_harness() { # agent_color_harness <agent>
   agent_select "$1"
   mk_box demo 'engine=podman' 'port=2222' 'color=#123456'
@@ -445,28 +374,28 @@ agent_color_harness() { # agent_color_harness <agent>
   agent_egress_note() { :; }
   can_open_window() { return 1; }
   box_ssh() { :; }
-  agent_theme() { printf '%s' "${2:-}" >"$TEST_TMP/themed"; }
-  : >"$TEST_TMP/themed"
+  agent_bar_on() { printf '%s' "${2:-}" >"$TEST_TMP/barred"; }
+  : >"$TEST_TMP/barred"
 }
 
-@test "an agent session is themed with that agent's color by default" {
+@test "a session gets the box color by default" {
   agent_color_harness codex
   agent_run demo >/dev/null
-  assert_equal "$(cat "$TEST_TMP/themed")" "$(agent_color codex)"
+  assert_equal "$(cat "$TEST_TMP/barred")" "#123456"
 }
 
 @test "--color overrides it for one run, in both spellings" {
   agent_color_harness codex
   agent_run demo --color magenta >/dev/null
-  assert_equal "$(cat "$TEST_TMP/themed")" "$(preset_color magenta)"
-  agent_run demo --color=box >/dev/null
-  assert_equal "$(cat "$TEST_TMP/themed")" "#123456"
+  assert_equal "$(cat "$TEST_TMP/barred")" "$(preset_color magenta)"
+  agent_run demo --color=agent >/dev/null
+  assert_equal "$(cat "$TEST_TMP/barred")" "$(preset_color "$(agent_preset codex)")"
 }
 
-@test "--no-color leaves the session unthemed" {
+@test "--no-color leaves the session with no bar" {
   agent_color_harness pi
   agent_run demo --no-color >/dev/null
-  assert_equal "$(cat "$TEST_TMP/themed")" ""
+  assert_equal "$(cat "$TEST_TMP/barred")" ""
 }
 
 @test "an unknown --color is refused before the box is touched" {
@@ -474,12 +403,9 @@ agent_color_harness() { # agent_color_harness <agent>
   run agent_run demo --color chartreuse
   assert_failure
   assert_output --partial "unknown color 'chartreuse'"
-  assert_equal "$(cat "$TEST_TMP/themed")" ""
+  assert_equal "$(cat "$TEST_TMP/barred")" ""
 }
 
-# The window isopod opens re-runs isopod with --attach, so the color has to
-# travel on that command line or the new window would resolve it again from an
-# environment that may differ.
 @test "the terminal isopod opens is told which color to use" {
   agent_color_harness codex
   can_open_window() { return 0; }
@@ -498,7 +424,7 @@ agent_color_harness() { # agent_color_harness <agent>
     sleep 0.02
   done
   run cat "$STUB_LOG"
-  assert_output --partial "--attach --color $(agent_color codex)"
+  assert_output --partial "--attach --color #123456"
 }
 
 @test "the macOS launcher script carries the color too" {
@@ -516,4 +442,228 @@ agent_color_harness() { # agent_color_harness <agent>
   assert_output --partial "--attach"
   assert_output --partial "--color"
   assert_output --partial "$(preset_color magenta)"
+}
+
+# ---- topbar.py: reserving the row --------------------------------------------
+# The helper keeps a full-screen TUI off the top row by lying about the terminal
+# size and letting the terminal do the offset (scroll region plus origin mode),
+# so it never has to understand what the command draws. ptyrun.py gives it the
+# terminal of a known size it needs; a fake TUI stands in for the agent.
+
+TOPBAR() { printf '%s' "$ISOPOD_ROOT/lib/topbar.py"; }
+
+fake_tui() { # fake_tui -> path to a program that behaves like an agent TUI
+  local f="$TEST_TMP/faketui.py"
+  cat >"$f" <<'PY'
+import os, sys
+cols, rows = os.get_terminal_size(1)
+sys.stdout.write("\x1b[?1049h")   # alternate screen, as every agent TUI does
+sys.stdout.write("\x1b[2J")       # erase all: ignores margins, takes the bar
+sys.stdout.write("\x1b[1;1HSIZE rows=%d cols=%d" % (rows, cols))
+sys.stdout.write("\x1b[?1049l")
+sys.stdout.flush()
+PY
+  printf '%s' "$f"
+}
+
+topbar_run() { # topbar_run <rows> <cols> <label> <color> <command...>
+  local rows="$1" cols="$2" label="$3" color="$4"
+  shift 4
+  python3 "$ISOPOD_ROOT/test/ptyrun.py" "$rows" "$cols" \
+    python3 "$(TOPBAR)" "$label" "$color" -- "$@"
+}
+
+@test "topbar hands the command a terminal one row shorter" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' python3 "$(fake_tui)"
+  assert_success
+  assert_output --partial "SIZE rows=23 cols=40"
+}
+
+@test "topbar paints the bar on the top row and keeps the command below it" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' python3 "$(fake_tui)"
+  assert_success
+  # origin mode off to reach row 1, the bar, then the region and origin mode back
+  assert_output --partial $'\033[?6l\033[1;1H'
+  assert_output --partial $'\033[48;2;194;65;12m'
+  assert_output --partial 'demo - Codex'
+  assert_output --partial $'\033[2;24r'
+  assert_output --partial $'\033[?6h'
+}
+
+# The command erases the whole display, which by spec ignores margins. Without a
+# repaint the bar is gone for the rest of the session.
+@test "topbar repaints after the command erases the screen" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' python3 "$(fake_tui)"
+  local painted
+  painted="$(printf '%s' "$output" | grep -o 'demo - Codex' | wc -l)"
+  [ "$painted" -ge 2 ]
+}
+
+@test "topbar puts the terminal back when the command exits" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' true
+  assert_success
+  # origin mode off, scroll region reset, bar row erased
+  assert_output --partial $'\033[?6l\033[r\033[1;1H\033[2K'
+}
+
+@test "topbar relays the command's own output unchanged" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' printf 'hello world\n'
+  assert_output --partial 'hello world'
+}
+
+@test "topbar passes the command's exit status through" {
+  run topbar_run 24 40 'demo' '#c2410c' sh -c 'exit 3'
+  # ptyrun reports the pty output, so check topbar's own status directly
+  run python3 "$(TOPBAR)" 'demo' '#c2410c' -- sh -c 'exit 3'
+  assert_failure 3
+}
+
+# Fail open: without a terminal there is no bar to draw, and the command must
+# still run normally rather than the session breaking.
+@test "topbar runs the command directly when there is no terminal" {
+  run python3 "$(TOPBAR)" 'demo' '#c2410c' -- printf 'ran anyway\n'
+  assert_success
+  assert_output 'ran anyway'
+  refute_output --partial $'\033['
+}
+
+@test "topbar runs the command directly when the color is malformed" {
+  run topbar_run 24 40 'demo' 'not-a-color' printf 'ran anyway\n'
+  assert_success
+  assert_output --partial 'ran anyway'
+  refute_output --partial $'\033[48;2;'
+}
+
+# ---- topbar.py: the escape sequence scanner ----------------------------------
+# It exists to answer two questions: where does a sequence end (so the bar is
+# never painted into the middle of one), and does this sequence undo the
+# arrangement. It classifies nothing else.
+
+topbar_py() { # topbar_py <python-expression-body>
+  python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('topbar', '$ISOPOD_ROOT/lib/topbar.py')
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+$1"
+}
+
+@test "the scanner finds the end of each kind of escape sequence" {
+  run topbar_py "
+print(m.seq_end(b'\x1b[2J', 0))          # CSI
+print(m.seq_end(b'\x1b]0;title\x07', 0)) # OSC ended by BEL
+print(m.seq_end(b'\x1b]0;t\x1b\\\\', 0)) # OSC ended by ST
+print(m.seq_end(b'\x1bc', 0))            # two-byte
+print(m.seq_end(b'\x1b(B', 0))           # intermediate then final
+"
+  assert_line --index 0 '4'
+  assert_line --index 1 '10'
+  assert_line --index 2 '7'
+  assert_line --index 3 '2'
+  assert_line --index 4 '3'
+}
+
+@test "the scanner reports a cut-off sequence rather than guessing its end" {
+  run topbar_py "
+print(m.seq_end(b'\x1b[2', 0))
+print(m.seq_end(b'\x1b]0;unterminated', 0))
+print(m.seq_end(b'\x1b', 0))
+"
+  assert_output $'None\nNone\nNone'
+}
+
+@test "a sequence split across reads is never painted into" {
+  run topbar_py "
+s = m.Scanner()
+print(s.feed(b'text\x1b[2'))   # ends mid-sequence: not safe to inject
+print(s.feed(b'J'))            # completes it: damaging, and now safe
+"
+  assert_line --index 0 '(False, False)'
+  assert_line --index 1 '(True, True)'
+}
+
+@test "a UTF-8 character split across reads is never painted into" {
+  run topbar_py "
+s = m.Scanner()
+print(s.feed('日'.encode()[:2]))
+print(s.feed('日'.encode()[2:]))
+"
+  assert_line --index 0 '(False, False)'
+  assert_line --index 1 '(False, True)'
+}
+
+@test "the scanner recognizes what undoes the reserved row" {
+  run topbar_py "
+for seq in (b'\x1bc', b'\x1b[r', b'\x1b[2;24r', b'\x1b[!p', b'\x1b[2J', b'\x1b[3J',
+            b'\x1b[?1049h', b'\x1b[?1049l', b'\x1b[?47h', b'\x1b[?6l',
+            b'\x1b[?25l;6h'):
+    print(m.damaging(seq))
+"
+  refute_output --partial 'False'
+}
+
+@test "the scanner leaves ordinary sequences alone" {
+  run topbar_py "
+for seq in (b'\x1b[0m', b'\x1b[1;1H', b'\x1b[K', b'\x1b[?25l', b'\x1b[38;2;1;2;3m',
+            b'\x1b]0;title\x07', b'\x1b7'):
+    print(m.damaging(seq))
+"
+  refute_output --partial 'True'
+}
+
+# The width matters: a bar short of the terminal leaves a gap, and one over it
+# wraps onto the row the session is using.
+@test "the bar fills the width exactly and picks readable text for its color" {
+  run topbar_py "
+import re
+plain = lambda s: re.sub(rb'\x1b\\[[0-9;]*m', b'', s)
+print(b'38;2;255;255;255' in m.bar_line('demo', (194, 65, 12), 20))  # white on dark
+print(b'38;2;0;0;0' in m.bar_line('demo', (240, 240, 200), 20))      # black on pale
+print(len(plain(m.bar_line('demo', (1, 2, 3), 20))))
+print(len(plain(m.bar_line('a-very-long-box-name - Claude Code', (1, 2, 3), 12))))
+"
+  assert_line --index 0 'True'
+  assert_line --index 1 'True'
+  assert_line --index 2 '20'
+  assert_line --index 3 '12'
+}
+
+# ---- topbar.py: mouse reports ------------------------------------------------
+# Origin mode offsets what the agent DRAWS, but a mouse report carries physical
+# coordinates and is offset by nothing, so a click on the agent's first row would
+# arrive as row 2 and act on the wrong line. In a menu that means selecting the
+# wrong entry, which is why every report is shifted on the way in.
+
+@test "a mouse click is reported on the row the agent thinks it is on" {
+  run topbar_py "
+print(m.shift_mouse(b'\x1b[<0;10;5M'))     # SGR press, mode 1006
+print(m.shift_mouse(b'\x1b[<0;10;5m'))     # SGR release
+print(m.shift_mouse(b'\x1b[M' + bytes([32, 42, 37])))  # X10 encoding
+"
+  assert_line --index 0 "b'\x1b[<0;10;4M'"
+  assert_line --index 1 "b'\x1b[<0;10;4m'"
+  assert_line --index 2 "b'\x1b[M *\$'"
+}
+
+@test "a click on the bar row itself does not shift off the screen" {
+  run topbar_py "print(m.shift_mouse(b'\x1b[<0;10;1M'))"
+  assert_output "b'\x1b[<0;10;1M'"
+}
+
+@test "ordinary keys and other sequences reach the agent untouched" {
+  run topbar_py "
+for data in (b'hello', b'\x1b[A', b'\x1b', b'\x1b[200~paste\x1b[201~', b'\x03'):
+    print(m.shift_mouse(data) == data)
+"
+  refute_output --partial 'False'
+}
+
+@test "a mouse report split across reads is not mangled" {
+  # The tail is passed through whole rather than half-rewritten; the terminal
+  # sends a report in one write, so this is the safe fallback, not the norm.
+  run topbar_py "
+out = m.shift_mouse(b'\x1b[<0;10')
+print(out == b'\x1b[<0;10')
+"
+  assert_output 'True'
 }

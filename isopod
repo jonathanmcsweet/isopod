@@ -24,7 +24,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   exit 1
 fi
 
-ISOPOD_VERSION="3.15.0"
+ISOPOD_VERSION="3.16.0"
 
 # Resolve the directory this script lives in (following symlinks), so we can
 # find bundled helper files under lib/ regardless of how isopod was invoked.
@@ -235,15 +235,12 @@ ISOPOD_PI_API_URL="${ISOPOD_PI_API_URL:-https://api.github.com/repos/earendil-wo
 ISOPOD_PI_SECRET="${ISOPOD_PI_SECRET:-}"
 ISOPOD_PI_DOMAINS="${ISOPOD_PI_DOMAINS:-pi.dev anthropic.com api.openai.com}"
 
-# Terminal theming for the agent commands. Each agent gets its own color from
-# share/agent-colors so four otherwise identical windows are told apart at a
-# glance; ISOPOD_<AGENT>_COLOR overrides one with a preset name, a '#rrggbb'
-# value, or 'box' for the sandbox's own color. ISOPOD_AGENT_TINT picks how the
-# background is painted: 'dark' mixes the color into black, 'light' into white,
-# and 'off' leaves the background alone and keeps the title and banner.
-# The per-agent ones are read indirectly by agent_color(), so they are declared
-# here to keep every tunable in one place rather than appearing from nowhere.
-ISOPOD_AGENT_TINT="${ISOPOD_AGENT_TINT:-dark}"
+# A colored bar across the top row of an agent session, in the box's own color,
+# the way `isopod code` tints the IDE. ISOPOD_<AGENT>_COLOR overrides it per
+# agent with a preset name, a '#rrggbb' value, 'box' for the sandbox's color or
+# 'agent' for the agent's own from share/agent-colors, which is what tells two
+# agents apart in the same box. These are read indirectly by agent_color(), so
+# they are declared here to keep every tunable in one place.
 ISOPOD_CLAUDE_COLOR="${ISOPOD_CLAUDE_COLOR:-}"
 ISOPOD_CODEX_COLOR="${ISOPOD_CODEX_COLOR:-}"
 ISOPOD_OPENCODE_COLOR="${ISOPOD_OPENCODE_COLOR:-}"

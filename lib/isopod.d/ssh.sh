@@ -242,6 +242,12 @@ scan_host_key() { # scan_host_key <name>
   return 1
 }
 
+# Optional command placed in front of the ssh invocation, for a caller that needs
+# ssh to run under something else. The agent commands use it for the color bar
+# (lib/topbar.py), which has to own the pty ssh runs on. Empty for every other
+# call, so the transport is unchanged.
+BOX_SSH_WRAP=()
+
 # Connect to a box using its own key/port/known_hosts explicitly, so internal
 # SSH never depends on ~/.ssh/config resolution (which OpenSSH derives from the
 # passwd database, not $HOME — important for hermetic tests and odd setups).
@@ -287,7 +293,7 @@ box_ssh() { # box_ssh <name> [ssh-options...] [-- remote command...]
         ;;
     esac
   done
-  ssh -p "$port" \
+  ${BOX_SSH_WRAP[@]+"${BOX_SSH_WRAP[@]}"} ssh -p "$port" \
     -i "$(box_dir "$name")/id_ed25519" \
     -o IdentitiesOnly=yes \
     -o UserKnownHostsFile="$(box_dir "$name")/known_hosts" \

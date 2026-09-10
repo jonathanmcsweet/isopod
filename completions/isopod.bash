@@ -39,7 +39,7 @@ _isopod() {
     --color)
       # The agent commands take a box's own color as well as a preset.
       local cvals="$colors"
-      case " $agents " in *" $sub "*) cvals="$colors box" ;; esac
+      case " $agents " in *" $sub "*) cvals="$colors box agent" ;; esac
       mapfile -t COMPREPLY < <(compgen -W "$cvals" -- "$cur")
       return 0
       ;;

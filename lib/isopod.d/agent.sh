@@ -384,13 +384,13 @@ agent_run() { # agent_run <argv...>
      Copying the binary in would work, but it would have nothing to talk to."
 
   # Resolved once, here, and passed to the window opened below as a hex, so the
-  # session that gets themed is the one the user is looking at and both halves
+  # session that gets the bar is the one the user is looking at and both halves
   # agree on the color even if the environment differs between them.
   local hex=""
   if [ "$nocolor" = 0 ]; then
     if [ -n "$color" ]; then
-      hex="$(agent_color_resolve "$color" "$name")" ||
-        die "unknown color '$color' (use a preset name, '#rrggbb', 'box', or --no-color)"
+      hex="$(agent_color_resolve "$color" "$name" "$AGENT")" ||
+        die "unknown color '$color' (use a preset name, '#rrggbb', 'box', 'agent', or --no-color)"
     else
       hex="$(agent_color "$AGENT" "$name" || true)"
     fi
@@ -412,7 +412,7 @@ agent_run() { # agent_run <argv...>
       # environment and nowhere else.
       pre="$AGENT_SECRET=\$(cat $(shq "$keypath")); rm -f $(shq "$keypath"); export $AGENT_SECRET; "
     fi
-    agent_theme "$name" "$hex"
+    agent_bar_on "$name" "$hex"
     box_ssh "$name" -t -- "${pre}cd '$WORKSPACE' 2>/dev/null; PATH=$AGENT_BOX_PATH exec $AGENT_BIN ${rcmd[*]:-}"
     return
   fi
@@ -459,14 +459,25 @@ agent_run() { # agent_run <argv...>
        (if no window appears, check $log, or use --attach to run here)"
 }
 
-# Title, tint and banner for the window this session owns. The box comes first in
-# the title because the color already says which agent this is, and a tab bar
-# truncates the end; the title is set even with no color, since a tab called
-# "api - Codex" is worth having on its own.
-agent_theme() { # agent_theme <name> <hex|''>
+# Title the window, and arrange for the bar above the session. The bar itself is
+# drawn by lib/topbar.py, which has to own the pty, so it goes in front of ssh
+# rather than being printed from here: anything printed into the session is wiped
+# the moment the agent switches to the alternate screen.
+#
+# The box comes first in the label because a tab bar truncates the end, and which
+# sandbox this is matters more than which agent when they are side by side.
+agent_bar_on() { # agent_bar_on <name> <hex|''>
   local label="$1 - $AGENT_LABEL"
-  term_theme_on "$2" "$label"
-  [ -n "$2" ] && term_theme_banner "$2" "$label"
+  term_set_title "$label"
+  [ -n "$2" ] || return 0
+  term_can_theme || return 0
+  # No python3 means no bar; the session is unaffected and everything else about
+  # these commands already needs it, so doctor names the package.
+  have python3 || return 0
+  [ -f "$ISOPOD_LIB/topbar.py" ] || return 0
+  # Read by box_ssh (ssh.sh), which shellcheck cannot see from here.
+  # shellcheck disable=SC2034
+  BOX_SSH_WRAP=(python3 "$ISOPOD_LIB/topbar.py" "$label" "$2" --)
   return 0
 }
 

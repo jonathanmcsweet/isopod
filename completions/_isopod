@@ -123,8 +123,8 @@ _isopod() {
           _arguments \
             '--app[terminal to open the session in]:terminal:(ghostty kitty wezterm alacritty gnome-terminal konsole foot xfce4-terminal xterm)' \
             '--attach[run in this window instead of opening one]' \
-            '--color[color this window]:color:(red orange amber green teal blue purple magenta gray box)' \
-            '--no-color[leave the terminal colors alone]' \
+            '--color[color the bar above the session]:color:(red orange amber green teal blue purple magenta gray box agent)' \
+            '--no-color[run with no bar]' \
             '1:sandbox:_isopod_boxes'
           ;;
         info|shell|root-shell|upgrade|start|stop|export|copy-in)

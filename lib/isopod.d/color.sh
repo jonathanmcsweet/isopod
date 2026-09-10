@@ -78,12 +78,12 @@ apply_color() { # apply_color <name> <hexcolor>
 # ---------------------------------------------------------------------------
 # agent terminal theming
 # ---------------------------------------------------------------------------
-# Four coding agents in four windows look identical: same box, same shell, same
-# dark TUI. These give each agent a color and put it on the TERMINAL rather than
-# on the agent, because none of the four takes an accent color from the command
-# line, and the OSC sequences below are understood by every terminal in
-# share/terminal-targets. So the window says which agent it is from across the
-# room, and keeps saying it after the first screen has scrolled away.
+# Four agent windows look identical: same box, same shell, same dark TUI. Each
+# session gets a colored bar across the top row instead, drawn by lib/topbar.py,
+# which reserves that row before the agent starts. Nothing here paints the
+# terminal background: an agent leaves most cells at the default background, so
+# coloring it recolors the whole window and fights whatever palette the agent
+# draws with.
 
 agent_preset() { # agent_preset <agent> -> its preset name from share/agent-colors
   local want="$1" f="$ISOPOD_SHARE/agent-colors" name preset
@@ -99,11 +99,11 @@ agent_preset() { # agent_preset <agent> -> its preset name from share/agent-colo
 }
 
 # Resolve one color spec to a hex: a preset or '#rrggbb' as everywhere else,
-# plus 'box' for the sandbox's own color (for anyone who would rather code by
-# sandbox than by tool) and 'off' for none. Returns 1 when there is no color,
-# which every caller treats as "leave the terminal alone".
-agent_color_resolve() { # agent_color_resolve <preset|hex|box|off> [box]
-  local spec="$1" box="${2:-}"
+# plus 'box' for the sandbox's own color, 'agent' for the agent's own (which
+# tells two agents apart in the same box), and 'off' for none. Returns 1 when
+# there is no color, which callers treat as "no bar".
+agent_color_resolve() { # agent_color_resolve <preset|hex|box|agent|off> <box> <agent>
+  local spec="$1" box="${2:-}" agent="${3:-}"
   case "$spec" in
     '' | off | none) return 1 ;;
     box)
@@ -111,109 +111,42 @@ agent_color_resolve() { # agent_color_resolve <preset|hex|box|off> [box]
       spec="$(meta_get "$box" color 2>/dev/null || true)"
       [ -n "$spec" ] || return 1
       ;;
+    agent)
+      [ -n "$agent" ] || return 1
+      spec="$(agent_preset "$agent")" || return 1
+      ;;
   esac
   resolve_color "$spec"
 }
 
-# The color an agent gets: ISOPOD_<AGENT>_COLOR wins, else the table.
-agent_color() { # agent_color <agent> [box]
+# The color a session gets: ISOPOD_<AGENT>_COLOR if set, else the box's own color
+# the way `isopod code` tints the IDE, falling back to the agent's own color for
+# a box that somehow has none.
+agent_color() { # agent_color <agent> <box>
   local agent="$1" box="${2:-}" var="ISOPOD_${1^^}_COLOR" want
   want="${!var:-}"
-  [ -n "$want" ] || want="$(agent_preset "$agent")" || return 1
-  agent_color_resolve "$want" "$box"
+  if [ -n "$want" ]; then
+    agent_color_resolve "$want" "$box" "$agent"
+    return
+  fi
+  agent_color_resolve box "$box" "$agent" ||
+    agent_color_resolve agent "$box" "$agent"
 }
 
-# Mix two #rrggbb colors: <pct> percent of the first, the rest of the second.
-hex_blend() { # hex_blend <hex> <hex> <pct>
-  local a="${1#\#}" b="${2#\#}" p="$3" out="#" i v
-  for i in 0 2 4; do
-    v=$(((16#${a:i:2} * p + 16#${b:i:2} * (100 - p)) / 100))
-    out+="$(printf '%02x' "$v")"
-  done
-  printf '%s' "$out"
-}
-
-# Scale a color to a fixed peak channel, keeping its hue. The palette entries are
-# not equally bright (teal peaks at 0x76, blue at 0xd8), so taking the same
-# percentage of each would leave some windows obviously tinted and others barely
-# changed. Scaling every one to the same peak gives backgrounds of equal depth
-# that are still unmistakably different from each other.
-hex_peak() { # hex_peak <hex> <peak 0-255>
-  local h="${1#\#}" t="$2" r g b m out="#" v
-  r=$((16#${h:0:2})) g=$((16#${h:2:2})) b=$((16#${h:4:2}))
-  m=$r
-  [ "$g" -gt "$m" ] && m=$g
-  [ "$b" -gt "$m" ] && m=$b
-  [ "$m" -gt 0 ] || {
-    printf '#000000'
-    return 0
-  }
-  for v in "$r" "$g" "$b"; do out+="$(printf '%02x' $((v * t / m)))"; done
-  printf '%s' "$out"
-}
-
-# The background a tinted window gets: a very dark version of the agent's color,
-# never the color itself. It reads as "this is the orange one" from across the
-# room and leaves every foreground the agent draws with legible.
-# ISOPOD_AGENT_TINT=light gives a pale version instead, for a light-themed
-# terminal, and =off keeps the title and the banner while leaving the background
-# to whoever set it.
-term_tint_bg() { # term_tint_bg <hex>
-  case "${ISOPOD_AGENT_TINT:-dark}" in
-    dark) hex_peak "$1" 42 ;;
-    light) hex_blend "$(hex_peak "$1" 255)" "#ffffff" 12 ;;
-    *) return 1 ;;
-  esac
-}
-
-# Only paint a real terminal: theming output that is being captured to a file or
-# piped to another program would corrupt it and color nothing. NO_COLOR is the
-# cross-tool convention for "never emit color", and is honored here as well as
-# at the flag.
+# Only theme a real terminal: a session whose output is captured to a file or
+# piped somewhere gets nothing, since escape sequences would corrupt it. NO_COLOR
+# is the cross-tool convention for "never emit color" and is honored here as well
+# as at the flag.
 term_can_theme() {
   [ -t 1 ] || return 1
   [ -z "${NO_COLOR:-}" ] || return 1
   [ "${TERM:-dumb}" != dumb ]
 }
 
-# Inside tmux or screen the background and the cursor belong to the OUTER
-# terminal, so setting them would tint every pane of the session rather than
-# this one. Those two are skipped there; the title and the banner still carry
-# the agent, and tmux takes its window name from the title.
-term_multiplexed() { [ -n "${TMUX:-}" ] || [ -n "${STY:-}" ]; }
-
-# Set by term_theme_on so on_exit puts the terminal back however isopod ends: a
-# clean exit, a failed ssh, or Ctrl-C. Only a SIGKILL can leave a tint behind.
-TERM_THEMED=0
-
-term_theme_on() { # term_theme_on <hex|''> <title>
+# The window and icon title: what a taskbar, a tab bar and tmux all read. Set
+# even when there is no bar, since a tab called "api - Codex" earns its place on
+# its own.
+term_set_title() { # term_set_title <title>
   term_can_theme || return 0
-  # OSC 0 sets the window and icon title: what a taskbar, a tab bar and tmux
-  # all read.
-  printf '\033]0;%s\007' "$(sanitize "$2")"
-  [ -n "$1" ] || return 0
-  term_multiplexed && return 0
-  local bg
-  bg="$(term_tint_bg "$1")" || return 0
-  # OSC 11 background, OSC 12 cursor.
-  printf '\033]11;%s\007\033]12;%s\007' "$bg" "$1"
-  TERM_THEMED=1
-  return 0
-}
-
-term_theme_off() {
-  [ "$TERM_THEMED" = 1 ] || return 0
-  TERM_THEMED=0
-  # OSC 111/112 reset each to the terminal's own configured value, which is what
-  # the user wants back, and is something isopod never learned.
-  printf '\033]111\007\033]112\007'
-}
-
-# A bar in the agent's color. It covers the terminals that ignore OSC 11, and it
-# stays in the scrollback as a marker of where this session began.
-term_theme_banner() { # term_theme_banner <hex> <text>
-  term_can_theme || return 0
-  local h="${1#\#}"
-  printf '\033[1;48;2;%d;%d;%d;38;2;255;255;255m %s \033[0m\n' \
-    "$((16#${h:0:2}))" "$((16#${h:2:2}))" "$((16#${h:4:2}))" "$(sanitize "$2")"
+  printf '\033]0;%s\007' "$(sanitize "$1")"
 }
