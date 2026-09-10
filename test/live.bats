@@ -399,6 +399,43 @@ _agent_net_or_skip() {
   assert_failure
 }
 
+@test "live: opencode installs into a box and runs there" {
+  _agent_net_or_skip "https://api.github.com/repos/anomalyco/opencode/releases/latest"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
+  run "$ISOPOD_ROOT/isopod" opencode "$BOX" --attach -- --version
+  assert_success
+  # Its own directory, so `opencode upgrade` in the box replaces this binary
+  # rather than being shadowed by it.
+  run bssh -- 'PATH="$HOME/.opencode/bin:$PATH" command -v opencode'
+  assert_success
+  assert_output --partial "/.opencode/bin/opencode"
+  # The build has to match the box's CPU: the plain x64 build uses AVX2 and dies
+  # with an illegal instruction on a host without it, which only running proves.
+  run bssh -- 'PATH="$HOME/.opencode/bin:$PATH" opencode --version'
+  assert_success
+  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  assert_failure
+}
+
+@test "live: pi installs into a box and runs there" {
+  _agent_net_or_skip "https://api.github.com/repos/earendil-works/pi/releases/latest"
+  "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
+  run "$ISOPOD_ROOT/isopod" pi "$BOX" --attach -- --version
+  assert_success
+  run bssh -- 'PATH="$HOME/.local/share/pi:$PATH" command -v pi'
+  assert_success
+  assert_output --partial "/.local/share/pi/pi"
+  # Upstream installs Pi with npm and Node 22; the release build carries its own
+  # runtime, and the box image ships neither, so running it here is the proof.
+  # --version also reads package.json from beside the binary, which only the
+  # whole-directory install provides.
+  run bssh -- 'PATH="$HOME/.local/share/pi:$PATH" pi --version'
+  assert_success
+  refute_output --partial "0.0.0"
+  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  assert_failure
+}
+
 @test "live: an agent install survives a stop and start" {
   _agent_net_or_skip "https://api.github.com/repos/openai/codex/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null

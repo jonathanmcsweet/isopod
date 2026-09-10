@@ -46,16 +46,5 @@ codex_resolve() { # codex_resolve <arch> <libc>
 # holds one file, named for the target triple, so it is renamed on the way to
 # ~/.local/bin. Codex updates itself from here on, so nothing else is wired up.
 codex_box_install() { # codex_box_install <artifact>
-  # The archive holds exactly one file, named for the target triple, which is the
-  # artifact name without its .tar.gz. The script runs as `sh -c <script>` with no
-  # positional arguments, so both names are substituted in here.
-  local artifact="$1" inner="${1%.tar.gz}"
-  printf 'set -e
-cd "$HOME/.isopod-agent"
-tar -xzf %s
-[ -f %s ] || { echo "archive did not contain %s" >&2; exit 1; }
-mkdir -p "$HOME/.local/bin"
-chmod 755 %s
-mv -f %s "$HOME/.local/bin/codex"' \
-    "$(shq "$artifact")" "$(shq "$inner")" "$inner" "$(shq "$inner")" "$(shq "$inner")"
+  agent_tar_install_script "$1" "${1%.tar.gz}" '$HOME/.local/bin' codex
 }
