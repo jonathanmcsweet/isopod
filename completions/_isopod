@@ -98,6 +98,7 @@ _isopod() {
             '--remap-file[remap many identities from an old -> new file]:file:_files' \
             '--sign=-[sign the rewritten commits]::key id:' \
             '--no-sign[rewrite the identity without signing]' \
+            '--sign-only[sign the commits already on the box refs, rewriting no identity]' \
             '(--force -f)'{--force,-f}'[skip confirmation]' \
             '1:sandbox:_isopod_boxes'
           ;;

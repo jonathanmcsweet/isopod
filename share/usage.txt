@@ -230,6 +230,10 @@ Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--o
                         yours. Defaults to the repo's commit.gpgsign; the key
                         comes from git config unless one is named here.
   --no-sign             Rewrite the identity without signing.
+  --sign-only           Sign the commits already on the box refs and rewrite no
+                        identity, for history that was remapped before signing
+                        existed. Signs only commits committed by your own
+                        identity, and gives every one of them a new SHA.
   --force, -f           Skip the confirmation prompt.
 
 Network egress isolation (host-enforced; an in-box agent cannot turn it off):

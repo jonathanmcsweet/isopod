@@ -152,6 +152,24 @@ deliberate:
   still rebuilt when it sits on top of a rewritten one (its parent moved), just
   left unsigned.
 
+### Signing history that was already remapped
+
+Box history remapped before signing existed arrived unsigned, and nothing in a
+normal remap goes back for it: there is no identity left to rewrite, so there is
+no new commit to sign. **`--sign-only`** covers that case.
+
+```sh
+isopod remap myproj --sign-only          # sign what is already on the box refs
+isopod remap myproj --sign-only --email me@real.com
+```
+
+It signs the commits already under `refs/remotes/myproj/*` and rewrites no
+identity, so `--old-email`, `--old-name` and `--remap-file` are refused with it.
+The same two boundaries above still apply, plus one more: a commit signed by
+**someone else** would lose that signature in the rebuild, so `--sign-only`
+refuses up front and names the commits rather than stripping them. Every commit
+it touches gets a new SHA, exactly like a rewrite, so treat it as one.
+
 **A signature is not a badge.** The forge shows *Verified* only when the key is
 registered on the account that owns the committer email: on GitHub under
 *Settings > SSH and GPG keys*, an SSH key has to be added as a **signing** key

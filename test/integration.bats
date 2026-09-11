@@ -837,6 +837,82 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   assert_output --partial "Real Name <real@me.com>"
 }
 
+# ---- remap --sign-only -------------------------------------------------------
+# Box history remapped before signing existed arrived unsigned, and a normal
+# remap cannot go back for it: there is no identity left to rewrite, so there is
+# no new commit to sign.
+
+@test "remap --sign-only signs the box commits it may sign and leaves the rest" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  # Real signing needs the real ssh-keygen: install_engine_stubs replaces it with
+  # one that writes a fake key, which git would then fail to sign with.
+  rm -f "$STUB_DIR/ssh-keygen"
+  ssh-keygen -t ed25519 -N '' -C isopod-test -f "$TEST_TMP/sign" -q
+  git -C "$host" config gpg.format ssh
+  git -C "$host" config user.signingkey "$TEST_TMP/sign.pub"
+  # The box tip is committed by Mate <mate@corp>; its parent by dev@mybox.local.
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_success
+  run git -C "$host" cat-file commit refs/remotes/mybox/master^
+  assert_success
+  assert_output --partial "gpgsig"
+  # A forge checks the signature against the committer, so a teammate's commit is
+  # rebuilt (its parent moved) but never signed with this host's key.
+  run git -C "$host" cat-file commit refs/remotes/mybox/master
+  assert_success
+  refute_output --partial "gpgsig"
+}
+
+@test "remap --sign-only rewrites no identity" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  # Real signing needs the real ssh-keygen: install_engine_stubs replaces it with
+  # one that writes a fake key, which git would then fail to sign with.
+  rm -f "$STUB_DIR/ssh-keygen"
+  ssh-keygen -t ed25519 -N '' -C isopod-test -f "$TEST_TMP/sign" -q
+  git -C "$host" config gpg.format ssh
+  git -C "$host" config user.signingkey "$TEST_TMP/sign.pub"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_success
+  run git -C "$host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "dev <dev@mybox.local>"
+  assert_output --partial "Mate <mate@corp>"
+}
+
+@test "remap --sign-only refuses the flags that describe a rewrite" {
+  _seed_remapped_host "$TEST_TMP/host"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --sign-only \
+    --old-email dev@mybox.local --force
+  assert_failure
+  assert_output --partial "rewrites no"
+}
+
+@test "remap --sign-only and --no-sign are refused together" {
+  _seed_remapped_host "$TEST_TMP/host"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --sign-only --no-sign --force
+  assert_failure
+  assert_output --partial "opposite things"
+}
+
+# The probe runs before any ref moves, and its message has to name the cause a
+# user can act on. gpg.format=ssh wants a PATH in user.signingkey, so a GPG key
+# id there is read as a filename and git reports a missing file.
+@test "the signing probe names the gpg.format=ssh key-path mistake" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  rm -f "$STUB_DIR/ssh-keygen" # the real one is what reports the missing file
+  git -C "$host" config gpg.format ssh
+  git -C "$host" config user.signingkey ABC123DEADBEEF
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_failure
+  assert_output --partial "gpg.format=ssh"
+  assert_output --partial "user.signingkey"
+  # nothing was touched
+  run git -C "$host" for-each-ref refs/remap-backup/
+  assert_output ""
+}
+
 @test "remap --remap-file works without a host git identity" {
   # A remap file supplies every identity, so the run must not require the host
   # repo (or any git config) to carry a user.name/user.email.

@@ -72,7 +72,7 @@ _isopod() {
       reconfigure) opts="--guest-egress --expose --memory --cpus --color" ;;
       code) opts="--app --reuse-window" ;;
       rm) opts="--force" ;;
-      remap) opts="--name --email --old-email --old-name --remap-file --sign --no-sign --force" ;;
+      remap) opts="--name --email --old-email --old-name --remap-file --sign --no-sign --sign-only --force" ;;
       fetch) opts="--path" ;;
       claude-code | claude | codex | opencode | pi) opts="--app --attach --color --no-color" ;;
     esac
