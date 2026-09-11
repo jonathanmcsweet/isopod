@@ -478,15 +478,20 @@ else
     note "resolvers the box was handed: $(printf '%s\n' "$A_RESOLV" | awk '/^nameserver/{printf "%s ", $2}')"
   fi
 
-  # F3. no-new-privileges is set at run time, and only for a box with no sudo
-  # policy. On a --sudo box its absence is the documented design, not a finding.
+  # F3. no-new-privileges, for a box with no sudo policy. On a --sudo box its
+  # absence is the documented design, not a finding. The engine flag alone never
+  # reached a microVM guest (it lands on the VMM process on the host), so the
+  # entrypoint sets the bit on sshd; a box created before that shipped, or one
+  # running --nested-containers, reads 0 here.
   A_NNP="$(printf '%s\n' "$AUDIT_STATUS" | awk '/^NoNewPrivs:/{print $2; exit}')"
   case "$A_SUDO" in
     no*)
       if [ "$A_NNP" = 1 ]; then
         ok "no-sudo box has NoNewPrivs=1"
       else
-        bad "box declares no sudo but NoNewPrivs=$A_NNP, so the setuid gate is not on"
+        bad "box declares no sudo but NoNewPrivs=$A_NNP, so the setuid gate is not on
+         (expected on a --nested-containers box, which needs setuid newuidmap;
+          otherwise the box predates the entrypoint setting it: isopod upgrade $AUDIT_BOX)"
       fi
       ;;
     *) note "NoNewPrivs=$A_NNP (expected on a sudo box: isopod sets the gate only where sudo is off)" ;;
@@ -533,7 +538,7 @@ else
   if ! printf '%s\n' "$A_ETC" | grep -qx '\.'; then
     bad "/etc/isopod does not list at all, so this box predates isopod's in-box files entirely"
   else
-    for f in hardening-sysctl.conf egress-guest.nft; do
+    for f in hardening-sysctl.conf hardening-sysctl-strict.conf egress-guest.nft; do
       if printf '%s\n' "$A_ETC" | grep -qx "$f"; then
         ok "/etc/isopod/$f present"
       else
@@ -579,10 +584,10 @@ else
   esac
 
   # F7. The four sysctls the 2026-09-01 review proposed adding to the default
-  # profile. Reported, not asserted: hardening-sysctl.conf already rejects two of
-  # them by name as strict-profile material (they break nested containers,
-  # profiling and rootless engines in the box), and a key this guest kernel does
-  # not expose would be a no-op. Measure before adopting any of them.
+  # profile. Reported, not asserted: three of them now ship in
+  # hardening-sysctl-strict.conf, which only a --harden strict box gets, and Yama's
+  # ptrace_scope is absent from the guest kernel entirely. So on a default box
+  # these read as they do on any box, which is the point of showing them.
   A_PROP="$(in_box "$AUDIT_BOX" 'grep -H . /proc/sys/kernel/unprivileged_bpf_disabled /proc/sys/kernel/yama/ptrace_scope /proc/sys/vm/unprivileged_userfaultfd /proc/sys/user/max_user_namespaces 2>/dev/null' 2>/dev/null)"
   note "sysctls the 2026-09-01 review proposed adding, as this box has them now:"
   for k in kernel/unprivileged_bpf_disabled kernel/yama/ptrace_scope vm/unprivileged_userfaultfd user/max_user_namespaces; do
@@ -593,6 +598,66 @@ else
       printf '        %-38s %s\n' "$k" "$v"
     fi
   done
+
+  # F8. The mount stack at /proc. A microVM box shows the guest's own procfs
+  # mounted over a virtiofs export from the host, and the only thing keeping the
+  # export out of reach is that mount ordering plus CapEff=0. Reported rather than
+  # asserted: what is under there has to be read off a real box, and this is the
+  # line that says so. If the export is ever reachable, the masks in
+  # security/hardening.conf are what limit it.
+  A_PROCMNT="$(in_box "$AUDIT_BOX" "awk '\$5==\"/proc\" {print \$3, \$(NF-2)}' /proc/self/mountinfo" 2>/dev/null)"
+  if [ -z "$A_PROCMNT" ]; then
+    skip "the /proc mount stack (mountinfo did not read)"
+  else
+    note "mounts at /proc (major:minor fstype), last one wins:"
+    printf '%s\n' "$A_PROCMNT" | sed 's/^/        /'
+    if [ "$(printf '%s\n' "$A_PROCMNT" | grep -c virtiofs)" -gt 0 ]; then
+      note "a virtiofs export sits under the guest procfs — it is the CONTAINER's /proc,"
+      note "which podman filled from the host; reaching it needs CAP_SYS_ADMIN the box"
+      note "does not have. The mask-microvm lines in security/hardening.conf cover the"
+      note "files that would matter if that ever changed."
+    fi
+  fi
+
+  # F9. Device nodes the entrypoint drops on a hardened microVM box. Each is a
+  # driver the box can otherwise reach; userfaultfd is the one that matters most.
+  # A --disk box keeps loop*, and a --nested-containers box keeps fuse and tun, so
+  # only report what is there rather than failing on a box that needs them.
+  A_DEV="$(in_box "$AUDIT_BOX" 'ls /dev' 2>/dev/null)"
+  case "${A_TIER:-}" in
+    microVM*)
+      A_DEVLEFT=""
+      for d in userfaultfd uinput btrfs-control loop-control loop0 fuse; do
+        printf '%s\n' "$A_DEV" | grep -qx "$d" && A_DEVLEFT="$A_DEVLEFT $d"
+      done
+      if [ -z "$A_DEVLEFT" ]; then
+        ok "the unused device nodes are gone from /dev"
+      else
+        note "device nodes still present:$A_DEVLEFT (expected on a --disk or --nested-containers"
+        note "box, and on any box created with --harden off or before this shipped)"
+      fi
+      ;;
+    *) note "the device trim is microVM-only and this box is ${A_TIER:-unknown}" ;;
+  esac
+
+  # F10. Setuid binaries the entrypoint strips. Every one it keeps is standing
+  # escalation surface, so name what is left rather than only counting.
+  A_SUID="$(in_box "$AUDIT_BOX" 'find /usr /bin /sbin -xdev -perm -4000 -type f 2>/dev/null | sort' 2>/dev/null)"
+  if [ -z "$A_SUID" ]; then
+    ok "no setuid-root binaries left in the box"
+  else
+    A_SUIDBAD=""
+    for b in su mount umount chsh chfn newgrp gpasswd passwd ssh-keysign; do
+      printf '%s\n' "$A_SUID" | grep -q "/$b\$" && A_SUIDBAD="$A_SUIDBAD $b"
+    done
+    if [ -n "$A_SUIDBAD" ]; then
+      bad "setuid bits isopod strips are still set:$A_SUIDBAD (run: isopod upgrade $AUDIT_BOX)"
+    else
+      ok "the setuid binaries isopod strips are all stripped"
+    fi
+    note "setuid-root binaries still in this box:"
+    printf '%s\n' "$A_SUID" | sed 's/^/        /'
+  fi
 fi
 
 # --- summary -----------------------------------------------------------------

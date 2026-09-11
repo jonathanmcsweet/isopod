@@ -98,6 +98,36 @@ if [ -n "$_iso_sudo" ]; then
   fi
 fi
 
+# The other setuid-root binaries the image ships that an isopod box never calls.
+# Login is key-only so there is no password to set, administration arrives over
+# the root key from the host, and the box user has no business mounting anything.
+# Each one it keeps is standing escalation surface: the next local-privesc bug in
+# any of them is root-in-box. Stripped on a --sudo box too, where they all still
+# work through sudo, which runs them as root and needs no setuid bit.
+#
+# Named one by one rather than "strip every setuid bit", because that would also
+# hit newuidmap/newgidmap (rootless podman in a --nested-containers box cannot
+# start without them) and fusermount3, and because a --image base may ship a
+# setuid binary its own tooling needs. Setgid bits are left alone for the same
+# reason: unix_chkpwd is setgid shadow and sits on sshd's PAM path.
+for iso_bin in su mount umount chsh chfn newgrp gpasswd passwd; do
+  iso_p="$(command -v "$iso_bin" 2>/dev/null || true)"
+  [ -n "$iso_p" ] && chmod u-s "$iso_p" 2>/dev/null
+done
+# ssh-keysign backs host-based auth, which sshd_config never enables here. Not on
+# PATH, so it needs its own line.
+[ -e /usr/lib/openssh/ssh-keysign ] && chmod u-s /usr/lib/openssh/ssh-keysign 2>/dev/null
+unset iso_bin iso_p
+
+# Whether sshd should run under PR_SET_NO_NEW_PRIVS; applied at the exec at the
+# end of this file, decided here where the sudo policy is already in hand. Same
+# rule as the engine's no-new-privileges flag: a box that is meant to escalate
+# keeps the ability to, every other box loses it. A --nested-containers box is
+# the exception, since rootless podman calls setuid newuidmap/newgidmap.
+iso_nnp=1
+[ -f "/etc/sudoers.d/$iso_u" ] && iso_nnp=0
+[ "${ISOPOD_NESTED:-}" = 1 ] && iso_nnp=0
+
 # Name resolution note (allow-list egress only). isopod runs an allow-list box
 # with `--dns=none`, so this box has no resolver at all: proxied clients hand the
 # hostname to the allow-list proxy, which resolves it. podman drops the file
@@ -214,21 +244,56 @@ if [ "${ISOPOD_NESTED:-}" = "1" ]; then
   done
 fi
 
-# Kernel hardening (default profile). isopod sets ISOPOD_HARDEN only for microVM
-# boxes, which have their own guest kernel — so applying these sysctls affects
-# only this box, never the host. Container boxes never receive it. Write straight
-# to /proc/sys (portable; no sysctl binary needed) and skip any key that isn't
-# writable, so a key the guest kernel doesn't expose — or a read-only entry — is a
-# no-op, not a boot failure.
-if [ -n "${ISOPOD_HARDEN:-}" ] && [ "$ISOPOD_HARDEN" != off ] &&
-  [ -f /etc/isopod/hardening-sysctl.conf ]; then
-  while IFS= read -r kv || [ -n "$kv" ]; do
-    case "$kv" in '' | '#'*) continue ;; esac
-    k="${kv%%=*}"
-    v="${kv#*=}"
-    p="/proc/sys/$(printf '%s' "$k" | tr . /)"
-    [ -w "$p" ] && printf '%s' "$v" >"$p" 2>/dev/null || true
-  done </etc/isopod/hardening-sysctl.conf
+# Kernel hardening: drop the device nodes this box does not use, then apply the
+# guest sysctls. isopod sets ISOPOD_HARDEN only for microVM boxes, which have
+# their own guest kernel, so both arms affect only this box and never the host.
+# A container box never receives it and has neither surface: its /dev is the small
+# set the engine creates, and its sysctls are the host's. --harden off skips both.
+#
+# 'strict' layers a second sysctl file of heavier toggles on top of the default
+# one; the order matters, since a key in both must end up at the strict value.
+# Write straight to /proc/sys (portable; no sysctl binary needed) and skip any key
+# that isn't writable, so a key the guest kernel doesn't expose — or a read-only
+# entry — is a no-op, not a boot failure.
+if [ -n "${ISOPOD_HARDEN:-}" ] && [ "$ISOPOD_HARDEN" != off ]; then
+  # Device nodes the guest kernel hands us that this box has no use for. Each one
+  # is a driver the box can reach: userfaultfd is a well known kernel exploitation
+  # primitive, and eight unbound loop devices plus loop-control are pure surface on
+  # a box with no block storage. Removing a node does NOT disable the driver behind
+  # it — userfaultfd is a syscall as well, which is what --harden strict turns off
+  # — and box root can mknod them back, so this raises the cost for the box user
+  # rather than closing the driver. Kept where the box actually uses them: loop*
+  # and loop-control back --disk (mounted just above), /dev/fuse and /dev/net/tun
+  # back --nested-containers. /dev/vsock stays: it is the guest's transport to the
+  # VMM, and nothing here can prove removing it is safe.
+  iso_trim="/dev/userfaultfd /dev/uinput /dev/btrfs-control /dev/mapper/control"
+  [ -n "${ISOPOD_DISK:-}" ] ||
+    iso_trim="$iso_trim /dev/loop-control /dev/loop[0-9]*"
+  [ "${ISOPOD_NESTED:-}" = 1 ] ||
+    iso_trim="$iso_trim /dev/fuse /dev/net/tun"
+  # unquoted on purpose: field-split the list and expand the loop glob
+  # shellcheck disable=SC2086
+  for iso_dev in $iso_trim; do
+    [ -e "$iso_dev" ] && rm -f "$iso_dev" 2>/dev/null
+  done
+  unset iso_trim
+
+  iso_harden_files=/etc/isopod/hardening-sysctl.conf
+  [ "$ISOPOD_HARDEN" = strict ] &&
+    iso_harden_files="$iso_harden_files /etc/isopod/hardening-sysctl-strict.conf"
+  # unquoted on purpose: field-split the one or two file paths
+  # shellcheck disable=SC2086
+  for iso_harden_f in $iso_harden_files; do
+    [ -f "$iso_harden_f" ] || continue
+    while IFS= read -r kv || [ -n "$kv" ]; do
+      case "$kv" in '' | '#'*) continue ;; esac
+      k="${kv%%=*}"
+      v="${kv#*=}"
+      p="/proc/sys/$(printf '%s' "$k" | tr . /)"
+      [ -w "$p" ] && printf '%s' "$v" >"$p" 2>/dev/null || true
+    done <"$iso_harden_f"
+  done
+  unset iso_harden_files iso_harden_f
 fi
 
 # The default gateway from the kernel's own routing table. Used by guest egress
@@ -563,4 +628,22 @@ unset ISOPOD_AUTHORIZED_KEY ISOPOD_ROOT_AUTHORIZED_KEY ISOPOD_SUDO ISOPOD_HARDEN
 unset ISOPOD_DISK ISOPOD_NESTED ISOPOD_DNS_VIA_PROXY ISOPOD_GUEST_EGRESS ISOPOD_GUEST_EGRESS_DNS
 unset ISOPOD_GUEST_EGRESS_ALLOW ISOPOD_GUEST_INBOUND
 mkdir -p /run/sshd
+
+# no-new-privileges, set here rather than left to the engine flag. podman's
+# --security-opt no-new-privileges sets PR_SET_NO_NEW_PRIVS on the process the OCI
+# runtime execs, which on a microVM box is the VMM on the HOST: the guest then
+# boots its own kernel and its PID 1 starts clean, reporting NoNewPrivs: 0. Setting
+# it on sshd hands it to every login session by inheritance, which is what a
+# container box already gets from the flag, so this makes the two tiers agree
+# rather than adding a new restriction.
+#
+# Best-effort: a base image without setpriv boots the way it did before instead of
+# failing. util-linux ships it, so this only bites an unusual --image.
+if [ "$iso_nnp" = 1 ]; then
+  if command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --no-new-privs /usr/sbin/sshd -D -e
+  fi
+  echo "isopod: setpriv is missing from this image, so the box starts without" >&2
+  echo "isopod: no-new-privileges; install util-linux in your base to restore it" >&2
+fi
 exec /usr/sbin/sshd -D -e

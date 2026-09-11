@@ -130,8 +130,11 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         an internal name behind your VPN works too). Box port must
                         be >= 1024. Manage later with 'isopod host-port'.
   --harden <level>      Kernel-hardening profile: 'default' (on for every box —
-                        reduced-surface guest sysctls on microVM boxes) or 'off'.
-                        'strict' is reserved for a future release.
+                        reduced-surface guest sysctls on microVM boxes), 'strict'
+                        (also turns off unprivileged eBPF, io_uring, user
+                        namespaces and perf_event_open, which costs you nested
+                        containers, io_uring tools and profiling; microVM only),
+                        or 'off'.
   --container           Run as a PLAIN container instead of the default microVM
                         (lower isolation). Use when no microVM runtime/KVM is
                         available, or you accept a shared-kernel sandbox.

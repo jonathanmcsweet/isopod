@@ -308,6 +308,20 @@ teardown() { isopod_teardown_env; }
   assert_output --partial "/sys/block"
 }
 
+# /proc/version names the host's build distro, build machine and toolchain, none
+# of which uname(2) gives away. It is a mask-microvm path, so a Tier 1/2 box must
+# NOT get it (there the file is the box's own view of the shared kernel and
+# masking it buys nothing while breaking anything that reads it).
+@test "hardening_run_args masks the host kernel build string only under a microVM" {
+  run hardening_run_args podman
+  assert_success
+  refute_output --partial "/proc/version"
+
+  ISOPOD_RUNTIME=krun run hardening_run_args podman
+  assert_success
+  assert_output --partial "/proc/version"
+}
+
 @test "hardening_run_args masks the host kernel build config on every tier" {
   # /proc/config.gz is the host kernel's full build config — a precise host
   # fingerprint — and is readable in a plain container too, not just a microVM.
@@ -1777,6 +1791,69 @@ EOF
   sshd_line=$(grep -n 'exec /usr/sbin/sshd' "$ISOPOD_ENTRYPOINT" | cut -d: -f1)
   [ -n "$rm_line" ] && [ -n "$sshd_line" ]
   [ "$rm_line" -lt "$sshd_line" ]
+}
+
+# ---- box entrypoint: kernel hardening (--harden) ------------------------------
+
+@test "the entrypoint layers the strict sysctls on top of the default ones" {
+  # Order matters: a key present in both files has to end up at the strict value,
+  # so the default file must be read first.
+  local def_line strict_line
+  def_line=$(grep -n 'iso_harden_files=/etc/isopod/hardening-sysctl.conf' "$ISOPOD_ENTRYPOINT" | cut -d: -f1)
+  strict_line=$(grep -n 'hardening-sysctl-strict.conf' "$ISOPOD_ENTRYPOINT" | head -1 | cut -d: -f1)
+  [ -n "$def_line" ] && [ -n "$strict_line" ]
+  [ "$def_line" -lt "$strict_line" ]
+  run grep -c 'ISOPOD_HARDEN" = strict' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  assert_output "1"
+}
+
+@test "the strict profile sets every key the default profile deliberately leaves" {
+  # The default profile names these as strict-profile material; if one is dropped
+  # from the strict file the docs and the profile stop agreeing.
+  for k in kernel.unprivileged_bpf_disabled kernel.io_uring_disabled \
+    user.max_user_namespaces kernel.perf_event_paranoid vm.unprivileged_userfaultfd; do
+    grep -q "^$k=" "$ISOPOD_ROOT/share/hardening-sysctl-strict.conf" || {
+      echo "missing from the strict profile: $k" >&2
+      return 1
+    }
+  done
+}
+
+@test "the entrypoint keeps the device nodes a --disk or nested box needs" {
+  # Trimming /dev is only safe because the two features that use those nodes opt
+  # out: --disk loop-mounts its volume, and rootless podman needs fuse and tun.
+  run grep -A2 'ISOPOD_DISK' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  assert_output --partial "/dev/loop-control"
+  run grep -A2 'ISOPOD_NESTED:-}" = 1' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  assert_output --partial "/dev/fuse"
+  assert_output --partial "/dev/net/tun"
+}
+
+@test "the entrypoint never strips the setuid bits rootless podman needs" {
+  # newuidmap/newgidmap and fusermount3 are setuid root and are exactly what a
+  # --nested-containers box cannot start a container without. Stripping them by
+  # widening the list would break that box with a confusing error.
+  run grep -n 'chmod u-s' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  refute_output --partial "newuidmap"
+  refute_output --partial "newgidmap"
+  refute_output --partial "fusermount"
+}
+
+@test "the entrypoint sets no-new-privileges on sshd, not on a sudo or nested box" {
+  # The engine flag sets PR_SET_NO_NEW_PRIVS on the VMM process on the host, so a
+  # microVM guest never saw it. Setting it on sshd is what makes the guest match a
+  # container box. A sudo box is meant to escalate, and a nested box calls setuid
+  # newuidmap, so both opt out.
+  run grep -c 'setpriv --no-new-privs /usr/sbin/sshd' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  assert_output "1"
+  run grep -c 'iso_nnp=0' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  assert_output "2"
 }
 
 # ---- remap_identity_filter.py -------------------------------------------------

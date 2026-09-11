@@ -1201,10 +1201,29 @@ EOF
   assert_output --partial "invalid --harden"
 }
 
-@test "create rejects --harden strict as reserved" {
-  run "$ISOPOD_ROOT/isopod" create demo --harden strict --color teal
+@test "create --harden strict records it in meta and passes it to the box" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --harden strict --color teal
+  assert_success
+  assert_stub_called "ISOPOD_HARDEN=strict"
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "harden=strict"
+}
+
+# Asked for explicitly, so it fails closed: the profile is guest sysctls, and a
+# container box would silently get none of them.
+@test "create rejects --harden strict on a container box" {
+  run "$ISOPOD_ROOT/isopod" create demo --harden strict --container --color teal
   assert_failure
-  assert_output --partial "not yet available"
+  assert_output --partial "--harden strict needs a microVM box"
+}
+
+# user.max_user_namespaces=0 is the centre of strict and is exactly what a
+# rootless engine in the box needs, so the two cannot both hold.
+@test "create rejects --harden strict with --nested-containers" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --harden strict \
+    --nested-containers --color teal
+  assert_failure
+  assert_output --partial "incompatible"
 }
 
 # ---- --memory / --cpus validation (§5) ---------------------------------------
@@ -1703,13 +1722,14 @@ seed_secret() { # seed_secret <name> <value>
 }
 
 # ---- upgrade: in-place (F-2) -------------------------------------------------
-@test "upgrade --in-place replaces all three isopod-owned files over the root key" {
+@test "upgrade --in-place replaces every isopod-owned file over the root key" {
   "$ISOPOD_ROOT/isopod" create demo --color teal
   : >"$STUB_LOG"
   run "$ISOPOD_ROOT/isopod" upgrade demo --in-place
   assert_success
   assert_stub_called "ssh .*id_ed25519_root .*/usr/local/bin/isopod-entrypoint"
   assert_stub_called "ssh .*id_ed25519_root .*/etc/isopod/hardening-sysctl.conf"
+  assert_stub_called "ssh .*id_ed25519_root .*/etc/isopod/hardening-sysctl-strict.conf"
   assert_stub_called "ssh .*id_ed25519_root .*/etc/isopod/egress-guest.nft"
 }
 

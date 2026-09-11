@@ -55,6 +55,10 @@ ISOPOD_ENTRYPOINT="${ISOPOD_ENTRYPOINT:-$ISOPOD_SHARE/isopod-entrypoint}"
 # Guest sysctl baseline, COPYed into the base image alongside the entrypoint
 # (applied by the entrypoint on microVM boxes only). Hashed into the image tag.
 ISOPOD_SYSCTL_CONF="${ISOPOD_SYSCTL_CONF:-$ISOPOD_SHARE/hardening-sysctl.conf}"
+# The extra sysctls `--harden strict` layers on top of the baseline above. Shipped
+# in the image alongside it and hashed into the image tag the same way; the
+# entrypoint reads it only when the box was created with --harden strict.
+ISOPOD_SYSCTL_STRICT_CONF="${ISOPOD_SYSCTL_STRICT_CONF:-$ISOPOD_SHARE/hardening-sysctl-strict.conf}"
 # Guest egress ruleset, COPYed into the base image and loaded by the entrypoint on
 # microVM boxes. Hashed into the image tag alongside the entrypoint, so editing it
 # forces a rebuild and marks existing boxes stale (see isopod upgrade).

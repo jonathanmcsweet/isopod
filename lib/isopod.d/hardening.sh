@@ -304,6 +304,12 @@ runtime_posture_note() {
 harden_posture_note() { # harden_posture_note <level>
   case "$1" in
     off) info "Kernel hardening: OFF (--harden off) — engine defaults only." ;;
+    strict)
+      # create refuses strict on a container box, so this arm is always a microVM.
+      info "Kernel hardening: STRICT profile — the default guest sysctls plus unprivileged eBPF,
+     io_uring, user namespaces and perf_event_open turned off. Nested containers,
+     io_uring tools and profiling will not work in this box."
+      ;;
     *)
       if is_microvm_runtime; then
         info "Kernel hardening: default profile — reduced-surface guest sysctls applied in the microVM."

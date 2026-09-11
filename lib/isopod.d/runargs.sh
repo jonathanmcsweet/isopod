@@ -176,6 +176,14 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # escalation to preserve, so block privilege gains (setuid binaries, newgrp).
   # On create the choice is in BOX_SUDO; on reconfigure (BOX_SUDO unset) read the
   # persisted meta. Absent/1 => sudo box => no flag, matching pre-feature boxes.
+  #
+  # This flag alone does NOT reach a microVM guest. The OCI runtime sets
+  # PR_SET_NO_NEW_PRIVS on the process it execs, which under krun is the VMM on
+  # this host; the guest then boots its own kernel and its PID 1 starts clean. The
+  # box entrypoint sets the bit itself before exec'ing sshd, under the same sudo
+  # rule, which is what actually gives a microVM box the property. Keep the flag
+  # regardless: on a container box it is the thing doing the work, and on a microVM
+  # it still constrains the VMM process.
   local box_sudo="${BOX_SUDO:-}"
   [ -n "$box_sudo" ] || box_sudo="$(meta_get "$name" sudo 2>/dev/null || true)"
   [ "$box_sudo" = 0 ] && RUN_ARGS+=(--security-opt no-new-privileges)
