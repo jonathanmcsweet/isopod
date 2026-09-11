@@ -900,7 +900,7 @@ cmd_remap() {
   # Signing runs on the finished rewrite, and reads the mailmap to decide which
   # identities it may sign for, so it has to come before the mailmap is dropped.
   local sign_mode=rewrite
-  [ "$sign_only" -eq 1 ] && sign_mode=sign-only
+  [ "$sign_only" -eq 1 ] && sign_mode="sign-only"
   [ "$sign" = 1 ] && { remap_sign_refs "$top" "$mm" "$sign_key" "$sign_mode" "${boxrefs[@]}" || true; }
   [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
 
