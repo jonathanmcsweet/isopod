@@ -166,6 +166,7 @@ More detailed docs live in [`docs/`](docs/):
 - **[macOS host-level egress](docs/macos-host-egress.md)** — why egress enforcement needs a different design on macOS, and how the host-`pf` backend works.
 - **[Releasing isopod](docs/RELEASING.md)** — how the version gate and Homebrew tap automation work.
 - **[VSCodium host-isolation audit](docs/isopod-vscodium-host-isolation-audit.md)** — code-level audit of what (if anything) crosses from host into the container.
+- **[Roadmap](docs/roadmap.md)**: decided work that is not built yet, and the reasoning behind each decision.
 
 ## License
 

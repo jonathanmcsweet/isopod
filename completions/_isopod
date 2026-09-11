@@ -119,7 +119,15 @@ _isopod() {
         migrate)
           _arguments '--account[move onto the sandbox account]' '--no-account[move off it]' '--force[skip confirmation]' '1:sandbox:_isopod_boxes'
           ;;
-        info|shell|claude-code|codex|opencode|pi|root-shell|upgrade|start|stop|export|copy-in)
+        claude-code|claude|codex|opencode|pi)
+          _arguments \
+            '--app[terminal to open the session in]:terminal:(ghostty kitty wezterm alacritty gnome-terminal konsole foot xfce4-terminal xterm)' \
+            '--attach[run in this window instead of opening one]' \
+            '--color[color the bar above the session]:color:(red orange amber green teal blue purple magenta gray box agent)' \
+            '--no-color[run with no bar]' \
+            '1:sandbox:_isopod_boxes'
+          ;;
+        info|shell|root-shell|upgrade|start|stop|export|copy-in)
           _arguments '1:sandbox:_isopod_boxes'
           ;;
       esac

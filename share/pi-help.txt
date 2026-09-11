@@ -1,4 +1,4 @@
-usage: isopod pi <box> [--app TERMINAL] [--attach] [-- args...]
+usage: isopod pi <box> [--app TERMINAL] [--attach] [--color C] [-- args...]
 
 Run the Pi coding agent inside a box. Starts the box if it is stopped, installs
 Pi if it is not there yet, then opens a new terminal window with a session in the
@@ -8,11 +8,22 @@ box's workspace, the way 'isopod code' opens an editor window.
                  default. Without either, the first one installed is used.
   --attach       run in THIS window instead of opening a new one, for a headless
                  host or when you would rather keep the session where you are.
+  --color <c>    color for the bar: a preset name, '#rrggbb', 'box' for the
+                 sandbox's own color or 'agent' for Pi's.
+                 ISOPOD_PI_COLOR sets a default.
+  --no-color     run with no bar, in a plain terminal.
   -- args...     passed through to pi, e.g. -- --help
 
 Terminals isopod knows: ghostty, kitty, wezterm, alacritty, gnome-terminal,
 konsole, foot, xfce4-terminal, xterm. A name that is not on the list is tried as
 a plain command, and a host with no terminal at all falls back to --attach.
+
+Telling windows apart: the session runs under a colored bar across the top row,
+in the box's own color, the same one 'isopod code' tints the IDE with, and the
+window title names the box and Pi. isopod reserves that row by handing Pi a
+terminal one line shorter, so nothing it draws can reach the bar. Pass --color
+agent for Pi's own color instead, which is what tells two agents apart in one
+box, and --no-color for a plain terminal.
 
 isopod downloads the release archive for the box's architecture and checks its
 SHA-256 on your machine, then copies it in over SSH and unpacks it there, so the

@@ -340,7 +340,7 @@ can_open_window() {
 # a session. Shared by isopod claude-code and isopod codex; the caller has already
 # run agent_select.
 agent_run() { # agent_run <argv...>
-  local name="" app="${ISOPOD_TERMINAL:-}" attach=0
+  local name="" app="${ISOPOD_TERMINAL:-}" attach=0 color="" nocolor=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --*=*) set -- "${1%%=*}" "${1#*=}" "${@:2}" ;;
@@ -358,6 +358,14 @@ agent_run() { # agent_run <argv...>
         attach=1
         shift
         ;;
+      --color)
+        color="$2"
+        shift 2
+        ;;
+      --no-color)
+        nocolor=1
+        shift
+        ;;
       --)
         shift
         break
@@ -369,11 +377,26 @@ agent_run() { # agent_run <argv...>
     esac
   done
   local -a rcmd=("$@")
-  [ -n "$name" ] || die "usage: isopod $AGENT <name> [--app TERMINAL] [--attach] [-- args...]"
+  [ -n "$name" ] || die "usage: isopod $AGENT <name> [--app TERMINAL] [--attach] [--color C] [-- args...]"
   open_box "$name"
   [ "$(meta_get "$name" offline 2>/dev/null || true)" = 1 ] &&
     die "'$name' is offline, so $AGENT_LABEL could not reach its API from it.
      Copying the binary in would work, but it would have nothing to talk to."
+
+  # Resolved once, here, and passed to the window opened below as a hex, so the
+  # session that gets the bar is the one the user is looking at and both halves
+  # agree on the color even if the environment differs between them.
+  local hex=""
+  if [ "$nocolor" = 0 ]; then
+    if [ -n "$color" ]; then
+      hex="$(agent_color_resolve "$color" "$name" "$AGENT")" ||
+        die "unknown color '$color' (use a preset name, '#rrggbb', 'box', 'agent', or --no-color)"
+    else
+      hex="$(agent_color "$AGENT" "$name" || true)"
+    fi
+  fi
+  local -a colorargs=(--no-color)
+  [ -n "$hex" ] && colorargs=(--color "$hex")
 
   # The window opened below re-runs this command with --attach, which is this
   # branch: no install, no prompts, just the session. Keeping setup in the calling
@@ -389,6 +412,7 @@ agent_run() { # agent_run <argv...>
       # environment and nowhere else.
       pre="$AGENT_SECRET=\$(cat $(shq "$keypath")); rm -f $(shq "$keypath"); export $AGENT_SECRET; "
     fi
+    agent_bar_on "$name" "$hex"
     box_ssh "$name" -t -- "${pre}cd '$WORKSPACE' 2>/dev/null; PATH=$AGENT_BOX_PATH exec $AGENT_BIN ${rcmd[*]:-}"
     return
   fi
@@ -406,7 +430,7 @@ agent_run() { # agent_run <argv...>
      Run 'isopod $AGENT $name --attach' to use this window instead."
     fi
     info "Opening $AGENT_LABEL in this window (no terminal to open one in)."
-    agent_run "$name" --attach ${pass[@]+"${pass[@]}"}
+    agent_run "$name" --attach "${colorargs[@]}" ${pass[@]+"${pass[@]}"}
     return
   fi
 
@@ -415,22 +439,46 @@ agent_run() { # agent_run <argv...>
   if [ -n "$TERM_MACOS_APP" ]; then
     # macOS has no -e convention: `open -a App <script>` runs a script in a new
     # window, which beats quoting a command through AppleScript.
-    local launcher
+    local launcher a
     launcher="$(box_dir "$name")/$AGENT-launch.command"
     {
       printf '#!/bin/sh\n'
-      printf 'exec %s %s %s --attach\n' "$(shq "$ISOPOD_BIN")" "$AGENT" "$(shq "$name")"
+      printf 'exec %s %s %s --attach' "$(shq "$ISOPOD_BIN")" "$AGENT" "$(shq "$name")"
+      for a in "${colorargs[@]}"; do printf ' %s' "$(shq "$a")"; done
+      printf '\n'
     } >"$launcher"
     chmod 755 "$launcher"
     open -a "$TERM_MACOS_APP" "$launcher" >"$log" 2>&1 ||
       die "could not open $TERM_NAME — see $log"
   else
-    "${TERM_CMD[@]}" "$ISOPOD_BIN" "$AGENT" "$name" --attach \
+    "${TERM_CMD[@]}" "$ISOPOD_BIN" "$AGENT" "$name" --attach "${colorargs[@]}" \
       ${pass[@]+"${pass[@]}"} >"$log" 2>&1 &
     disown || true
   fi
   info "$AGENT_LABEL opened in a new $TERM_NAME window for '$name'
        (if no window appears, check $log, or use --attach to run here)"
+}
+
+# Title the window, and arrange for the bar above the session. The bar itself is
+# drawn by lib/topbar.py, which has to own the pty, so it goes in front of ssh
+# rather than being printed from here: anything printed into the session is wiped
+# the moment the agent switches to the alternate screen.
+#
+# The box comes first in the label because a tab bar truncates the end, and which
+# sandbox this is matters more than which agent when they are side by side.
+agent_bar_on() { # agent_bar_on <name> <hex|''>
+  local label="$1 - $AGENT_LABEL"
+  term_set_title "$label"
+  [ -n "$2" ] || return 0
+  term_can_theme || return 0
+  # No python3 means no bar; the session is unaffected and everything else about
+  # these commands already needs it, so doctor names the package.
+  have python3 || return 0
+  [ -f "$ISOPOD_LIB/topbar.py" ] || return 0
+  # Read by box_ssh (ssh.sh), which shellcheck cannot see from here.
+  # shellcheck disable=SC2034
+  BOX_SSH_WRAP=(python3 "$ISOPOD_LIB/topbar.py" "$label" "$2" --)
+  return 0
 }
 
 # Start a stopped box and refresh its port, the way shell and code do.

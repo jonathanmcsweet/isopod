@@ -1,0 +1,16 @@
+# isopod per-agent colors — read by agent_preset().
+#
+# A session's bar takes the BOX's color by default, the way `isopod code` tints
+# the IDE. These are what `--color agent` selects instead, which is how two
+# agents running in the same box are told apart. The hex behind each preset name
+# lives in share/colors; the colors are picked to be distinct from each other
+# rather than to match anyone's brand.
+#
+# Override per agent with ISOPOD_<AGENT>_COLOR (a preset name, '#rrggbb', 'box'
+# or 'agent'), or per run with --color. --no-color runs with no bar.
+#
+# agent     preset
+claude      orange
+codex       teal
+opencode    blue
+pi          purple

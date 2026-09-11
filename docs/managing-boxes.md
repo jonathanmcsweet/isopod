@@ -54,6 +54,7 @@ isopod opencode myproj                 # ... with opencode
 isopod pi myproj                       # ... with the Pi agent
 isopod claude-code myproj --app kitty  # pick the terminal
 isopod codex myproj --attach           # run in this window instead
+isopod pi myproj --color box           # use the sandbox's color, not Pi's
 ```
 
 All four commands work the same way. The first run puts the agent in the box,
@@ -91,6 +92,43 @@ with `opencode auth login` and `/login`, which take whichever provider or
 subscription you have. To hand one a stored key anyway, name it in
 `ISOPOD_OPENCODE_SECRET` or `ISOPOD_PI_SECRET`. GitHub is where three of the four
 fetch releases and updates, and the shipped baseline already allows it.
+
+### Telling the windows apart
+
+Four agent windows look identical, so each session runs under a colored bar
+across its top row, in the box's own color: the same color `isopod code` tints
+the IDE with, so a box looks the same whichever way you open it. The window title
+names the box and the agent, which is what GNOME and KDE show in alt-tab and the
+taskbar.
+
+isopod reserves that row by handing the agent a terminal one line shorter than
+the real one and setting a scroll region below the bar, so nothing the agent
+draws can reach it. That work is done by `lib/topbar.py`, which relays the
+session untouched and only repaints the bar when the agent erases the screen or
+the window is resized. If it can't start, the session runs normally without a
+bar.
+
+```sh
+isopod codex myproj --color magenta   # this window only
+isopod codex myproj --color agent     # Codex's own color, not the box's
+isopod codex myproj --no-color        # plain terminal, no bar
+export ISOPOD_CODEX_COLOR=agent       # every Codex window from now on
+```
+
+`--color agent` is worth knowing about when you run two agents in the *same*
+box: they share the box color otherwise, and the per-agent palette in
+`share/agent-colors` gives each one its own.
+
+| agent | its own color |
+| --- | --- |
+| `claude-code` | orange |
+| `codex` | teal |
+| `opencode` | blue |
+| `pi` | purple |
+
+The bar needs python3, which these commands already need, and a real terminal:
+piping a session to a file gets no escape sequences, and `NO_COLOR` turns it off
+the way it does elsewhere.
 
 On a box using the egress allow-list, isopod prints the hostnames the agent needs
 and leaves your allow-list alone, since one list covers every box on the host.
@@ -180,6 +218,9 @@ refused args above, for the rare environment that genuinely needs it.
 `ISOPOD_MICROVM_MEMORY` — default guest memory when a Tier 3 microVM runtime is active and no `--memory` is given (default `2g`).
 `ISOPOD_MICROVM_ANNOTATIONS` — space-separated `krun.*` OCI annotations passed to a microVM guest (e.g. `krun.nested_virt=1`); Podman only.
 `ISOPOD_HARDENING_CONF` — path to an alternate baseline [fingerprint-hardening profile](security-model.md#fingerprint-hardening) (advanced; for per-user tweaks layer an override at `~/.config/isopod/hardening.conf` instead).
+
+`ISOPOD_TERMINAL` sets the default terminal for the agent commands, taking the same names as `--app`.
+`ISOPOD_CLAUDE_COLOR`, `ISOPOD_CODEX_COLOR`, `ISOPOD_OPENCODE_COLOR`, `ISOPOD_PI_COLOR` each override the bar color for one agent, taking a preset name, `#rrggbb`, `box` for the sandbox's own color or `agent` for that agent's. `NO_COLOR` turns the bar off entirely.
 
 `ISOPOD_SSH_WAIT_TRIES` — how many 1s attempts `create`/`start` make waiting for sshd before giving up (default `30`).
 

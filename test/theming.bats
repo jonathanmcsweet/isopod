@@ -216,3 +216,527 @@ EOF
   run "$PYTHON3" -c "import json;print(json.load(open('$ws/.vscode/settings.json'))['editor.tabSize'])"
   assert_output "2"
 }
+
+
+# ---- agent session color -----------------------------------------------------
+# An agent session is marked by a colored bar across the top row, in the box's
+# own color, the way `isopod code` tints the IDE. These cover which color a
+# session resolves to and how it reaches the process that draws the bar.
+
+mk_box() { # mk_box <name> <meta-line...>
+  mkdir -p "$BOXES_DIR/$1"
+  printf '%s\n' "${@:2}" >"$BOXES_DIR/$1/meta"
+}
+
+@test "a session takes the box's own color, like the IDE tint does" {
+  mk_box demo 'engine=podman' 'color=#123456'
+  assert_equal "$(agent_color codex demo)" "#123456"
+  assert_equal "$(agent_color pi demo)" "#123456"
+}
+
+@test "a box with no color falls back to the agent's own" {
+  mk_box plain 'engine=podman'
+  assert_equal "$(agent_color codex plain)" "$(preset_color "$(agent_preset codex)")"
+}
+
+@test "ISOPOD_<AGENT>_COLOR overrides the box color, for that agent only" {
+  mk_box demo 'engine=podman' 'color=#123456'
+  ISOPOD_PI_COLOR=magenta
+  assert_equal "$(agent_color pi demo)" "$(preset_color magenta)"
+  assert_equal "$(agent_color codex demo)" "#123456"
+  ISOPOD_PI_COLOR="#abcdef"
+  assert_equal "$(agent_color pi demo)" "#abcdef"
+}
+
+# Two agents in ONE box would otherwise share a color, which is the case the
+# per-agent palette still exists for.
+@test "a color of 'agent' picks the agent's own, distinct per agent" {
+  mk_box demo 'engine=podman' 'color=#123456'
+  local a b
+  a="$(agent_color_resolve agent demo claude)"
+  b="$(agent_color_resolve agent demo codex)"
+  [ "$a" != "$b" ]
+  assert_equal "$a" "$(preset_color "$(agent_preset claude)")"
+}
+
+@test "every agent has a color in the table, and no two share one" {
+  local a hex seen=""
+  for a in claude codex opencode pi; do
+    hex="$(preset_color "$(agent_preset "$a")")"
+    [[ "$hex" =~ ^#[0-9a-f]{6}$ ]]
+    case " $seen " in *" $hex "*) return 1 ;; esac
+    seen="$seen $hex"
+  done
+}
+
+@test "agent_preset refuses an agent with no row" {
+  run agent_preset gemini
+  assert_failure
+}
+
+@test "agent_color_resolve refuses an unknown preset and reads 'off' as none" {
+  mk_box demo 'engine=podman' 'color=#123456'
+  run agent_color_resolve chartreuse demo codex
+  assert_failure
+  run agent_color_resolve off demo codex
+  assert_failure
+  run agent_color_resolve '' demo codex
+  assert_failure
+}
+
+# ---- the window title --------------------------------------------------------
+
+@test "the title leads with the box, and is sanitized" {
+  term_can_theme() { return 0; }
+  run term_set_title 'demo - Codex'
+  assert_output $'\033]0;demo - Codex\a'
+  # a control character in the label cannot open a second title sequence
+  run term_set_title "$(printf 'demo\033]0;pwned\a')"
+  refute_output --partial $'\033]0;pwned'
+  [ "$(printf '%s' "$output" | grep -c $'\033]0;')" = 1 ]
+}
+
+@test "nothing is emitted when stdout is not a terminal" {
+  # bats gives the test a pipe, which is exactly the case being checked.
+  run term_set_title 'demo - Codex'
+  assert_success
+  assert_output ''
+}
+
+@test "NO_COLOR and a dumb terminal turn theming off" {
+  NO_COLOR=1 run term_set_title 'demo'
+  assert_output ''
+  TERM=dumb run term_set_title 'demo'
+  assert_output ''
+}
+
+# ---- handing the bar to the session ------------------------------------------
+# The bar has to be drawn by something that owns the pty ssh runs on, so
+# agent_bar_on arranges for topbar.py to wrap ssh rather than printing anything
+# itself. Anything printed into the session is wiped the moment the agent
+# switches to the alternate screen.
+
+@test "agent_bar_on puts topbar in front of ssh with the label and color" {
+  agent_select codex
+  term_can_theme() { return 0; }
+  agent_bar_on demo '#c2410c'
+  assert_equal "${BOX_SSH_WRAP[0]}" "python3"
+  assert_equal "${BOX_SSH_WRAP[1]}" "$ISOPOD_LIB/topbar.py"
+  assert_equal "${BOX_SSH_WRAP[2]}" "demo - Codex"
+  assert_equal "${BOX_SSH_WRAP[3]}" "#c2410c"
+  assert_equal "${BOX_SSH_WRAP[4]}" "--"
+}
+
+@test "agent_bar_on arranges nothing when there is no color" {
+  agent_select codex
+  term_can_theme() { return 0; }
+  agent_bar_on demo ''
+  assert_equal "${#BOX_SSH_WRAP[@]}" 0
+}
+
+@test "agent_bar_on arranges nothing without a terminal or without python3" {
+  agent_select codex
+  term_can_theme() { return 1; }
+  agent_bar_on demo '#c2410c'
+  assert_equal "${#BOX_SSH_WRAP[@]}" 0
+  term_can_theme() { return 0; }
+  have() { [ "$1" != python3 ]; }
+  agent_bar_on demo '#c2410c'
+  assert_equal "${#BOX_SSH_WRAP[@]}" 0
+}
+
+# The hook is only useful if box_ssh actually honors it, and every other caller
+# has to be unaffected.
+@test "box_ssh runs ssh under the wrapper, and plainly without one" {
+  mk_box demo 'engine=podman' 'port=2222'
+  : >"$(box_dir demo)/id_ed25519"
+  : >"$(box_dir demo)/known_hosts"
+  make_stub ssh 0
+  make_stub wrapper 0
+  BOX_SSH_WRAP=(wrapper --)
+  box_ssh demo -- true
+  assert_stub_called "wrapper -- ssh -p 2222"
+  : >"$STUB_LOG"
+  BOX_SSH_WRAP=()
+  box_ssh demo -- true
+  assert_stub_called "ssh -p 2222"
+  assert_stub_not_called "wrapper"
+}
+
+# ---- the color reaches the session that draws the bar ------------------------
+agent_color_harness() { # agent_color_harness <agent>
+  agent_select "$1"
+  mk_box demo 'engine=podman' 'port=2222' 'color=#123456'
+  open_box() { :; }
+  agent_start_box() { :; }
+  agent_ensure_installed() { :; }
+  agent_ensure_key() { :; }
+  agent_egress_note() { :; }
+  can_open_window() { return 1; }
+  box_ssh() { :; }
+  agent_bar_on() { printf '%s' "${2:-}" >"$TEST_TMP/barred"; }
+  : >"$TEST_TMP/barred"
+}
+
+@test "a session gets the box color by default" {
+  agent_color_harness codex
+  agent_run demo >/dev/null
+  assert_equal "$(cat "$TEST_TMP/barred")" "#123456"
+}
+
+@test "--color overrides it for one run, in both spellings" {
+  agent_color_harness codex
+  agent_run demo --color magenta >/dev/null
+  assert_equal "$(cat "$TEST_TMP/barred")" "$(preset_color magenta)"
+  agent_run demo --color=agent >/dev/null
+  assert_equal "$(cat "$TEST_TMP/barred")" "$(preset_color "$(agent_preset codex)")"
+}
+
+@test "--no-color leaves the session with no bar" {
+  agent_color_harness pi
+  agent_run demo --no-color >/dev/null
+  assert_equal "$(cat "$TEST_TMP/barred")" ""
+}
+
+@test "an unknown --color is refused before the box is touched" {
+  agent_color_harness claude
+  run agent_run demo --color chartreuse
+  assert_failure
+  assert_output --partial "unknown color 'chartreuse'"
+  assert_equal "$(cat "$TEST_TMP/barred")" ""
+}
+
+@test "the terminal isopod opens is told which color to use" {
+  agent_color_harness codex
+  can_open_window() { return 0; }
+  find_term_bin() {
+    TERM_CMD=(recorder)
+    TERM_NAME=recorder
+    TERM_MACOS_APP=""
+    return 0
+  }
+  make_stub recorder 0
+  agent_run demo >/dev/null
+  # The launch is backgrounded and disowned, so wait for the stub to record it.
+  local i
+  for i in $(seq 1 100); do
+    grep -q recorder "$STUB_LOG" 2>/dev/null && break
+    sleep 0.02
+  done
+  run cat "$STUB_LOG"
+  assert_output --partial "--attach --color #123456"
+}
+
+@test "the macOS launcher script carries the color too" {
+  agent_color_harness claude
+  can_open_window() { return 0; }
+  find_term_bin() {
+    TERM_CMD=()
+    TERM_NAME=Ghostty
+    TERM_MACOS_APP=Ghostty
+    return 0
+  }
+  make_stub open 0
+  agent_run demo --color magenta >/dev/null
+  run cat "$(box_dir demo)/claude-launch.command"
+  assert_output --partial "--attach"
+  assert_output --partial "--color"
+  assert_output --partial "$(preset_color magenta)"
+}
+
+# ---- topbar.py: reserving the row --------------------------------------------
+# The helper keeps a full-screen TUI off the top row by lying about the terminal
+# size and letting the terminal do the offset (scroll region plus origin mode),
+# so it never has to understand what the command draws. ptyrun.py gives it the
+# terminal of a known size it needs; a fake TUI stands in for the agent.
+
+TOPBAR() { printf '%s' "$ISOPOD_ROOT/lib/topbar.py"; }
+
+fake_tui() { # fake_tui -> path to a program that behaves like an agent TUI
+  local f="$TEST_TMP/faketui.py"
+  cat >"$f" <<'PY'
+import os, sys
+cols, rows = os.get_terminal_size(1)
+sys.stdout.write("\x1b[?1049h")   # alternate screen, as every agent TUI does
+sys.stdout.write("\x1b[2J")       # erase all: ignores margins, takes the bar
+sys.stdout.write("\x1b[1;1HSIZE rows=%d cols=%d" % (rows, cols))
+sys.stdout.write("\x1b[?1049l")
+sys.stdout.flush()
+PY
+  printf '%s' "$f"
+}
+
+topbar_run() { # topbar_run <rows> <cols> <label> <color> <command...>
+  local rows="$1" cols="$2" label="$3" color="$4"
+  shift 4
+  python3 "$ISOPOD_ROOT/test/ptyrun.py" "$rows" "$cols" \
+    python3 "$(TOPBAR)" "$label" "$color" -- "$@"
+}
+
+@test "topbar hands the command a terminal one row shorter" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' python3 "$(fake_tui)"
+  assert_success
+  assert_output --partial "SIZE rows=23 cols=40"
+}
+
+@test "topbar paints the bar on the top row and keeps the command below it" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' python3 "$(fake_tui)"
+  assert_success
+  # origin mode off to reach row 1, the bar, then the region and origin mode back
+  assert_output --partial $'\033[?6l\033[1;1H'
+  assert_output --partial $'\033[48;2;194;65;12m'
+  assert_output --partial 'demo - Codex'
+  assert_output --partial $'\033[2;24r'
+  assert_output --partial $'\033[?6h'
+}
+
+# The command erases the whole display, which by spec ignores margins. Without a
+# repaint the bar is gone for the rest of the session.
+@test "topbar repaints after the command erases the screen" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' python3 "$(fake_tui)"
+  local painted
+  painted="$(printf '%s' "$output" | grep -o 'demo - Codex' | wc -l)"
+  [ "$painted" -ge 2 ]
+}
+
+@test "topbar puts the terminal back when the command exits" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' true
+  assert_success
+  # origin mode off, scroll region reset, bar row erased
+  assert_output --partial $'\033[?6l\033[r\033[1;1H\033[2K'
+}
+
+@test "topbar relays the command's own output unchanged" {
+  run topbar_run 24 40 'demo - Codex' '#c2410c' printf 'hello world\n'
+  assert_output --partial 'hello world'
+}
+
+@test "topbar passes the command's exit status through" {
+  run topbar_run 24 40 'demo' '#c2410c' sh -c 'exit 3'
+  # ptyrun reports the pty output, so check topbar's own status directly
+  run python3 "$(TOPBAR)" 'demo' '#c2410c' -- sh -c 'exit 3'
+  assert_failure 3
+}
+
+# Fail open: without a terminal there is no bar to draw, and the command must
+# still run normally rather than the session breaking.
+@test "topbar runs the command directly when there is no terminal" {
+  run python3 "$(TOPBAR)" 'demo' '#c2410c' -- printf 'ran anyway\n'
+  assert_success
+  assert_output 'ran anyway'
+  refute_output --partial $'\033['
+}
+
+@test "topbar runs the command directly when the color is malformed" {
+  run topbar_run 24 40 'demo' 'not-a-color' printf 'ran anyway\n'
+  assert_success
+  assert_output --partial 'ran anyway'
+  refute_output --partial $'\033[48;2;'
+}
+
+# ---- topbar.py: the escape sequence scanner ----------------------------------
+# It exists to answer two questions: where does a sequence end (so the bar is
+# never painted into the middle of one), and does this sequence undo the
+# arrangement. It classifies nothing else.
+
+topbar_py() { # topbar_py <python-expression-body>
+  python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('topbar', '$ISOPOD_ROOT/lib/topbar.py')
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+$1"
+}
+
+@test "the scanner finds the end of each kind of escape sequence" {
+  run topbar_py "
+print(m.seq_end(b'\x1b[2J', 0))          # CSI
+print(m.seq_end(b'\x1b]0;title\x07', 0)) # OSC ended by BEL
+print(m.seq_end(b'\x1b]0;t\x1b\\\\', 0)) # OSC ended by ST
+print(m.seq_end(b'\x1bc', 0))            # two-byte
+print(m.seq_end(b'\x1b(B', 0))           # intermediate then final
+"
+  assert_line --index 0 '4'
+  assert_line --index 1 '10'
+  assert_line --index 2 '7'
+  assert_line --index 3 '2'
+  assert_line --index 4 '3'
+}
+
+@test "the scanner reports a cut-off sequence rather than guessing its end" {
+  run topbar_py "
+print(m.seq_end(b'\x1b[2', 0))
+print(m.seq_end(b'\x1b]0;unterminated', 0))
+print(m.seq_end(b'\x1b', 0))
+"
+  assert_output $'None\nNone\nNone'
+}
+
+@test "a sequence split across reads is never painted into" {
+  run topbar_py "
+s = m.Scanner()
+print(s.feed(b'text\x1b[2'))   # ends mid-sequence: not safe to inject
+print(s.feed(b'J'))            # completes it: an erase, and now safe
+"
+  assert_line --index 0 "(None, False)"
+  assert_line --index 1 "('erase', True)"
+}
+
+@test "a UTF-8 character split across reads is never painted into" {
+  run topbar_py "
+s = m.Scanner()
+print(s.feed('日'.encode()[:2]))
+print(s.feed('日'.encode()[2:]))
+"
+  assert_line --index 0 "(None, False)"
+  assert_line --index 1 "(None, True)"
+}
+
+# Which repaint a sequence earns is the difference between a session that reads
+# normally and one whose output is thrown back to the top of the screen: an erase
+# only scrubbed the bar off, so the cursor can be put back, while a reset has to
+# rebuild the arrangement and cannot.
+@test "sequences that rebuild the arrangement are told from ones that only erase" {
+  run topbar_py "
+for seq in (b'\x1bc', b'\x1b[r', b'\x1b[2;24r', b'\x1b[!p',
+            b'\x1b[?1049h', b'\x1b[?1049l', b'\x1b[?47h', b'\x1b[?6l',
+            b'\x1b[?25l;6h'):
+    assert m.damage_kind(seq) == 'reset', seq
+for seq in (b'\x1b[2J', b'\x1b[3J', b'\x1b[?2J'):
+    assert m.damage_kind(seq) == 'erase', seq
+print('ok')
+"
+  assert_output 'ok'
+}
+
+@test "the scanner leaves ordinary sequences alone" {
+  run topbar_py "
+for seq in (b'\x1b[0m', b'\x1b[1;1H', b'\x1b[K', b'\x1b[?25l', b'\x1b[38;2;1;2;3m',
+            b'\x1b]0;title\x07', b'\x1b7', b'\x1b[0J', b'\x1b[1J'):
+    assert m.damage_kind(seq) is None, seq
+print('ok')
+"
+  assert_output 'ok'
+}
+
+# A reset seen alongside an erase in the same read has to win, or the arrangement
+# is never rebuilt.
+@test "a reset outranks an erase in the same read" {
+  run topbar_py "
+s = m.Scanner()
+print(s.feed(b'\x1b[2J\x1b[?1049h')[0])
+print(m.Scanner().feed(b'\x1b[?1049h\x1b[2J')[0])
+"
+  assert_output $'reset\nreset'
+}
+
+# The width matters: a bar short of the terminal leaves a gap, and one over it
+# wraps onto the row the session is using.
+@test "the bar fills the width exactly and picks readable text for its color" {
+  run topbar_py "
+import re
+plain = lambda s: re.sub(rb'\x1b\\[[0-9;]*m', b'', s)
+print(b'38;2;255;255;255' in m.bar_line('demo', (194, 65, 12), 20))  # white on dark
+print(b'38;2;0;0;0' in m.bar_line('demo', (240, 240, 200), 20))      # black on pale
+print(len(plain(m.bar_line('demo', (1, 2, 3), 20))))
+print(len(plain(m.bar_line('a-very-long-box-name - Claude Code', (1, 2, 3), 12))))
+"
+  assert_line --index 0 'True'
+  assert_line --index 1 'True'
+  assert_line --index 2 '20'
+  assert_line --index 3 '12'
+}
+
+# A resize is the case that went visibly wrong first: the size was captured once
+# at startup, so after the window changed, every repaint drew a bar sized for the
+# old width, which wrapped onto the row below and left fragments of bar down the
+# screen. The size is read at each paint now, and SIGWINCH wakes the relay
+# through a self-pipe rather than waiting for the agent to write something.
+@test "topbar repaints at the new size when the window is resized" {
+  python3 "$ISOPOD_ROOT/test/ptyrun.py" 24 80 --resize 30x40 \
+    python3 "$(TOPBAR)" 'demo - Codex' '#c2410c' -- sh -c 'sleep 3' >"$TEST_TMP/resize.raw"
+  # A bar drawn at each width, never one wider than the terminal it went into,
+  # and a scroll region that ended up following the new height.
+  run topbar_py "
+import re
+out = open('$TEST_TMP/resize.raw', 'rb').read()
+bars = re.findall(rb'\x1b\\[1;1H\x1b\\[48;2;194;65;12m\x1b\\[38;2;\d+;\d+;\d+m\x1b\\[1m(.*?)\x1b\\[0m', out, re.S)
+widths = [len(b) for b in bars]
+regions = [r.decode() for r in re.findall(rb'\x1b\\[2;(\d+)r', out)]
+assert 80 in widths and 40 in widths, widths
+assert widths.index(40) > widths.index(80), widths
+assert regions[-1] == '30', regions
+print('ok')
+"
+  assert_output 'ok'
+}
+
+@test "the bar cannot spill onto the row below it" {
+  # A bar exactly as wide as the terminal leaves the cursor past the last column,
+  # and terminals differ on when that becomes a wrap, so autowrap is off for the
+  # write and back on straight after.
+  run python3 "$ISOPOD_ROOT/test/ptyrun.py" 24 40 \
+    python3 "$(TOPBAR)" 'demo' '#c2410c' -- true
+  assert_output --partial $'\033[?7l'
+  assert_output --partial $'\033[?7h'
+}
+
+# The defect this exists to prevent: a repaint that homes the cursor throws the
+# agent's next output to the top of the region, interleaving it with whatever was
+# already on screen. After an erase the repaint must put the cursor back.
+@test "an erase mid-session does not move the agent's cursor" {
+  python3 "$ISOPOD_ROOT/test/ptyrun.py" 24 40 \
+    python3 "$(TOPBAR)" 'demo' '#c2410c' -- python3 -c "
+import sys, time
+w = sys.stdout.write
+w('hello'); sys.stdout.flush(); time.sleep(0.15)
+w('\x1b[2J'); sys.stdout.flush(); time.sleep(0.15)
+w('still-here'); sys.stdout.flush(); time.sleep(0.15)
+" >"$TEST_TMP/erase.raw"
+  run cat "$TEST_TMP/erase.raw"
+  # the repaint after the erase is bracketed by save/restore ...
+  assert_output --partial $'\033[2J\0337'
+  assert_output --partial $'\033[?7h\0338still-here'
+  # ... and does not rebuild the arrangement, which would move the cursor
+  refute_output --partial $'\033[?7h\033[2;24r\0338'
+}
+
+# ---- topbar.py: mouse reports ------------------------------------------------
+# Origin mode offsets what the agent DRAWS, but a mouse report carries physical
+# coordinates and is offset by nothing, so a click on the agent's first row would
+# arrive as row 2 and act on the wrong line. In a menu that means selecting the
+# wrong entry, which is why every report is shifted on the way in.
+
+@test "a mouse click is reported on the row the agent thinks it is on" {
+  run topbar_py "
+print(m.shift_mouse(b'\x1b[<0;10;5M'))     # SGR press, mode 1006
+print(m.shift_mouse(b'\x1b[<0;10;5m'))     # SGR release
+print(m.shift_mouse(b'\x1b[M' + bytes([32, 42, 37])))  # X10 encoding
+"
+  assert_line --index 0 "b'\x1b[<0;10;4M'"
+  assert_line --index 1 "b'\x1b[<0;10;4m'"
+  assert_line --index 2 "b'\x1b[M *\$'"
+}
+
+@test "a click on the bar row itself does not shift off the screen" {
+  run topbar_py "print(m.shift_mouse(b'\x1b[<0;10;1M'))"
+  assert_output "b'\x1b[<0;10;1M'"
+}
+
+@test "ordinary keys and other sequences reach the agent untouched" {
+  run topbar_py "
+for data in (b'hello', b'\x1b[A', b'\x1b', b'\x1b[200~paste\x1b[201~', b'\x03'):
+    print(m.shift_mouse(data) == data)
+"
+  refute_output --partial 'False'
+}
+
+@test "a mouse report split across reads is not mangled" {
+  # The tail is passed through whole rather than half-rewritten; the terminal
+  # sends a report in one write, so this is the safe fallback, not the norm.
+  run topbar_py "
+out = m.shift_mouse(b'\x1b[<0;10')
+print(out == b'\x1b[<0;10')
+"
+  assert_output 'True'
+}
