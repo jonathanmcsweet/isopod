@@ -1820,6 +1820,27 @@ EOF
   done
 }
 
+# mem, port and the per-cpu msr/cpuid nodes read and write physical memory, I/O
+# ports and model-specific registers. They are the reason this trim is worth
+# having, so losing one from the list should fail here rather than in an audit.
+@test "the entrypoint drops the device nodes that read and write the machine" {
+  run grep 'iso_trim=' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  for d in /dev/mem /dev/port msr cpuid /dev/userfaultfd; do
+    assert_output --partial "$d"
+  done
+}
+
+# The guest talks to the VMM over these, and dmesg_restrict already covers kmsg.
+@test "the entrypoint leaves the guest's console and VMM transport alone" {
+  run grep 'iso_trim=' "$ISOPOD_ENTRYPOINT"
+  assert_success
+  refute_output --partial "/dev/vsock"
+  refute_output --partial "/dev/hvc"
+  refute_output --partial "/dev/vport"
+  refute_output --partial "/dev/kmsg"
+}
+
 @test "the entrypoint keeps the device nodes a --disk or nested box needs" {
   # Trimming /dev is only safe because the two features that use those nodes opt
   # out: --disk loop-mounts its volume, and rootless podman needs fuse and tun.

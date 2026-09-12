@@ -627,7 +627,7 @@ else
   case "${A_TIER:-}" in
     microVM*)
       A_DEVLEFT=""
-      for d in userfaultfd uinput btrfs-control loop-control loop0 fuse; do
+      for d in mem port userfaultfd uinput btrfs-control loop-control loop0 fuse; do
         printf '%s\n' "$A_DEV" | grep -qx "$d" && A_DEVLEFT="$A_DEVLEFT $d"
       done
       if [ -z "$A_DEVLEFT" ]; then

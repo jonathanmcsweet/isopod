@@ -264,9 +264,19 @@ if [ -n "${ISOPOD_HARDEN:-}" ] && [ "$ISOPOD_HARDEN" != off ]; then
   # — and box root can mknod them back, so this raises the cost for the box user
   # rather than closing the driver. Kept where the box actually uses them: loop*
   # and loop-control back --disk (mounted just above), /dev/fuse and /dev/net/tun
-  # back --nested-containers. /dev/vsock stays: it is the guest's transport to the
-  # VMM, and nothing here can prove removing it is safe.
+  # back --nested-containers.
+  #
+  # mem, port and the per-cpu msr/cpuid nodes matter more than the rest of the
+  # list put together: they read and write physical memory, I/O ports and model
+  # specific registers, which is exactly what an escape chain reaches for. Nothing
+  # in a development box uses any of them, and CPUID is available to userspace as
+  # an instruction regardless.
+  #
+  # Deliberately kept: /dev/vsock is the guest's transport to the VMM; hvc* and
+  # vport* are its console and serial ports; /dev/kmsg is already gated by
+  # kernel.dmesg_restrict in the default profile.
   iso_trim="/dev/userfaultfd /dev/uinput /dev/btrfs-control /dev/mapper/control"
+  iso_trim="$iso_trim /dev/mem /dev/port /dev/cpu/[0-9]*/msr /dev/cpu/[0-9]*/cpuid"
   [ -n "${ISOPOD_DISK:-}" ] ||
     iso_trim="$iso_trim /dev/loop-control /dev/loop[0-9]*"
   [ "${ISOPOD_NESTED:-}" = 1 ] ||
