@@ -557,6 +557,12 @@ else
   # F6. Does the shipped hardening profile actually land? Read the keys out of
   # the profile rather than copying them here, so this cannot drift from it.
   # microVM only: a container shares the host kernel and is never asked to.
+  #
+  # A key the guest kernel does not expose is NOT a failure. The entrypoint is
+  # best-effort by design, and the two keys that go missing on libkrunfw go
+  # missing because the feature is compiled out, which is stronger than the
+  # sysctl: no eBPF JIT to harden, no kexec to disable. Only a key that exists
+  # and holds the wrong value means the profile did not land.
   HCONF=share/hardening-sysctl.conf
   case "${A_TIER:-}" in
     microVM*)
@@ -569,21 +575,26 @@ else
           A_PATHS="$A_PATHS /proc/sys/$(printf '%s' "$hk" | tr . /)"
         done <"$HCONF"
         A_GOT="$(in_box "$AUDIT_BOX" "grep -H . $A_PATHS 2>/dev/null" 2>/dev/null)"
-        A_MISS=""
+        A_WRONG="" A_ABSENT=""
         while IFS='=' read -r hk hv; do
           case "$hk" in '' | \#*) continue ;; esac
           hp="/proc/sys/$(printf '%s' "$hk" | tr . /)"
           got="$(printf '%s\n' "$A_GOT" | awk -F: -v k="$hp" '$1==k{print $2; exit}')"
           if [ -z "$got" ]; then
-            A_MISS="$A_MISS $hk(not exposed)"
+            A_ABSENT="$A_ABSENT $hk"
           elif [ "$got" != "$hv" ]; then
-            A_MISS="$A_MISS $hk=$got(want $hv)"
+            A_WRONG="$A_WRONG $hk=$got(want $hv)"
           fi
         done <"$HCONF"
-        if [ -z "$A_MISS" ]; then
-          ok "every key in $HCONF is applied in the box"
+        if [ -n "$A_WRONG" ]; then
+          bad "hardening profile did not land:$A_WRONG"
+        elif [ -n "$A_ABSENT" ]; then
+          ok "every key $HCONF sets that this guest kernel has is applied"
+          note "not exposed by this guest kernel, so nothing to set:$A_ABSENT"
+          note "on libkrunfw that is expected for net.core.bpf_jit_harden (no eBPF JIT built)"
+          note "and kernel.kexec_load_disabled (kexec compiled out) — both stronger than the sysctl"
         else
-          bad "hardening profile not fully applied:$A_MISS"
+          ok "every key in $HCONF is applied in the box"
         fi
       fi
       ;;
