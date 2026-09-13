@@ -8,11 +8,18 @@
 #   SKIP_LIVE=1 bash test/host-verify.sh  # skip the slow live bats suite
 #   AUDIT_BOX=mybox bash test/host-verify.sh   # audit a box you already have (F)
 #
+# AUDIT_BOX asks about one box you already have, so it skips the live suite,
+# which builds images and creates real boxes and takes tens of minutes. Set
+# SKIP_LIVE=0 alongside it to run both.
+#
 # Deliberately does NOT use `set -e`: every check runs and reports, so one
 # failure does not hide the rest.
 set -uo pipefail
 
 ISOPOD="${ISOPOD:-./isopod}"
+# Auditing a named box is a question about that box, so it does not wait on the
+# live suite first. An explicit SKIP_LIVE still wins, in either direction.
+[ -n "${AUDIT_BOX:-}" ] && SKIP_LIVE="${SKIP_LIVE:-1}"
 PASS=0 FAIL=0 SKIP=0
 declare -a NOTES=()
 
