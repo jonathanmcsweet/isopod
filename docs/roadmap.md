@@ -69,30 +69,49 @@ Needs: waypipe in the box image (or installed on demand), a host-side check that
 waypipe is present, and a clear message when the host session is X11 rather than
 Wayland.
 
-## Confirm what is exported at `/proc` over virtiofs (F4)
+## Settled: what is exported at `/proc` over virtiofs (F4)
 
-A box shows two mounts at `/proc`: a virtiofs export from the host with the
-guest's own procfs mounted on top of it. `test/host-verify.sh` now prints that
-mount stack for a box you point it at, and the masks that would limit the damage
-(`/proc/cmdline`, `/proc/config.gz`, `/proc/modules`, `/proc/version`) are all
-applied under a microVM. What is still not established is what the export
-actually is.
+No longer open. Settled on 2026-09-13 against a real box and the two upstream sources. A microVM
+box shows this:
 
-The likely answer is that it is the container's own `/proc`, which podman mounts
-from the host and virtiofsd announces as a submount of the root export, giving it
-its own device number in the guest. That would make it the same surface the
-`mask-microvm` directive already exists for, and it would hold the container's PID
-namespace rather than the host's process list. Likely is not confirmed: read
-crun's krun handler and check on a real box, then either remove the export or
-write down why it stays.
+```
+21 1 0:20 / /     rw,relatime shared:1 - virtiofs /dev/root rw
+23 21 0:21 / /proc rw,relatime shared:5 - virtiofs none     rw
+24 23 0:22 / /proc rw,nosuid,nodev,noexec,relatime shared:6 - proc proc rw
+25 21 0:23 / /sys  rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw
+```
+
+Neither party adds a second export. crun's krun handler calls
+`krun_add_virtiofs2(ctx, tag, "/", shm_size)` exactly once, for the container
+rootfs, and libkrun's guest init mounts only `proc` on `/proc`
+(`init/init-binary/src/fs.rs`). So device 0:21 is not a separate export of the
+host's procfs: it is the container's own `/proc`, surfacing as its own virtiofs
+superblock because it is a submount inside the rootfs export, instantiated when
+init traversed the directory and then covered by the guest's procfs.
+
+That makes it the container's procfs, in the container's PID namespace, so it
+never held the host's process list and the report's "high" rating does not
+stand. What it does hold is the per-kernel files, which are the host's values:
+`/proc/cmdline`, `/proc/config.gz`, `/proc/modules` and `/proc/version` — all
+four masked under a microVM, which is precisely why those masks are not
+redundant there.
+
+Residual risk, unchanged: the only things keeping it out of reach are the mount
+ordering and `CapEff=0`. Anything that later grants the box `CAP_SYS_ADMIN` or a
+user namespace puts it back in play, and the masks are what limit it then.
+`test/host-verify.sh` prints the stack for a box you point it at.
 
 ## Trim the remaining guest device nodes
 
-The entrypoint drops `userfaultfd`, `uinput`, `btrfs-control`, `device-mapper`,
-`loop-control` and the unbound loop devices on a hardened microVM box.
+The entrypoint drops `mem`, `port`, the per-CPU `msr` and `cpuid` nodes,
+`userfaultfd`, `uinput`, `btrfs-control`, `device-mapper`, `loop-control` and the
+unbound loop devices on a hardened microVM box.
+
 `/dev/vsock` is still there: it is the guest's transport to the VMM, and nothing
 we could run from the host proved that removing it is safe. Establish that, then
-either drop it too or record why it stays.
+either drop it too or record why it stays. `hvc*` and `vport*` stay for the same
+reason (console and serial), and `/dev/kmsg` because `kernel.dmesg_restrict`
+already gates it.
 
 The stronger version of all of this is compiling loop, device-mapper and btrfs out
 of the guest kernel, which means building libkrunfw ourselves. See below.
