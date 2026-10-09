@@ -350,12 +350,19 @@ _agent_net_or_skip() {
     skip "cannot reach $1 (no network, or it is blocking this host)"
 }
 
+# The real path: install, then the session. --attach skips the install by design
+# (it is what an opened window re-runs), so a fresh box would have no agent. No
+# display means no window, and the command falls back to this process. Terminal
+# binaries are already hidden by the harness; this covers a desktop session too.
+agent_here() { # agent_here <agent>
+  env -u DISPLAY -u WAYLAND_DISPLAY "$ISOPOD_ROOT/isopod" "$1" "$BOX" -- --version
+}
+
 @test "live: claude-code installs into a box and runs there" {
   _agent_net_or_skip "https://downloads.claude.ai/claude-code-releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  # --attach keeps the session in this process; `-- --version` makes it a
-  # one-shot command instead of an interactive TUI.
-  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  # `-- --version` makes it a one-shot command instead of an interactive TUI.
+  run agent_here claude-code
   assert_success
   # The binary is really there, on the box user's PATH, and executable by them.
   run bssh -- 'PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH" command -v claude'
@@ -374,9 +381,9 @@ _agent_net_or_skip() {
 @test "live: a second claude-code run reuses the install and does not refetch" {
   _agent_net_or_skip "https://downloads.claude.ai/claude-code-releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  run agent_here claude-code
   assert_success
-  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  run agent_here claude-code
   assert_success
   # Presence is the whole check on a later run, so nothing is downloaded again.
   refute_output --partial "Downloading"
@@ -386,7 +393,7 @@ _agent_net_or_skip() {
 @test "live: codex installs into a box and runs there" {
   _agent_net_or_skip "https://api.github.com/repos/openai/codex/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" codex "$BOX" --attach -- --version
+  run agent_here codex
   assert_success
   run bssh -- 'PATH="$HOME/.local/bin:$PATH" command -v codex'
   assert_success
@@ -402,7 +409,7 @@ _agent_net_or_skip() {
 @test "live: opencode installs into a box and runs there" {
   _agent_net_or_skip "https://api.github.com/repos/anomalyco/opencode/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" opencode "$BOX" --attach -- --version
+  run agent_here opencode
   assert_success
   # Its own directory, so `opencode upgrade` in the box replaces this binary
   # rather than being shadowed by it.
@@ -420,7 +427,7 @@ _agent_net_or_skip() {
 @test "live: pi installs into a box and runs there" {
   _agent_net_or_skip "https://api.github.com/repos/earendil-works/pi/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" pi "$BOX" --attach -- --version
+  run agent_here pi
   assert_success
   run bssh -- 'PATH="$HOME/.local/share/pi:$PATH" command -v pi'
   assert_success
@@ -439,7 +446,7 @@ _agent_net_or_skip() {
 @test "live: an agent install survives a stop and start" {
   _agent_net_or_skip "https://api.github.com/repos/openai/codex/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" codex "$BOX" --attach -- --version
+  run agent_here codex
   assert_success
   "$ISOPOD_ROOT/isopod" stop "$BOX" >/dev/null
   "$ISOPOD_ROOT/isopod" start "$BOX" >/dev/null
@@ -450,7 +457,7 @@ _agent_net_or_skip() {
 
 @test "live: an agent refuses to install into an offline box" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container --offline >/dev/null
-  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  run agent_here claude-code
   assert_failure
   assert_output --partial "offline"
 }
