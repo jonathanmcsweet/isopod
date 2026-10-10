@@ -48,6 +48,9 @@ teardown() {
 # The remote command is requoted with %q: ssh joins its arguments with plain
 # spaces, which would otherwise strip the quoting from `sh -c '<script>'` and
 # hand the script to the login shell instead of sh.
+# Each argument is %q-quoted, so pass a shell snippet as `sh -c '...'`. A single
+# string arrives as one word: `'PATH=... cmd'` becomes an assignment that runs
+# nothing and exits 0, and `'test -d x'` becomes command-not-found.
 bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   local cfg="$ISOPOD_CONFIG_DIR/boxes/$BOX"
   local port; port=$(sed -n 's/^port=//p' "$cfg/meta")
@@ -365,16 +368,16 @@ agent_here() { # agent_here <agent>
   run agent_here claude-code
   assert_success
   # The binary is really there, on the box user's PATH, and executable by them.
-  run bssh -- 'PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH" command -v claude'
+  run bssh -- sh -c 'PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH" command -v claude'
   assert_success
   refute_output ""
   # It went in as the box user, not root: an agent running as root would leave
   # config and workspace files the user cannot write.
-  run bssh -- 'stat -c %U "$(PATH=$HOME/.local/bin:$HOME/.claude/bin:$PATH command -v claude)"'
+  run bssh -- sh -c 'stat -c %U "$(PATH=$HOME/.local/bin:$HOME/.claude/bin:$PATH command -v claude)"'
   assert_success
   assert_output "dev"
   # Nothing is left in the staging directory.
-  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  run bssh -- sh -c 'test -d "$HOME/.isopod-agent"'
   assert_failure
 }
 
@@ -395,14 +398,14 @@ agent_here() { # agent_here <agent>
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
   run agent_here codex
   assert_success
-  run bssh -- 'PATH="$HOME/.local/bin:$PATH" command -v codex'
+  run bssh -- sh -c 'PATH="$HOME/.local/bin:$PATH" command -v codex'
   assert_success
   assert_output --partial "/.local/bin/codex"
   # The static musl build has to actually execute on this glibc box, which is the
   # whole reason the adapter ignores the box's libc.
-  run bssh -- 'PATH="$HOME/.local/bin:$PATH" codex --version'
+  run bssh -- sh -c 'PATH="$HOME/.local/bin:$PATH" codex --version'
   assert_success
-  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  run bssh -- sh -c 'test -d "$HOME/.isopod-agent"'
   assert_failure
 }
 
@@ -413,14 +416,14 @@ agent_here() { # agent_here <agent>
   assert_success
   # Its own directory, so `opencode upgrade` in the box replaces this binary
   # rather than being shadowed by it.
-  run bssh -- 'PATH="$HOME/.opencode/bin:$PATH" command -v opencode'
+  run bssh -- sh -c 'PATH="$HOME/.opencode/bin:$PATH" command -v opencode'
   assert_success
   assert_output --partial "/.opencode/bin/opencode"
   # The build has to match the box's CPU: the plain x64 build uses AVX2 and dies
   # with an illegal instruction on a host without it, which only running proves.
-  run bssh -- 'PATH="$HOME/.opencode/bin:$PATH" opencode --version'
+  run bssh -- sh -c 'PATH="$HOME/.opencode/bin:$PATH" opencode --version'
   assert_success
-  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  run bssh -- sh -c 'test -d "$HOME/.isopod-agent"'
   assert_failure
 }
 
@@ -429,17 +432,17 @@ agent_here() { # agent_here <agent>
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
   run agent_here pi
   assert_success
-  run bssh -- 'PATH="$HOME/.local/share/pi:$PATH" command -v pi'
+  run bssh -- sh -c 'PATH="$HOME/.local/share/pi:$PATH" command -v pi'
   assert_success
   assert_output --partial "/.local/share/pi/pi"
   # Upstream installs Pi with npm and Node 22; the release build carries its own
   # runtime, and the box image ships neither, so running it here is the proof.
   # --version also reads package.json from beside the binary, which only the
   # whole-directory install provides.
-  run bssh -- 'PATH="$HOME/.local/share/pi:$PATH" pi --version'
+  run bssh -- sh -c 'PATH="$HOME/.local/share/pi:$PATH" pi --version'
   assert_success
   refute_output --partial "0.0.0"
-  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  run bssh -- sh -c 'test -d "$HOME/.isopod-agent"'
   assert_failure
 }
 
@@ -451,7 +454,7 @@ agent_here() { # agent_here <agent>
   "$ISOPOD_ROOT/isopod" stop "$BOX" >/dev/null
   "$ISOPOD_ROOT/isopod" start "$BOX" >/dev/null
   # The binary lives in the container layer, not a tmpfs, so it is still there.
-  run bssh -- 'PATH="$HOME/.local/bin:$PATH" codex --version'
+  run bssh -- sh -c 'PATH="$HOME/.local/bin:$PATH" codex --version'
   assert_success
 }
 
