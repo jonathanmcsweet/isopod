@@ -253,6 +253,23 @@ is_microvm_runtime() {
   [ "$(runtime_tier "$(active_runtime)" 2>/dev/null)" = 3 ]
 }
 
+# Does a box get a kernel of its own? A Tier 3 runtime under podman/docker, or any
+# box on Apple `container`, which runs each box in its own VM. Gates the
+# guest-sysctl profile: on a shared kernel those sysctls would change the host's.
+box_has_own_kernel() {
+  [ "${ENGINE:-}" = container ] || is_microvm_runtime
+}
+
+# Append the kernel-hardening env to RUN_ARGS for a box with its own kernel.
+# BOX_HARDEN on create; persisted meta on reconfigure; absent meta => default.
+harden_run_env() { # harden_run_env <name>
+  local level="${BOX_HARDEN:-}"
+  [ -n "$level" ] || level="$(meta_get "$1" harden 2>/dev/null || true)"
+  [ -n "$level" ] || level=default
+  [ "$level" != off ] && box_has_own_kernel && RUN_ARGS+=(-e "ISOPOD_HARDEN=$level")
+  return 0
+}
+
 # What isolation a BOX actually got, for `isopod info`. Reads the runtime recorded
 # at create time, not the active one, so it stays true when the config changes
 # underneath an existing box.
@@ -301,24 +318,29 @@ runtime_posture_note() {
 # egress_posture_note), so what the box actually got is legible. The default
 # profile's guest-sysctl arm applies only to microVM boxes (their own kernel);
 # a container box keeps the engine's default seccomp/isolation.
-harden_posture_note() { # harden_posture_note <level>
+harden_posture_note() { # harden_posture_note <level> [sudo 0|1]
   case "$1" in
-    off) info "Kernel hardening: OFF (--harden off) — engine defaults only." ;;
+    off) info "Kernel hardening: OFF (--harden off), engine defaults only." ;;
     strict)
-      # create refuses strict on a container box, so this arm is always a microVM.
-      info "Kernel hardening: STRICT profile — the default guest sysctls plus unprivileged eBPF,
-     io_uring, user namespaces and perf_event_open turned off. Nested containers,
-     io_uring tools and profiling will not work in this box."
+      # create refuses strict on a shared kernel, so this box has its own.
+      info "Kernel hardening: STRICT profile. The default guest sysctls plus unprivileged eBPF,
+     io_uring and user namespaces turned off, and kernel profiling restricted. Nested
+     containers, io_uring tools and profiling will not work in this box."
+      # Root in the box can write the sysctls back, and --sudo hands the box user root.
+      [ "${2:-0}" = 1 ] &&
+        warn "--sudo lets anything running as the box user write these sysctls back, so
+     strict holds only as long as nothing in the box chooses to undo it."
       ;;
     *)
-      if is_microvm_runtime; then
-        info "Kernel hardening: default profile — reduced-surface guest sysctls applied in the microVM."
+      if box_has_own_kernel; then
+        info "Kernel hardening: default profile, reduced-surface guest sysctls applied in the box's own kernel."
       else
-        info "Kernel hardening: default profile — container box, so it keeps the engine's default
-     seccomp/isolation; the guest-sysctl arm applies to microVM boxes (disable with --harden off)."
+        info "Kernel hardening: default profile. Container box, so it keeps the engine's default
+     seccomp/isolation; the guest-sysctl arm applies to boxes with their own kernel (disable with --harden off)."
       fi
       ;;
   esac
+  return 0
 }
 
 # Is an OCI runtime usable by the engine? True when the binary is on PATH (for

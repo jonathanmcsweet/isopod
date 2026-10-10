@@ -92,7 +92,7 @@ init traversed the directory and then covered by the guest's procfs.
 That makes it the container's procfs, in the container's PID namespace, so it
 never held the host's process list and the report's "high" rating does not
 stand. What it does hold is the per-kernel files, which are the host's values:
-`/proc/cmdline`, `/proc/config.gz`, `/proc/modules` and `/proc/version` — all
+`/proc/cmdline`, `/proc/config.gz`, `/proc/modules` and `/proc/version`, all
 four masked under a microVM, which is precisely why those masks are not
 redundant there.
 

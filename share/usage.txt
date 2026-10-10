@@ -129,12 +129,12 @@ Options for create (each accepts both '--opt value' and '--opt=value'):
                         with the target resolved and connected FROM your host (so
                         an internal name behind your VPN works too). Box port must
                         be >= 1024. Manage later with 'isopod host-port'.
-  --harden <level>      Kernel-hardening profile: 'default' (on for every box —
-                        reduced-surface guest sysctls on microVM boxes), 'strict'
-                        (also turns off unprivileged eBPF, io_uring, user
-                        namespaces and perf_event_open, which costs you nested
-                        containers, io_uring tools and profiling; microVM only),
-                        or 'off'.
+  --harden <level>      Kernel-hardening profile: 'default' (on for every box,
+                        reduced-surface guest sysctls where the box has its own
+                        kernel), 'strict' (also turns off unprivileged eBPF,
+                        io_uring and user namespaces and restricts profiling,
+                        which costs you nested containers, io_uring tools and
+                        profiling; needs a box with its own kernel), or 'off'.
   --container           Run as a PLAIN container instead of the default microVM
                         (lower isolation). Use when no microVM runtime/KVM is
                         available, or you accept a shared-kernel sandbox.
@@ -236,7 +236,7 @@ Options for remap (run after 'isopod fetch'; each accepts '--opt value' and '--o
   --sign-only           Sign the commits already on the box refs and rewrite no
                         identity, for history that was remapped before signing
                         existed. Signs only commits committed by your own
-                        identity, and gives every one of them a new SHA.
+                        identity; those and anything above them get new SHAs.
   --force, -f           Skip the confirmation prompt.
 
 Network egress isolation (host-enforced; an in-box agent cannot turn it off):

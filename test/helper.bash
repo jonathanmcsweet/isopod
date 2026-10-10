@@ -76,7 +76,7 @@ isopod_setup_env() {
   mkdir -p "$HOME/.ssh"
 
   # Rootless podman keeps its image store under XDG_DATA_HOME, falling back to
-  # $HOME — and the sandboxed HOME above is deleted after every test. So a live
+  # $HOME, and the sandboxed HOME above is deleted after every test. So a live
   # run rebuilt the entire base image, apt-get install and all, once per test:
   # 23 builds for 23 tests, tens of minutes before anything was verified. Point
   # the store somewhere that outlives one test so the build happens once.

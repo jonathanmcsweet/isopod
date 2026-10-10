@@ -1864,17 +1864,119 @@ EOF
   refute_output --partial "fusermount"
 }
 
-@test "the entrypoint sets no-new-privileges on sshd, not on a sudo or nested box" {
+@test "the entrypoint sets no-new-privileges on sshd" {
   # The engine flag sets PR_SET_NO_NEW_PRIVS on the VMM process on the host, so a
   # microVM guest never saw it. Setting it on sshd is what makes the guest match a
-  # container box. A sudo box is meant to escalate, and a nested box calls setuid
-  # newuidmap, so both opt out.
+  # container box.
   run grep -c 'setpriv --no-new-privs /usr/sbin/sshd' "$ISOPOD_ENTRYPOINT"
   assert_success
   assert_output "1"
-  run grep -c 'iso_nnp=0' "$ISOPOD_ENTRYPOINT"
+}
+
+# Run the entrypoint's no-new-privileges decision against a fake /etc, with a
+# PATH holding only grep and, when asked, a newuidmap. Prints iso_nnp.
+entrypoint_nnp() { # entrypoint_nnp [with-newuidmap]
+  local block bin="$TEST_TMP/nnpbin"
+  mkdir -p "$bin" "$TEST_TMP/etc/sudoers.d"
+  ln -sf "$(command -v grep)" "$bin/grep"
+  rm -f "$bin/newuidmap"
+  [ "${1:-}" = with-newuidmap ] && printf '#!/bin/sh\n' >"$bin/newuidmap" && chmod +x "$bin/newuidmap"
+  block="$(sed -n '/^iso_nnp=1$/,/^command -v newuidmap/p' "$ISOPOD_ENTRYPOINT" | sed "s|/etc/|$TEST_TMP/etc/|g")"
+  (
+    PATH="$bin"
+    iso_u=dev
+    eval "$block"
+    printf '%s' "$iso_nnp"
+  )
+}
+
+# Debian's useradd gives every user a subuid range, so a range alone must not
+# exempt a box: that would turn no-new-privileges off everywhere.
+@test "no-new-privileges stays on for a plain box with only a subuid range" {
+  mkdir -p "$TEST_TMP/etc"
+  printf 'dev:100000:65536\n' >"$TEST_TMP/etc/subuid"
+  run entrypoint_nnp
+  assert_output "1"
+}
+
+# --dev and --nested-containers both ship rootless podman, which needs setuid
+# newuidmap. Detected from the box, so --dev is covered without naming it.
+@test "no-new-privileges is off for a box set up for rootless containers" {
+  mkdir -p "$TEST_TMP/etc"
+  printf 'dev:100000:65536\n' >"$TEST_TMP/etc/subuid"
+  run entrypoint_nnp with-newuidmap
+  assert_output "0"
+}
+
+@test "no-new-privileges is off for a sudo box" {
+  mkdir -p "$TEST_TMP/etc/sudoers.d"
+  : >"$TEST_TMP/etc/sudoers.d/dev"
+  run entrypoint_nnp
+  assert_output "0"
+}
+
+# Run the entrypoint's sysctl loop against fake /etc/isopod and /proc/sys trees.
+entrypoint_sysctls() { # entrypoint_sysctls <level>
+  local block
+  block="$(sed -n '/^  iso_harden_files=/,/^  unset iso_harden_files iso_harden_f$/p' "$ISOPOD_ENTRYPOINT" |
+    sed -e "s|/etc/isopod/|$TEST_TMP/etc/isopod/|g" -e "s|/proc/sys/|$TEST_TMP/proc/sys/|g")"
+  (
+    ISOPOD_HARDEN="$1"
+    eval "$block"
+  )
+}
+
+# Strict was asked for by name, so a key the guest kernel lacks has to show up in
+# the box log. The default profile stays quiet: two of its keys are absent on
+# libkrunfw by design.
+@test "the entrypoint reports a strict key the guest kernel does not have" {
+  mkdir -p "$TEST_TMP/etc/isopod" "$TEST_TMP/proc/sys/kernel" "$TEST_TMP/proc/sys/user"
+  printf 'kernel.kptr_restrict=2\nnet.core.bpf_jit_harden=2\n' >"$TEST_TMP/etc/isopod/hardening-sysctl.conf"
+  printf 'kernel.unprivileged_bpf_disabled=1\nkernel.io_uring_disabled=2\nuser.max_user_namespaces=0\n' \
+    >"$TEST_TMP/etc/isopod/hardening-sysctl-strict.conf"
+  : >"$TEST_TMP/proc/sys/kernel/kptr_restrict"
+  : >"$TEST_TMP/proc/sys/kernel/unprivileged_bpf_disabled"
+  : >"$TEST_TMP/proc/sys/user/max_user_namespaces"
+  run entrypoint_sysctls strict
+  assert_output --partial "kernel.io_uring_disabled is not set"
+  refute_output --partial "unprivileged_bpf_disabled is not set"
+  refute_output --partial "bpf_jit_harden"
+  run cat "$TEST_TMP/proc/sys/user/max_user_namespaces"
+  assert_output "0"
+  # default only: no strict file read, no warnings
+  run entrypoint_sysctls default
+  assert_output ""
+}
+
+# ---- macOS: Apple `container` runs every box in its own VM -------------------
+@test "an Apple container box counts as having its own kernel" {
+  ENGINE=container run box_has_own_kernel
   assert_success
-  assert_output "2"
+  ENGINE=podman ISOPOD_FORCE_CONTAINER=1 run box_has_own_kernel
+  assert_failure
+}
+
+@test "an Apple container box is handed the hardening level" {
+  ENGINE=container
+  BOX_HARDEN=strict
+  build_run_args_container demo localhost/img "" ""
+  printf '%s\n' "${RUN_ARGS[@]}" | grep -qx "ISOPOD_HARDEN=strict"
+  BOX_HARDEN=off
+  build_run_args_container demo localhost/img "" ""
+  ! printf '%s\n' "${RUN_ARGS[@]}" | grep -q "ISOPOD_HARDEN"
+}
+
+# ---- remap: one place decides the identity --------------------------------------
+@test "remap_host_identity prefers the flag, then the env, then git config" {
+  git init -q "$TEST_TMP/r"
+  git -C "$TEST_TMP/r" config user.name Cfg
+  git -C "$TEST_TMP/r" config user.email cfg@x
+  remap_host_identity "$TEST_TMP/r" "" ""
+  [ "$REMAP_NAME" = Cfg ] && [ "$REMAP_EMAIL" = cfg@x ]
+  ISOPOD_GIT_EMAIL=env@x remap_host_identity "$TEST_TMP/r" "" ""
+  [ "$REMAP_EMAIL" = env@x ]
+  ISOPOD_GIT_EMAIL=env@x remap_host_identity "$TEST_TMP/r" Flag flag@x
+  [ "$REMAP_NAME" = Flag ] && [ "$REMAP_EMAIL" = flag@x ]
 }
 
 # ---- remap_identity_filter.py -------------------------------------------------

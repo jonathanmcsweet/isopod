@@ -454,6 +454,7 @@ else
   ainfo() { printf '%s\n' "$AUDIT_INFO" | awk -F': *' -v k="^$1" '$0 ~ k {print $2; exit}'; }
   A_TIER="$(ainfo isolation)"
   A_SUDO="$(ainfo sudo)"
+  A_HARDEN="$(ainfo hardening)"
   note "runtime:   ${A_TIER:-unknown}"
   note "built:     $(ainfo built)"
   note "neighbors: $(ainfo neighbors)"
@@ -491,14 +492,18 @@ else
   # entrypoint sets the bit on sshd; a box created before that shipped, or one
   # running --nested-containers, reads 0 here.
   A_NNP="$(printf '%s\n' "$AUDIT_STATUS" | awk '/^NoNewPrivs:/{print $2; exit}')"
+  # Same test the entrypoint uses to exempt a box set up for rootless containers.
+  A_ROOTLESS="$(in_box "$AUDIT_BOX" 'command -v newuidmap >/dev/null && grep -q "^$(id -un):" /etc/subuid && echo yes' 2>/dev/null)"
   case "$A_SUDO" in
     no*)
       if [ "$A_NNP" = 1 ]; then
         ok "no-sudo box has NoNewPrivs=1"
+      elif [ "$A_ROOTLESS" = yes ]; then
+        note "NoNewPrivs=$A_NNP, expected: this box is set up for rootless containers (--dev or
+         --nested-containers), and rootless podman needs setuid newuidmap"
       else
         bad "box declares no sudo but NoNewPrivs=$A_NNP, so the setuid gate is not on
-         (expected on a --nested-containers box, which needs setuid newuidmap;
-          otherwise the box predates the entrypoint setting it: isopod upgrade $AUDIT_BOX)"
+         (the box predates the entrypoint setting it: isopod upgrade $AUDIT_BOX)"
       fi
       ;;
     *) note "NoNewPrivs=$A_NNP (expected on a sudo box: isopod sets the gate only where sudo is off)" ;;
@@ -586,13 +591,29 @@ else
             A_WRONG="$A_WRONG $hk=$got(want $hv)"
           fi
         done <"$HCONF"
+        # Strict was asked for by name, so every one of its keys has to be there.
+        HSTRICT=share/hardening-sysctl-strict.conf
+        if [ "${A_HARDEN:-}" = strict ] && [ -f "$HSTRICT" ]; then
+          A_SPATHS=""
+          while IFS='=' read -r hk _; do
+            case "$hk" in '' | \#*) continue ;; esac
+            A_SPATHS="$A_SPATHS /proc/sys/$(printf '%s' "$hk" | tr . /)"
+          done <"$HSTRICT"
+          A_SGOT="$(in_box "$AUDIT_BOX" "grep -H . $A_SPATHS 2>/dev/null" 2>/dev/null)"
+          while IFS='=' read -r hk hv; do
+            case "$hk" in '' | \#*) continue ;; esac
+            hp="/proc/sys/$(printf '%s' "$hk" | tr . /)"
+            got="$(printf '%s\n' "$A_SGOT" | awk -F: -v k="$hp" '$1==k{print $2; exit}')"
+            [ "$got" = "$hv" ] || A_WRONG="$A_WRONG $hk=${got:-absent}(strict wants $hv)"
+          done <"$HSTRICT"
+        fi
         if [ -n "$A_WRONG" ]; then
           bad "hardening profile did not land:$A_WRONG"
         elif [ -n "$A_ABSENT" ]; then
           ok "every key $HCONF sets that this guest kernel has is applied"
           note "not exposed by this guest kernel, so nothing to set:$A_ABSENT"
           note "on libkrunfw that is expected for net.core.bpf_jit_harden (no eBPF JIT built)"
-          note "and kernel.kexec_load_disabled (kexec compiled out) — both stronger than the sysctl"
+          note "and kernel.kexec_load_disabled (kexec compiled out), both stronger than the sysctl"
         else
           ok "every key in $HCONF is applied in the box"
         fi
@@ -630,10 +651,10 @@ else
     note "mounts at /proc (major:minor fstype), last one wins:"
     printf '%s\n' "$A_PROCMNT" | sed 's/^/        /'
     if [ "$(printf '%s\n' "$A_PROCMNT" | grep -c virtiofs)" -gt 0 ]; then
-      note "a virtiofs export sits under the guest procfs — it is the CONTAINER's /proc,"
-      note "which podman filled from the host; reaching it needs CAP_SYS_ADMIN the box"
-      note "does not have. The mask-microvm lines in security/hardening.conf cover the"
-      note "files that would matter if that ever changed."
+      note "a virtiofs export sits under the guest procfs: the CONTAINER's own /proc,"
+      note "in its PID namespace, surfacing through the root export (docs/roadmap.md, F4)."
+      note "Reaching it needs CAP_SYS_ADMIN the box does not have, and the mask-microvm"
+      note "lines in security/hardening.conf cover the host values it would show."
     fi
   fi
 

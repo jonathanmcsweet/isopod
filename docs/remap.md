@@ -165,10 +165,18 @@ isopod remap myproj --sign-only --email me@real.com
 
 It signs the commits already under `refs/remotes/myproj/*` and rewrites no
 identity, so `--old-email`, `--old-name` and `--remap-file` are refused with it.
-The same two boundaries above still apply, plus one more: a commit signed by
-**someone else** would lose that signature in the rebuild, so `--sign-only`
-refuses up front and names the commits rather than stripping them. Every commit
-it touches gets a new SHA, exactly like a rewrite, so treat it as one.
+The same two boundaries above still apply. A commit that is already signed, or
+not yours to sign, is kept exactly as it is unless something beneath it moved, so
+a teammate's signed commit below yours is untouched and a second run changes
+nothing. A teammate's signed commit *above* one of yours would have to be rebuilt,
+which drops its signature, so `--sign-only` refuses instead and moves no branch.
+Signing that fails partway (a key that locks after the first commit) also moves
+no branch.
+
+The commits it does sign get new SHAs, like a rewrite, so treat it as one. The
+refs as they were go under `refs/sign-backup/`, kept apart from
+`refs/remap-backup/` so an earlier remap's snapshot of the pre-rewrite commits
+survives.
 
 **A signature is not a badge.** The forge shows *Verified* only when the key is
 registered on the account that owns the committer email: on GitHub under

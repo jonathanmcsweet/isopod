@@ -306,11 +306,11 @@ cmd_create() {
     strict)
       # Asked for explicitly, so fail closed rather than hand back a box that
       # quietly did not get it. The profile is guest sysctls, so it needs a kernel
-      # of the box's own.
-      is_microvm_runtime ||
-        die "--harden strict needs a microVM box — the profile is guest sysctls, and a plain
-     container shares the HOST kernel, which isopod will not change.
-     This box resolved to a plain container$([ "$container_opt" -eq 1 ] && printf ' (--container)' || printf ' (no microVM runtime or KVM available — see: isopod doctor)').
+      # of the box's own: a microVM, or any box on Apple `container`.
+      box_has_own_kernel ||
+        die "--harden strict needs a box with its own kernel (a microVM): the profile is guest
+     sysctls, and a plain container shares the HOST kernel, which isopod will not change.
+     This box resolved to a plain container$([ "$container_opt" -eq 1 ] && printf ' (--container)' || printf ' (no microVM runtime or KVM available, see: isopod doctor)').
      Create it under a microVM runtime, or use --harden default."
       # user.max_user_namespaces=0 is the centre of the strict profile and is also
       # exactly what a rootless engine in the box needs, so the two cannot both hold.
@@ -602,7 +602,7 @@ cmd_create() {
   runtime_posture_note
   # State the kernel-hardening posture too (its guest-sysctl arm only applies to
   # microVM boxes), so what the box actually got is legible at create time.
-  harden_posture_note "$BOX_HARDEN"
+  harden_posture_note "$BOX_HARDEN" "$BOX_SUDO"
   disk_posture_note "$name" "$BOX_DISK" "$BOX_NESTED"
 }
 
@@ -618,7 +618,7 @@ disk_posture_note() { # disk_posture_note <name> <disk-spec> <nested 0|1>
   # for a microVM box, the tier where --disk is the answer.
   if [ -z "$spec" ]; then
     is_microvm_runtime &&
-      info "Storage: no data volume, so writes land on the box's rootfs — host storage,
+      info "Storage: no data volume, so writes land on the box's rootfs, which is host storage
      with no size cap (df inside the box reports the HOST filesystem). Add
      --disk <size> for box-local, sized storage if this box writes a lot."
     return 0
