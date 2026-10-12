@@ -70,7 +70,8 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 
 # Resolve a Tier 3 microVM runtime to test under, or skip. Honors
 # ISOPOD_TEST_MICROVM_RUNTIME (default: krun); needs /dev/kvm and the runtime on
-# PATH or registered with a present engine. Echoes the runtime name.
+# PATH or registered with a present engine. Sets MICROVM_RT. Call it directly:
+# skip inside $(...) only exits the subshell, and the test runs on anyway.
 _microvm_runtime_or_skip() {
   local rt="${ISOPOD_TEST_MICROVM_RUNTIME:-krun}"
   [ -e /dev/kvm ] || skip "no /dev/kvm (Tier 3 microVM needs hardware virtualization)"
@@ -79,11 +80,12 @@ _microvm_runtime_or_skip() {
     ! { command -v docker >/dev/null 2>&1 && docker info 2>/dev/null | grep -qw -- "$rt"; }; then
     skip "microVM runtime '$rt' not available (register it, or set ISOPOD_TEST_MICROVM_RUNTIME)"
   fi
-  printf '%s' "$rt"
+  MICROVM_RT="$rt"
 }
 
 @test "live: fetch and export work under a Tier 3 microVM runtime (no engine exec)" {
-  local rt; rt="$(_microvm_runtime_or_skip)"
+  _microvm_runtime_or_skip
+  local rt="$MICROVM_RT"
   # Create the box under a real microVM. Every isopod data path is SSH-driven, so
   # this is the end-to-end proof that create/fetch/export keep working under a
   # separate guest kernel — where the engine's own `exec`/`cp` would not enter.
@@ -92,6 +94,10 @@ _microvm_runtime_or_skip() {
   run bssh -o ConnectTimeout=45 -- whoami
   assert_success
   assert_output "dev"
+  # The box must really boot its own kernel, not fall back to a container.
+  run bssh -- uname -r
+  assert_success
+  refute_output "$(uname -r)"
   # fetch: seed git history in-box, pull it to a host repo over the SSH transport.
   bssh -- sh -c '
     cd /home/dev/workspace &&
@@ -306,8 +312,13 @@ _microvm_runtime_or_skip() {
 @test "live: rm destroys the container" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   "$ISOPOD_ROOT/isopod" rm "$BOX" --force
-  run bash -c "podman inspect isopod-$BOX >/dev/null 2>&1 || docker inspect isopod-$BOX >/dev/null 2>&1"
+  # Ask the engine that is installed: a missing one exits 127, which
+  # assert_failure would accept.
+  local eng="${ISOPOD_ENGINE:-}"
+  [ -n "$eng" ] || eng="$(command -v podman || command -v docker)"
+  run "$eng" inspect "isopod-$BOX"
   assert_failure
+  assert_output --regexp '[Nn]o such'
 }
 
 @test "live: --secret lands in the tmpfs, survives restart, and never leaks" {
