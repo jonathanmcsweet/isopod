@@ -23,6 +23,9 @@ setup_file() {
     sock="$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null || true)"
     [ -n "$sock" ] && export CONTAINER_HOST="unix://$sock"
   fi
+  # Per-test PATH hides microVM runtimes; note the real one while it's visible.
+  ISOPOD_TEST_MICROVM_BIN="$(command -v "${ISOPOD_TEST_MICROVM_RUNTIME:-krun}" 2>/dev/null || true)"
+  export ISOPOD_TEST_MICROVM_BIN
 }
 
 setup() {
@@ -75,6 +78,8 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 _microvm_runtime_or_skip() {
   local rt="${ISOPOD_TEST_MICROVM_RUNTIME:-krun}"
   [ -e /dev/kvm ] || skip "no /dev/kvm (Tier 3 microVM needs hardware virtualization)"
+  # Bring back the host's runtime under its own name, which isopod matches on.
+  [ -z "${ISOPOD_TEST_MICROVM_BIN:-}" ] || ln -sf "$ISOPOD_TEST_MICROVM_BIN" "$STUB_DIR/$rt"
   if ! command -v "$rt" >/dev/null 2>&1 &&
     ! { command -v podman >/dev/null 2>&1 && podman info 2>/dev/null | grep -qw -- "$rt"; } &&
     ! { command -v docker >/dev/null 2>&1 && docker info 2>/dev/null | grep -qw -- "$rt"; }; then
