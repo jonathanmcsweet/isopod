@@ -595,7 +595,9 @@ else
         done <"$HCONF"
         # Strict was asked for by name, so every one of its keys has to be there.
         HSTRICT=share/hardening-sysctl-strict.conf
+        A_ALSO=""
         if [ "${A_HARDEN:-}" = strict ] && [ -f "$HSTRICT" ]; then
+          A_ALSO=", and every key in $HSTRICT"
           A_SPATHS=""
           while IFS='=' read -r hk _; do
             case "$hk" in '' | \#*) continue ;; esac
@@ -612,12 +614,12 @@ else
         if [ -n "$A_WRONG" ]; then
           bad "hardening profile did not land:$A_WRONG"
         elif [ -n "$A_ABSENT" ]; then
-          ok "every key $HCONF sets that this guest kernel has is applied"
+          ok "every key $HCONF sets that this guest kernel has is applied$A_ALSO"
           note "not exposed by this guest kernel, so nothing to set:$A_ABSENT"
           note "on libkrunfw that is expected for net.core.bpf_jit_harden (no eBPF JIT built)"
           note "and kernel.kexec_load_disabled (kexec compiled out), both stronger than the sysctl"
         else
-          ok "every key in $HCONF is applied in the box"
+          ok "every key in $HCONF is applied in the box$A_ALSO"
         fi
       fi
       ;;
