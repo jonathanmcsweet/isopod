@@ -2,7 +2,7 @@
 # Host verification for the isopod 3.10.0 changes.
 #
 # Run this from the isopod repo on a machine with a working container engine.
-# It creates throwaway boxes named hv-* and removes them at the end.
+# It creates throwaway boxes named hv-* and removes them at the start and end.
 #
 #   bash test/host-verify.sh              # everything the host supports
 #   SKIP_LIVE=1 bash test/host-verify.sh  # skip the slow live bats suite
@@ -103,6 +103,8 @@ trap cleanup_all EXIT
   echo "run this from the isopod repo (no ./isopod here)"
   exit 1
 }
+# An interrupted run leaves its boxes behind, and every create below would fail.
+cleanup_all
 
 # --- capability probe --------------------------------------------------------
 hdr "Host capabilities"
