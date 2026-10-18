@@ -452,7 +452,8 @@ elif ! printf '%s\n' "$AUDIT_STATUS" | grep -q '^CapBnd:'; then
   skip "box posture (cannot read /proc/self/status in '$AUDIT_BOX', so nothing below would mean anything)"
 else
   AUDIT_INFO="$(iso info "$AUDIT_BOX" 2>/dev/null)"
-  ainfo() { printf '%s\n' "$AUDIT_INFO" | awk -F': *' -v k="^$1" '$0 ~ k {print $2; exit}'; }
+  # Split at the first colon only: a value can hold one ("admin via: ...").
+  ainfo() { printf '%s\n' "$AUDIT_INFO" | awk -v k="^$1" '$0 ~ k {sub(/^[^:]*: */, ""); print; exit}'; }
   A_TIER="$(ainfo isolation)"
   A_SUDO="$(ainfo sudo)"
   A_HARDEN="$(ainfo hardening)"
