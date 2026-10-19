@@ -9,6 +9,7 @@ secrets   : $secretnames
 egress    : $(box_egress_posture "$name")
 neighbors : $(box_inbound_posture "$name")
 isolation : $(box_runtime_posture "$name")
+hardening : $(meta_get "$name" harden 2>/dev/null || printf default)
 workspace : $WORKSPACE
 sudo      : $([ "$(meta_get "$name" sudo 2>/dev/null || printf 1)" = 1 ] && printf 'yes (in-box user has passwordless sudo)' || printf 'no  (admin via: isopod root-shell '"$name"')')
 color     : $(meta_get "$name" color || true)

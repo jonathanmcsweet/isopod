@@ -75,6 +75,23 @@ isopod_setup_env() {
   export ISOPOD_CONFIG_DIR="$TEST_TMP/home/.config/isopod"
   mkdir -p "$HOME/.ssh"
 
+  # Rootless podman keeps its image store under XDG_DATA_HOME, falling back to
+  # $HOME, and the sandboxed HOME above is deleted after every test. So a live
+  # run rebuilt the entire base image, apt-get install and all, once per test:
+  # 23 builds for 23 tests, tens of minutes before anything was verified. Point
+  # the store somewhere that outlives one test so the build happens once.
+  #
+  # Only live runs reach a real engine, so the stubbed suites are left alone.
+  # Sharing the store costs no correctness: isopod tags its image by a hash of
+  # the Dockerfile, entrypoint and profiles, so a changed input is a different
+  # tag and rebuilds, and boxes are still created and removed per test. Clear it
+  # with: podman unshare rm -rf "${ISOPOD_TEST_STORE:-${TMPDIR:-/tmp}/isopod-test-store}"
+  if [ "${RUN_LIVE:-0}" = 1 ]; then
+    XDG_DATA_HOME="${ISOPOD_TEST_STORE:-${TMPDIR:-/tmp}/isopod-test-store}"
+    export XDG_DATA_HOME
+    mkdir -p "$XDG_DATA_HOME"
+  fi
+
   # Stub directory takes precedence on PATH, over a mirror of the host's PATH
   # with the tests' controlled commands removed (see isopod_hermetic_bin).
   export STUB_DIR="$TEST_TMP/stubs"

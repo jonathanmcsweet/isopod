@@ -176,20 +176,20 @@ build_run_args() { # build_run_args <name> <image> <publish> <memory> <cpus> [ho
   # escalation to preserve, so block privilege gains (setuid binaries, newgrp).
   # On create the choice is in BOX_SUDO; on reconfigure (BOX_SUDO unset) read the
   # persisted meta. Absent/1 => sudo box => no flag, matching pre-feature boxes.
+  #
+  # This flag alone does NOT reach a microVM guest. The OCI runtime sets
+  # PR_SET_NO_NEW_PRIVS on the process it execs, which under krun is the VMM on
+  # this host; the guest then boots its own kernel and its PID 1 starts clean. The
+  # box entrypoint sets the bit itself before exec'ing sshd, under the same sudo
+  # rule, which is what actually gives a microVM box the property. Keep the flag
+  # regardless: on a container box it is the thing doing the work, and on a microVM
+  # it still constrains the VMM process.
   local box_sudo="${BOX_SUDO:-}"
   [ -n "$box_sudo" ] || box_sudo="$(meta_get "$name" sudo 2>/dev/null || true)"
   [ "$box_sudo" = 0 ] && RUN_ARGS+=(--security-opt no-new-privileges)
-  # Kernel hardening (default profile): on a microVM box — which has its own guest
-  # kernel — tell the entrypoint to apply the guest sysctls (share/hardening-sysctl.conf).
-  # A container box shares the HOST kernel, so it is never asked to change sysctls
-  # (that would affect the host); it keeps the engine's default seccomp/isolation.
-  # 'off' disables it. On create the level is in BOX_HARDEN; on reconfigure
-  # (unset) read the persisted meta; absent meta => default (breaks nothing).
-  local box_harden="${BOX_HARDEN:-}"
-  [ -n "$box_harden" ] || box_harden="$(meta_get "$name" harden 2>/dev/null || true)"
-  [ -n "$box_harden" ] || box_harden=default
-  [ "$box_harden" != off ] && is_microvm_runtime &&
-    RUN_ARGS+=(-e "ISOPOD_HARDEN=$box_harden")
+  # Kernel hardening: only a box with its own kernel is asked to change sysctls; a
+  # container box shares the HOST kernel and keeps the engine defaults.
+  harden_run_env "$name"
   # Guest egress isolation: nft rules loaded INSIDE the box by the entrypoint,
   # blocking private/LAN/CGNAT/link-local destinations. microVM boxes only — a
   # container box's entrypoint has no CAP_NET_ADMIN and could not load them.
@@ -463,6 +463,8 @@ build_run_args_container() { # build_run_args_container <name> <image> <memory> 
   rootpubfile="$(box_dir "$name")/id_ed25519_root.pub"
   [ -f "$rootpubfile" ] && RUN_ARGS+=(-e "ISOPOD_ROOT_AUTHORIZED_KEY=$(cat "$rootpubfile")")
   [ -n "${BOX_SUDO:-}" ] && RUN_ARGS+=(-e "ISOPOD_SUDO=$BOX_SUDO")
+  # Each box is its own VM here, so the guest-sysctl profile applies to it alone.
+  harden_run_env "$name"
   # Secrets tmpfs (memory-backed, gone when the box stops). container's --tmpfs
   # takes only a path (no size/mode options); the entrypoint owns it at boot.
   local box_secrets="${BOX_SECRETS:-}"

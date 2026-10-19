@@ -2,17 +2,24 @@
 # Host verification for the isopod 3.10.0 changes.
 #
 # Run this from the isopod repo on a machine with a working container engine.
-# It creates throwaway boxes named hv-* and removes them at the end.
+# It creates throwaway boxes named hv-* and removes them at the start and end.
 #
 #   bash test/host-verify.sh              # everything the host supports
 #   SKIP_LIVE=1 bash test/host-verify.sh  # skip the slow live bats suite
 #   AUDIT_BOX=mybox bash test/host-verify.sh   # audit a box you already have (F)
+#
+# AUDIT_BOX asks about one box you already have, so it skips the live suite,
+# which builds images and creates real boxes and takes tens of minutes. Set
+# SKIP_LIVE=0 alongside it to run both.
 #
 # Deliberately does NOT use `set -e`: every check runs and reports, so one
 # failure does not hide the rest.
 set -uo pipefail
 
 ISOPOD="${ISOPOD:-./isopod}"
+# Auditing a named box is a question about that box, so it does not wait on the
+# live suite first. An explicit SKIP_LIVE still wins, in either direction.
+[ -n "${AUDIT_BOX:-}" ] && SKIP_LIVE="${SKIP_LIVE:-1}"
 PASS=0 FAIL=0 SKIP=0
 declare -a NOTES=()
 
@@ -86,14 +93,9 @@ in_box() { # in_box <box> <shell-command>
 
 cleanup_box() { iso rm "$1" --force >/dev/null 2>&1 || true; }
 cleanup_all() {
-  local b r
+  local b
   for b in hv-offline hv-offline2 hv-offline3 hv-disk hv-nest hv-remap hv-upg hv-audit; do cleanup_box "$b"; done
-  # `iso fetch` and `iso remap` write into the repo this runs from. Drop what
-  # they left so a verification run does not accumulate refs in your checkout.
-  for r in $(git for-each-ref --format='%(refname)' 'refs/remotes/hv-remap/*' \
-    'refs/remap-backup/remotes/hv-remap/*' 2>/dev/null); do
-    git update-ref -d "$r" 2>/dev/null || true
-  done
+  [ -z "${REMAP_REPO:-}" ] || rm -rf "$REMAP_REPO"
 }
 trap cleanup_all EXIT
 
@@ -101,6 +103,8 @@ trap cleanup_all EXIT
   echo "run this from the isopod repo (no ./isopod here)"
   exit 1
 }
+# An interrupted run leaves its boxes behind, and every create below would fail.
+cleanup_all
 
 # --- capability probe --------------------------------------------------------
 hdr "Host capabilities"
@@ -368,15 +372,19 @@ if iso create hv-remap >/tmp/hv-remap.log 2>&1; then
   else
     bad "could not build the test repo, so the remap check below proves nothing"
   fi
-  if iso fetch hv-remap >/dev/null 2>&1 &&
-    iso remap hv-remap --force --old-email box@isopod --name "Real Name" --email real@example.com >/tmp/hv-remap-run.log 2>&1; then
+  # A scratch repo, not your checkout, and --no-sign: remap follows
+  # commit.gpgsign, and a key prompt here is hidden and hangs the run.
+  REMAP_REPO="$(mktemp -d)"
+  git -C "$REMAP_REPO" init -q
+  if iso fetch hv-remap "$REMAP_REPO" >/dev/null 2>&1 &&
+    iso remap hv-remap "$REMAP_REPO" --force --no-sign --old-email box@isopod --name "Real Name" --email real@example.com >/tmp/hv-remap-run.log 2>&1; then
     ok "remap completed against a box with an unusual commit"
     # Check the rewritten refs, not the log: isopod prints the identity it is
     # rewriting FROM ("Rewriting commits by <box@isopod>"), so grepping the log
     # flags every successful run. refs/remap-backup/ is excluded on purpose, it
     # is meant to still hold the originals.
-    if git for-each-ref --format='%(refname)' 'refs/remotes/hv-remap/*' 2>/dev/null |
-      while read -r r; do git log --format='%an <%ae>' "$r" 2>/dev/null; done |
+    if git -C "$REMAP_REPO" for-each-ref --format='%(refname)' 'refs/remotes/hv-remap/*' 2>/dev/null |
+      while read -r r; do git -C "$REMAP_REPO" log --format='%an <%ae>' "$r" 2>/dev/null; done |
       grep -qi 'box@isopod'; then
       NOTES+=("remap left the box identity on refs/remotes/hv-remap/*")
     fi
@@ -444,9 +452,11 @@ elif ! printf '%s\n' "$AUDIT_STATUS" | grep -q '^CapBnd:'; then
   skip "box posture (cannot read /proc/self/status in '$AUDIT_BOX', so nothing below would mean anything)"
 else
   AUDIT_INFO="$(iso info "$AUDIT_BOX" 2>/dev/null)"
-  ainfo() { printf '%s\n' "$AUDIT_INFO" | awk -F': *' -v k="^$1" '$0 ~ k {print $2; exit}'; }
+  # Split at the first colon only: a value can hold one ("admin via: ...").
+  ainfo() { printf '%s\n' "$AUDIT_INFO" | awk -v k="^$1" '$0 ~ k {sub(/^[^:]*: */, ""); print; exit}'; }
   A_TIER="$(ainfo isolation)"
   A_SUDO="$(ainfo sudo)"
+  A_HARDEN="$(ainfo hardening)"
   note "runtime:   ${A_TIER:-unknown}"
   note "built:     $(ainfo built)"
   note "neighbors: $(ainfo neighbors)"
@@ -478,15 +488,24 @@ else
     note "resolvers the box was handed: $(printf '%s\n' "$A_RESOLV" | awk '/^nameserver/{printf "%s ", $2}')"
   fi
 
-  # F3. no-new-privileges is set at run time, and only for a box with no sudo
-  # policy. On a --sudo box its absence is the documented design, not a finding.
+  # F3. no-new-privileges, for a box with no sudo policy. On a --sudo box its
+  # absence is the documented design, not a finding. The engine flag alone never
+  # reached a microVM guest (it lands on the VMM process on the host), so the
+  # entrypoint sets the bit on sshd; a box created before that shipped, or one
+  # running --nested-containers, reads 0 here.
   A_NNP="$(printf '%s\n' "$AUDIT_STATUS" | awk '/^NoNewPrivs:/{print $2; exit}')"
+  # Same test the entrypoint uses to exempt a box set up for rootless containers.
+  A_ROOTLESS="$(in_box "$AUDIT_BOX" 'command -v newuidmap >/dev/null && grep -q "^$(id -un):" /etc/subuid && echo yes' 2>/dev/null)"
   case "$A_SUDO" in
     no*)
       if [ "$A_NNP" = 1 ]; then
         ok "no-sudo box has NoNewPrivs=1"
+      elif [ "$A_ROOTLESS" = yes ]; then
+        note "NoNewPrivs=$A_NNP, expected: this box is set up for rootless containers (--dev or
+         --nested-containers), and rootless podman needs setuid newuidmap"
       else
-        bad "box declares no sudo but NoNewPrivs=$A_NNP, so the setuid gate is not on"
+        bad "box declares no sudo but NoNewPrivs=$A_NNP, so the setuid gate is not on
+         (the box predates the entrypoint setting it: isopod upgrade $AUDIT_BOX)"
       fi
       ;;
     *) note "NoNewPrivs=$A_NNP (expected on a sudo box: isopod sets the gate only where sudo is off)" ;;
@@ -533,7 +552,7 @@ else
   if ! printf '%s\n' "$A_ETC" | grep -qx '\.'; then
     bad "/etc/isopod does not list at all, so this box predates isopod's in-box files entirely"
   else
-    for f in hardening-sysctl.conf egress-guest.nft; do
+    for f in hardening-sysctl.conf hardening-sysctl-strict.conf egress-guest.nft; do
       if printf '%s\n' "$A_ETC" | grep -qx "$f"; then
         ok "/etc/isopod/$f present"
       else
@@ -545,6 +564,12 @@ else
   # F6. Does the shipped hardening profile actually land? Read the keys out of
   # the profile rather than copying them here, so this cannot drift from it.
   # microVM only: a container shares the host kernel and is never asked to.
+  #
+  # A key the guest kernel does not expose is NOT a failure. The entrypoint is
+  # best-effort by design, and the two keys that go missing on libkrunfw go
+  # missing because the feature is compiled out, which is stronger than the
+  # sysctl: no eBPF JIT to harden, no kexec to disable. Only a key that exists
+  # and holds the wrong value means the profile did not land.
   HCONF=share/hardening-sysctl.conf
   case "${A_TIER:-}" in
     microVM*)
@@ -557,21 +582,44 @@ else
           A_PATHS="$A_PATHS /proc/sys/$(printf '%s' "$hk" | tr . /)"
         done <"$HCONF"
         A_GOT="$(in_box "$AUDIT_BOX" "grep -H . $A_PATHS 2>/dev/null" 2>/dev/null)"
-        A_MISS=""
+        A_WRONG="" A_ABSENT=""
         while IFS='=' read -r hk hv; do
           case "$hk" in '' | \#*) continue ;; esac
           hp="/proc/sys/$(printf '%s' "$hk" | tr . /)"
           got="$(printf '%s\n' "$A_GOT" | awk -F: -v k="$hp" '$1==k{print $2; exit}')"
           if [ -z "$got" ]; then
-            A_MISS="$A_MISS $hk(not exposed)"
+            A_ABSENT="$A_ABSENT $hk"
           elif [ "$got" != "$hv" ]; then
-            A_MISS="$A_MISS $hk=$got(want $hv)"
+            A_WRONG="$A_WRONG $hk=$got(want $hv)"
           fi
         done <"$HCONF"
-        if [ -z "$A_MISS" ]; then
-          ok "every key in $HCONF is applied in the box"
+        # Strict was asked for by name, so every one of its keys has to be there.
+        HSTRICT=share/hardening-sysctl-strict.conf
+        A_ALSO=""
+        if [ "${A_HARDEN:-}" = strict ] && [ -f "$HSTRICT" ]; then
+          A_ALSO=", and every key in $HSTRICT"
+          A_SPATHS=""
+          while IFS='=' read -r hk _; do
+            case "$hk" in '' | \#*) continue ;; esac
+            A_SPATHS="$A_SPATHS /proc/sys/$(printf '%s' "$hk" | tr . /)"
+          done <"$HSTRICT"
+          A_SGOT="$(in_box "$AUDIT_BOX" "grep -H . $A_SPATHS 2>/dev/null" 2>/dev/null)"
+          while IFS='=' read -r hk hv; do
+            case "$hk" in '' | \#*) continue ;; esac
+            hp="/proc/sys/$(printf '%s' "$hk" | tr . /)"
+            got="$(printf '%s\n' "$A_SGOT" | awk -F: -v k="$hp" '$1==k{print $2; exit}')"
+            [ "$got" = "$hv" ] || A_WRONG="$A_WRONG $hk=${got:-absent}(strict wants $hv)"
+          done <"$HSTRICT"
+        fi
+        if [ -n "$A_WRONG" ]; then
+          bad "hardening profile did not land:$A_WRONG"
+        elif [ -n "$A_ABSENT" ]; then
+          ok "every key $HCONF sets that this guest kernel has is applied$A_ALSO"
+          note "not exposed by this guest kernel, so nothing to set:$A_ABSENT"
+          note "on libkrunfw that is expected for net.core.bpf_jit_harden (no eBPF JIT built)"
+          note "and kernel.kexec_load_disabled (kexec compiled out), both stronger than the sysctl"
         else
-          bad "hardening profile not fully applied:$A_MISS"
+          ok "every key in $HCONF is applied in the box$A_ALSO"
         fi
       fi
       ;;
@@ -579,10 +627,10 @@ else
   esac
 
   # F7. The four sysctls the 2026-09-01 review proposed adding to the default
-  # profile. Reported, not asserted: hardening-sysctl.conf already rejects two of
-  # them by name as strict-profile material (they break nested containers,
-  # profiling and rootless engines in the box), and a key this guest kernel does
-  # not expose would be a no-op. Measure before adopting any of them.
+  # profile. Reported, not asserted: three of them now ship in
+  # hardening-sysctl-strict.conf, which only a --harden strict box gets, and Yama's
+  # ptrace_scope is absent from the guest kernel entirely. So on a default box
+  # these read as they do on any box, which is the point of showing them.
   A_PROP="$(in_box "$AUDIT_BOX" 'grep -H . /proc/sys/kernel/unprivileged_bpf_disabled /proc/sys/kernel/yama/ptrace_scope /proc/sys/vm/unprivileged_userfaultfd /proc/sys/user/max_user_namespaces 2>/dev/null' 2>/dev/null)"
   note "sysctls the 2026-09-01 review proposed adding, as this box has them now:"
   for k in kernel/unprivileged_bpf_disabled kernel/yama/ptrace_scope vm/unprivileged_userfaultfd user/max_user_namespaces; do
@@ -593,6 +641,66 @@ else
       printf '        %-38s %s\n' "$k" "$v"
     fi
   done
+
+  # F8. The mount stack at /proc. A microVM box shows the guest's own procfs
+  # mounted over a virtiofs export from the host, and the only thing keeping the
+  # export out of reach is that mount ordering plus CapEff=0. Reported rather than
+  # asserted: what is under there has to be read off a real box, and this is the
+  # line that says so. If the export is ever reachable, the masks in
+  # security/hardening.conf are what limit it.
+  A_PROCMNT="$(in_box "$AUDIT_BOX" "awk '\$5==\"/proc\" {print \$3, \$(NF-2)}' /proc/self/mountinfo" 2>/dev/null)"
+  if [ -z "$A_PROCMNT" ]; then
+    skip "the /proc mount stack (mountinfo did not read)"
+  else
+    note "mounts at /proc (major:minor fstype), last one wins:"
+    printf '%s\n' "$A_PROCMNT" | sed 's/^/        /'
+    if [ "$(printf '%s\n' "$A_PROCMNT" | grep -c virtiofs)" -gt 0 ]; then
+      note "a virtiofs export sits under the guest procfs: the CONTAINER's own /proc,"
+      note "in its PID namespace, surfacing through the root export (docs/roadmap.md, F4)."
+      note "Reaching it needs CAP_SYS_ADMIN the box does not have, and the mask-microvm"
+      note "lines in security/hardening.conf cover the host values it would show."
+    fi
+  fi
+
+  # F9. Device nodes the entrypoint drops on a hardened microVM box. Each is a
+  # driver the box can otherwise reach; userfaultfd is the one that matters most.
+  # A --disk box keeps loop*, and a --nested-containers box keeps fuse and tun, so
+  # only report what is there rather than failing on a box that needs them.
+  A_DEV="$(in_box "$AUDIT_BOX" 'ls /dev' 2>/dev/null)"
+  case "${A_TIER:-}" in
+    microVM*)
+      A_DEVLEFT=""
+      for d in mem port userfaultfd uinput btrfs-control loop-control loop0 fuse; do
+        printf '%s\n' "$A_DEV" | grep -qx "$d" && A_DEVLEFT="$A_DEVLEFT $d"
+      done
+      if [ -z "$A_DEVLEFT" ]; then
+        ok "the unused device nodes are gone from /dev"
+      else
+        note "device nodes still present:$A_DEVLEFT (expected on a --disk or --nested-containers"
+        note "box, and on any box created with --harden off or before this shipped)"
+      fi
+      ;;
+    *) note "the device trim is microVM-only and this box is ${A_TIER:-unknown}" ;;
+  esac
+
+  # F10. Setuid binaries the entrypoint strips. Every one it keeps is standing
+  # escalation surface, so name what is left rather than only counting.
+  A_SUID="$(in_box "$AUDIT_BOX" 'find /usr /bin /sbin -xdev -perm -4000 -type f 2>/dev/null | sort' 2>/dev/null)"
+  if [ -z "$A_SUID" ]; then
+    ok "no setuid-root binaries left in the box"
+  else
+    A_SUIDBAD=""
+    for b in su mount umount chsh chfn newgrp gpasswd passwd ssh-keysign; do
+      printf '%s\n' "$A_SUID" | grep -q "/$b\$" && A_SUIDBAD="$A_SUIDBAD $b"
+    done
+    if [ -n "$A_SUIDBAD" ]; then
+      bad "setuid bits isopod strips are still set:$A_SUIDBAD (run: isopod upgrade $AUDIT_BOX)"
+    else
+      ok "the setuid binaries isopod strips are all stripped"
+    fi
+    note "setuid-root binaries still in this box:"
+    printf '%s\n' "$A_SUID" | sed 's/^/        /'
+  fi
 fi
 
 # --- summary -----------------------------------------------------------------

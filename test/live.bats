@@ -23,6 +23,9 @@ setup_file() {
     sock="$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null || true)"
     [ -n "$sock" ] && export CONTAINER_HOST="unix://$sock"
   fi
+  # Per-test PATH hides microVM runtimes; note the real one while it's visible.
+  ISOPOD_TEST_MICROVM_BIN="$(command -v "${ISOPOD_TEST_MICROVM_RUNTIME:-krun}" 2>/dev/null || true)"
+  export ISOPOD_TEST_MICROVM_BIN
 }
 
 setup() {
@@ -48,6 +51,9 @@ teardown() {
 # The remote command is requoted with %q: ssh joins its arguments with plain
 # spaces, which would otherwise strip the quoting from `sh -c '<script>'` and
 # hand the script to the login shell instead of sh.
+# Each argument is %q-quoted, so pass a shell snippet as `sh -c '...'`. A single
+# string arrives as one word: `'PATH=... cmd'` becomes an assignment that runs
+# nothing and exits 0, and `'test -d x'` becomes command-not-found.
 bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
   local cfg="$ISOPOD_CONFIG_DIR/boxes/$BOX"
   local port; port=$(sed -n 's/^port=//p' "$cfg/meta")
@@ -67,20 +73,24 @@ bssh() { # bssh <ssh-options...> -- <remote command...>   (-- optional)
 
 # Resolve a Tier 3 microVM runtime to test under, or skip. Honors
 # ISOPOD_TEST_MICROVM_RUNTIME (default: krun); needs /dev/kvm and the runtime on
-# PATH or registered with a present engine. Echoes the runtime name.
+# PATH or registered with a present engine. Sets MICROVM_RT. Call it directly:
+# skip inside $(...) only exits the subshell, and the test runs on anyway.
 _microvm_runtime_or_skip() {
   local rt="${ISOPOD_TEST_MICROVM_RUNTIME:-krun}"
   [ -e /dev/kvm ] || skip "no /dev/kvm (Tier 3 microVM needs hardware virtualization)"
+  # Bring back the host's runtime under its own name, which isopod matches on.
+  [ -z "${ISOPOD_TEST_MICROVM_BIN:-}" ] || ln -sf "$ISOPOD_TEST_MICROVM_BIN" "$STUB_DIR/$rt"
   if ! command -v "$rt" >/dev/null 2>&1 &&
     ! { command -v podman >/dev/null 2>&1 && podman info 2>/dev/null | grep -qw -- "$rt"; } &&
     ! { command -v docker >/dev/null 2>&1 && docker info 2>/dev/null | grep -qw -- "$rt"; }; then
     skip "microVM runtime '$rt' not available (register it, or set ISOPOD_TEST_MICROVM_RUNTIME)"
   fi
-  printf '%s' "$rt"
+  MICROVM_RT="$rt"
 }
 
 @test "live: fetch and export work under a Tier 3 microVM runtime (no engine exec)" {
-  local rt; rt="$(_microvm_runtime_or_skip)"
+  _microvm_runtime_or_skip
+  local rt="$MICROVM_RT"
   # Create the box under a real microVM. Every isopod data path is SSH-driven, so
   # this is the end-to-end proof that create/fetch/export keep working under a
   # separate guest kernel — where the engine's own `exec`/`cp` would not enter.
@@ -89,6 +99,10 @@ _microvm_runtime_or_skip() {
   run bssh -o ConnectTimeout=45 -- whoami
   assert_success
   assert_output "dev"
+  # The box must really boot its own kernel, not fall back to a container.
+  run bssh -- uname -r
+  assert_success
+  refute_output "$(uname -r)"
   # fetch: seed git history in-box, pull it to a host repo over the SSH transport.
   bssh -- sh -c '
     cd /home/dev/workspace &&
@@ -303,8 +317,13 @@ _microvm_runtime_or_skip() {
 @test "live: rm destroys the container" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG"
   "$ISOPOD_ROOT/isopod" rm "$BOX" --force
-  run bash -c "podman inspect isopod-$BOX >/dev/null 2>&1 || docker inspect isopod-$BOX >/dev/null 2>&1"
+  # Ask the engine that is installed: a missing one exits 127, which
+  # assert_failure would accept.
+  local eng="${ISOPOD_ENGINE:-}"
+  [ -n "$eng" ] || eng="$(command -v podman || command -v docker)"
+  run "$eng" inspect "isopod-$BOX"
   assert_failure
+  assert_output --regexp '[Nn]o such'
 }
 
 @test "live: --secret lands in the tmpfs, survives restart, and never leaks" {
@@ -350,33 +369,40 @@ _agent_net_or_skip() {
     skip "cannot reach $1 (no network, or it is blocking this host)"
 }
 
+# The real path: install, then the session. --attach skips the install by design
+# (it is what an opened window re-runs), so a fresh box would have no agent. No
+# display means no window, and the command falls back to this process. Terminal
+# binaries are already hidden by the harness; this covers a desktop session too.
+agent_here() { # agent_here <agent>
+  env -u DISPLAY -u WAYLAND_DISPLAY "$ISOPOD_ROOT/isopod" "$1" "$BOX" -- --version
+}
+
 @test "live: claude-code installs into a box and runs there" {
   _agent_net_or_skip "https://downloads.claude.ai/claude-code-releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  # --attach keeps the session in this process; `-- --version` makes it a
-  # one-shot command instead of an interactive TUI.
-  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  # `-- --version` makes it a one-shot command instead of an interactive TUI.
+  run agent_here claude-code
   assert_success
   # The binary is really there, on the box user's PATH, and executable by them.
-  run bssh -- 'PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH" command -v claude'
+  run bssh -- sh -c 'PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH" command -v claude'
   assert_success
   refute_output ""
   # It went in as the box user, not root: an agent running as root would leave
   # config and workspace files the user cannot write.
-  run bssh -- 'stat -c %U "$(PATH=$HOME/.local/bin:$HOME/.claude/bin:$PATH command -v claude)"'
+  run bssh -- sh -c 'stat -c %U "$(PATH=$HOME/.local/bin:$HOME/.claude/bin:$PATH command -v claude)"'
   assert_success
   assert_output "dev"
   # Nothing is left in the staging directory.
-  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  run bssh -- sh -c 'test -d "$HOME/.isopod-agent"'
   assert_failure
 }
 
 @test "live: a second claude-code run reuses the install and does not refetch" {
   _agent_net_or_skip "https://downloads.claude.ai/claude-code-releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  run agent_here claude-code
   assert_success
-  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  run agent_here claude-code
   assert_success
   # Presence is the whole check on a later run, so nothing is downloaded again.
   refute_output --partial "Downloading"
@@ -386,71 +412,71 @@ _agent_net_or_skip() {
 @test "live: codex installs into a box and runs there" {
   _agent_net_or_skip "https://api.github.com/repos/openai/codex/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" codex "$BOX" --attach -- --version
+  run agent_here codex
   assert_success
-  run bssh -- 'PATH="$HOME/.local/bin:$PATH" command -v codex'
+  run bssh -- sh -c 'PATH="$HOME/.local/bin:$PATH" command -v codex'
   assert_success
   assert_output --partial "/.local/bin/codex"
   # The static musl build has to actually execute on this glibc box, which is the
   # whole reason the adapter ignores the box's libc.
-  run bssh -- 'PATH="$HOME/.local/bin:$PATH" codex --version'
+  run bssh -- sh -c 'PATH="$HOME/.local/bin:$PATH" codex --version'
   assert_success
-  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  run bssh -- sh -c 'test -d "$HOME/.isopod-agent"'
   assert_failure
 }
 
 @test "live: opencode installs into a box and runs there" {
   _agent_net_or_skip "https://api.github.com/repos/anomalyco/opencode/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" opencode "$BOX" --attach -- --version
+  run agent_here opencode
   assert_success
   # Its own directory, so `opencode upgrade` in the box replaces this binary
   # rather than being shadowed by it.
-  run bssh -- 'PATH="$HOME/.opencode/bin:$PATH" command -v opencode'
+  run bssh -- sh -c 'PATH="$HOME/.opencode/bin:$PATH" command -v opencode'
   assert_success
   assert_output --partial "/.opencode/bin/opencode"
   # The build has to match the box's CPU: the plain x64 build uses AVX2 and dies
   # with an illegal instruction on a host without it, which only running proves.
-  run bssh -- 'PATH="$HOME/.opencode/bin:$PATH" opencode --version'
+  run bssh -- sh -c 'PATH="$HOME/.opencode/bin:$PATH" opencode --version'
   assert_success
-  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  run bssh -- sh -c 'test -d "$HOME/.isopod-agent"'
   assert_failure
 }
 
 @test "live: pi installs into a box and runs there" {
   _agent_net_or_skip "https://api.github.com/repos/earendil-works/pi/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" pi "$BOX" --attach -- --version
+  run agent_here pi
   assert_success
-  run bssh -- 'PATH="$HOME/.local/share/pi:$PATH" command -v pi'
+  run bssh -- sh -c 'PATH="$HOME/.local/share/pi:$PATH" command -v pi'
   assert_success
   assert_output --partial "/.local/share/pi/pi"
   # Upstream installs Pi with npm and Node 22; the release build carries its own
   # runtime, and the box image ships neither, so running it here is the proof.
   # --version also reads package.json from beside the binary, which only the
   # whole-directory install provides.
-  run bssh -- 'PATH="$HOME/.local/share/pi:$PATH" pi --version'
+  run bssh -- sh -c 'PATH="$HOME/.local/share/pi:$PATH" pi --version'
   assert_success
   refute_output --partial "0.0.0"
-  run bssh -- 'test -d "$HOME/.isopod-agent"'
+  run bssh -- sh -c 'test -d "$HOME/.isopod-agent"'
   assert_failure
 }
 
 @test "live: an agent install survives a stop and start" {
   _agent_net_or_skip "https://api.github.com/repos/openai/codex/releases/latest"
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container >/dev/null
-  run "$ISOPOD_ROOT/isopod" codex "$BOX" --attach -- --version
+  run agent_here codex
   assert_success
   "$ISOPOD_ROOT/isopod" stop "$BOX" >/dev/null
   "$ISOPOD_ROOT/isopod" start "$BOX" >/dev/null
   # The binary lives in the container layer, not a tmpfs, so it is still there.
-  run bssh -- 'PATH="$HOME/.local/bin:$PATH" codex --version'
+  run bssh -- sh -c 'PATH="$HOME/.local/bin:$PATH" codex --version'
   assert_success
 }
 
 @test "live: an agent refuses to install into an offline box" {
   "$ISOPOD_ROOT/isopod" create "$BOX" --image "$IMG" --container --offline >/dev/null
-  run "$ISOPOD_ROOT/isopod" claude-code "$BOX" --attach -- --version
+  run agent_here claude-code
   assert_failure
   assert_output --partial "offline"
 }

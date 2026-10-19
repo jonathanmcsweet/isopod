@@ -86,7 +86,9 @@ bash test/egress-render.sh
 # --- stubbed bats suite -----------------------------------------------------
 step "bats: unit + theming + integration + security-poc (stubbed, no engine)"
 [ -x "$BATS" ] || fail "vendored bats not found at $BATS"
-"$BATS" test/unit.bats test/theming.bats test/integration.bats test/security-poc.bats
+# stdin closed for every bats run: isopod prompts when stdin is a tty, `run`
+# hides the prompt, and a local run hung on an invisible read. Matches CI.
+"$BATS" test/unit.bats test/theming.bats test/integration.bats test/security-poc.bats </dev/null
 
 # --- interactive (pexpect) --------------------------------------------------
 step "pexpect: interactive prompt tests"
@@ -102,7 +104,7 @@ fi
 # --- live (opt-in) ----------------------------------------------------------
 if [ "${RUN_LIVE:-0}" = "1" ]; then
   step "bats: LIVE end-to-end (real container engine)"
-  "$BATS" test/live.bats
+  "$BATS" test/live.bats </dev/null
 else
   printf '\n%slive tests skipped (set RUN_LIVE=1 to run them against real podman/docker)%s\n' \
     "$c_yel" "$c_rst"

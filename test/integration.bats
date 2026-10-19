@@ -837,6 +837,204 @@ _seed_remapped_host() { # _seed_remapped_host <host-dir>
   assert_output --partial "Real Name <real@me.com>"
 }
 
+# ---- remap --sign-only -------------------------------------------------------
+# Box history remapped before signing existed arrived unsigned, and a normal
+# remap cannot go back for it: there is no identity left to rewrite, so there is
+# no new commit to sign.
+
+@test "remap --sign-only signs the box commits it may sign and leaves the rest" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  # Real signing needs the real ssh-keygen: install_engine_stubs replaces it with
+  # one that writes a fake key, which git would then fail to sign with.
+  rm -f "$STUB_DIR/ssh-keygen"
+  ssh-keygen -t ed25519 -N '' -C isopod-test -f "$TEST_TMP/sign" -q
+  git -C "$host" config gpg.format ssh
+  git -C "$host" config user.signingkey "$TEST_TMP/sign.pub"
+  # The box tip is committed by Mate <mate@corp>; its parent by dev@mybox.local.
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_success
+  run git -C "$host" cat-file commit refs/remotes/mybox/master^
+  assert_success
+  assert_output --partial "gpgsig"
+  # A forge checks the signature against the committer, so a teammate's commit is
+  # rebuilt (its parent moved) but never signed with this host's key.
+  run git -C "$host" cat-file commit refs/remotes/mybox/master
+  assert_success
+  refute_output --partial "gpgsig"
+}
+
+@test "remap --sign-only rewrites no identity" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  # Real signing needs the real ssh-keygen: install_engine_stubs replaces it with
+  # one that writes a fake key, which git would then fail to sign with.
+  rm -f "$STUB_DIR/ssh-keygen"
+  ssh-keygen -t ed25519 -N '' -C isopod-test -f "$TEST_TMP/sign" -q
+  git -C "$host" config gpg.format ssh
+  git -C "$host" config user.signingkey "$TEST_TMP/sign.pub"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_success
+  run git -C "$host" log --format='%an <%ae>' refs/remotes/mybox/master
+  assert_output --partial "dev <dev@mybox.local>"
+  assert_output --partial "Mate <mate@corp>"
+}
+
+@test "remap --sign-only refuses the flags that describe a rewrite" {
+  _seed_remapped_host "$TEST_TMP/host"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --sign-only \
+    --old-email dev@mybox.local --force
+  assert_failure
+  assert_output --partial "rewrites no"
+}
+
+@test "remap --sign-only and --no-sign are refused together" {
+  _seed_remapped_host "$TEST_TMP/host"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$TEST_TMP/host" --sign-only --no-sign --force
+  assert_failure
+  assert_output --partial "opposite things"
+}
+
+# The probe runs before any ref moves, and its message has to name the cause a
+# user can act on. gpg.format=ssh wants a PATH in user.signingkey, so a GPG key
+# id there is read as a filename and git reports a missing file.
+@test "the signing probe names the gpg.format=ssh key-path mistake" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host"
+  rm -f "$STUB_DIR/ssh-keygen" # the real one is what reports the missing file
+  git -C "$host" config gpg.format ssh
+  git -C "$host" config user.signingkey ABC123DEADBEEF
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_failure
+  assert_output --partial "gpg.format=ssh"
+  assert_output --partial "user.signingkey"
+  # --sign-only refuses --no-sign, so the advice must not send the user there.
+  refute_output --partial "--no-sign"
+  assert_output --partial "nothing was changed"
+  # nothing was touched
+  run git -C "$host" for-each-ref refs/remap-backup/
+  assert_output ""
+}
+
+# Real signing on the host repo: the real ssh-keygen (install_engine_stubs fakes
+# it) and a fresh key.
+_ssh_signing() { # _ssh_signing <repo>
+  rm -f "$STUB_DIR/ssh-keygen"
+  [ -f "$TEST_TMP/sign" ] || ssh-keygen -t ed25519 -N '' -C isopod-test -f "$TEST_TMP/sign" -q
+  git -C "$1" config gpg.format ssh
+  git -C "$1" config user.signingkey "$TEST_TMP/sign.pub"
+}
+
+# A box branch where Mate signed one commit with Mate's own key. <order> says
+# whether that commit sits below the box user's commit or on top of it.
+_seed_mate_signed() { # _seed_mate_signed <below|above>
+  local box="$TEST_TMP/box" host="$TEST_TMP/host"
+  rm -f "$STUB_DIR/ssh-keygen"
+  ssh-keygen -t ed25519 -N '' -C mate -f "$TEST_TMP/mate" -q
+  git init -q -b master "$box"
+  local -a mate=(-c user.email=mate@corp -c user.name=Mate -c gpg.format=ssh
+    -c user.signingkey="$TEST_TMP/mate.pub")
+  local -a dev=(-c user.email=dev@mybox.local -c user.name=dev)
+  if [ "$1" = below ]; then
+    git -C "$box" "${mate[@]}" commit -q -S --allow-empty -m "mate: signed"
+    git -C "$box" "${dev[@]}" commit -q --allow-empty -m "box: work"
+  else
+    git -C "$box" "${dev[@]}" commit -q --allow-empty -m "box: work"
+    git -C "$box" "${mate[@]}" commit -q -S --allow-empty -m "mate: signed"
+  fi
+  git init -q -b master "$host"
+  git -C "$host" config user.email me@home; git -C "$host" config user.name Me
+  echo h > "$host/h"; git -C "$host" add h; git -C "$host" commit -qm "host: mine"
+  git -C "$host" fetch --no-tags "$box" "refs/heads/*:refs/remotes/mybox/*" >/dev/null 2>&1
+}
+
+# A teammate's signed commit with nothing moving beneath it is not rebuilt, so
+# it keeps its SHA and its signature, and the commit above it still gets signed.
+@test "remap --sign-only leaves a teammate's signed base commit untouched" {
+  _seed_mate_signed below
+  local host="$TEST_TMP/host" base
+  _ssh_signing "$host"
+  base="$(git -C "$host" rev-parse refs/remotes/mybox/master^)"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_success
+  run git -C "$host" rev-parse refs/remotes/mybox/master^
+  assert_output "$base"
+  run git -C "$host" cat-file commit refs/remotes/mybox/master
+  assert_output --partial "gpgsig"
+}
+
+# Rebuilding a commit drops its signature, so one signed by someone else that
+# would have to move refuses the run before any branch moves.
+@test "remap --sign-only refuses rather than strip a teammate's signature" {
+  _seed_mate_signed above
+  local host="$TEST_TMP/host" tip
+  _ssh_signing "$host"
+  tip="$(git -C "$host" rev-parse refs/remotes/mybox/master)"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_failure
+  assert_output --partial "signed by someone else"
+  assert_output --partial "No branch was moved"
+  run git -C "$host" rev-parse refs/remotes/mybox/master
+  assert_output "$tip"
+}
+
+# A second run has nothing to do: everything it may sign is signed already.
+@test "remap --sign-only run twice does not re-SHA anything" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host" tip
+  _ssh_signing "$host"
+  "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  tip="$(git -C "$host" rev-parse refs/remotes/mybox/master)"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_success
+  assert_output --partial "Nothing needed signing"
+  run git -C "$host" rev-parse refs/remotes/mybox/master
+  assert_output "$tip"
+}
+
+# refs/remap-backup/ is the only pointer to the pre-rewrite commits, so a
+# signing run after a remap must leave it alone and back up under its own name.
+@test "remap --sign-only keeps an earlier remap's backups and writes its own" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host" orig before
+  "$ISOPOD_ROOT/isopod" remap mybox "$host" --old-email dev@mybox.local --no-sign --force
+  orig="$(git -C "$host" rev-parse refs/remap-backup/remotes/mybox/master)"
+  before="$(git -C "$host" rev-parse refs/remotes/mybox/master)"
+  _ssh_signing "$host"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --force
+  assert_success
+  run git -C "$host" rev-parse refs/remap-backup/remotes/mybox/master
+  assert_output "$orig"
+  run git -C "$host" rev-parse refs/sign-backup/remotes/mybox/master
+  assert_output "$before"
+}
+
+# The key can lock after the probe passes. Refs move only after every commit is
+# rebuilt, so a failure partway must say nothing moved, and nothing must have.
+@test "remap --sign-only that fails partway moves no branch and says so" {
+  _seed_remapped_host "$TEST_TMP/host"
+  local host="$TEST_TMP/host" tip
+  _ssh_signing "$host"
+  # First call (the probe) signs; every later one fails, as a locked agent would.
+  cat >"$TEST_TMP/flaky-keygen" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$TEST_TMP/calls" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" >"$TEST_TMP/calls"
+[ "\$n" -ge 2 ] && { echo "agent refused operation" >&2; exit 1; }
+exec ssh-keygen "\$@"
+EOF
+  chmod +x "$TEST_TMP/flaky-keygen"
+  git -C "$host" config gpg.ssh.program "$TEST_TMP/flaky-keygen"
+  tip="$(git -C "$host" rev-parse refs/remotes/mybox/master)"
+  run "$ISOPOD_ROOT/isopod" remap mybox "$host" --sign-only --email dev@mybox.local --force
+  assert_failure
+  assert_output --partial "no branch was moved"
+  refute_output --partial "Done. Signed"
+  run git -C "$host" rev-parse refs/remotes/mybox/master
+  assert_output "$tip"
+  run git -C "$host" for-each-ref refs/sign-backup/
+  assert_output ""
+}
+
 @test "remap --remap-file works without a host git identity" {
   # A remap file supplies every identity, so the run must not require the host
   # repo (or any git config) to carry a user.name/user.email.
@@ -1125,10 +1323,42 @@ EOF
   assert_output --partial "invalid --harden"
 }
 
-@test "create rejects --harden strict as reserved" {
-  run "$ISOPOD_ROOT/isopod" create demo --harden strict --color teal
+@test "create --harden strict records it in meta and passes it to the box" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --harden strict --color teal
+  assert_success
+  assert_stub_called "ISOPOD_HARDEN=strict"
+  # perf_event_paranoid=3 only denies perf_event_open on patched kernels; upstream
+  # treats it as 2, so the note must not promise more than that.
+  assert_output --partial "kernel profiling restricted"
+  refute_output --partial "perf_event_open turned off"
+  run "$ISOPOD_ROOT/isopod" info demo
+  assert_output --partial "hardening : strict"
+  run cat "$ISOPOD_CONFIG_DIR/boxes/demo/meta"
+  assert_output --partial "harden=strict"
+}
+
+# Root in the box can write the sysctls back, and --sudo hands the box user root.
+@test "create --harden strict --sudo warns that the box user can undo it" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --harden strict --sudo --color teal
+  assert_success
+  assert_output --partial "write these sysctls back"
+}
+
+# Asked for explicitly, so it fails closed: the profile is guest sysctls, and a
+# container box would silently get none of them.
+@test "create rejects --harden strict on a container box" {
+  run "$ISOPOD_ROOT/isopod" create demo --harden strict --container --color teal
   assert_failure
-  assert_output --partial "not yet available"
+  assert_output --partial "--harden strict needs a box with its own kernel"
+}
+
+# user.max_user_namespaces=0 is the centre of strict and is exactly what a
+# rootless engine in the box needs, so the two cannot both hold.
+@test "create rejects --harden strict with --nested-containers" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --harden strict \
+    --nested-containers --color teal
+  assert_failure
+  assert_output --partial "incompatible"
 }
 
 # ---- --memory / --cpus validation (§5) ---------------------------------------
@@ -1627,13 +1857,14 @@ seed_secret() { # seed_secret <name> <value>
 }
 
 # ---- upgrade: in-place (F-2) -------------------------------------------------
-@test "upgrade --in-place replaces all three isopod-owned files over the root key" {
+@test "upgrade --in-place replaces every isopod-owned file over the root key" {
   "$ISOPOD_ROOT/isopod" create demo --color teal
   : >"$STUB_LOG"
   run "$ISOPOD_ROOT/isopod" upgrade demo --in-place
   assert_success
   assert_stub_called "ssh .*id_ed25519_root .*/usr/local/bin/isopod-entrypoint"
   assert_stub_called "ssh .*id_ed25519_root .*/etc/isopod/hardening-sysctl.conf"
+  assert_stub_called "ssh .*id_ed25519_root .*/etc/isopod/hardening-sysctl-strict.conf"
   assert_stub_called "ssh .*id_ed25519_root .*/etc/isopod/egress-guest.nft"
 }
 

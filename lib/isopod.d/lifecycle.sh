@@ -250,6 +250,8 @@ upgrade_in_place() { # upgrade_in_place <name>
     <"$ISOPOD_ENTRYPOINT" || die "could not replace the entrypoint in '$name'"
   "${asroot[@]}" -- "${sudo_prefix}sh -c 'mkdir -p /etc/isopod && cat >/etc/isopod/hardening-sysctl.conf'" \
     <"$ISOPOD_SYSCTL_CONF" || die "could not replace the sysctl baseline in '$name'"
+  "${asroot[@]}" -- "${sudo_prefix}sh -c 'mkdir -p /etc/isopod && cat >/etc/isopod/hardening-sysctl-strict.conf'" \
+    <"$ISOPOD_SYSCTL_STRICT_CONF" || die "could not replace the strict sysctl profile in '$name'"
   # Ship the egress ruleset too, so the files the new entrypoint reads are all
   # present and consistent. It does NOT make guest egress usable here: the nft
   # binary lives in the image, which only a full rebase replaces (see the warning

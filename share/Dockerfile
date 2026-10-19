@@ -125,6 +125,9 @@ COPY isopod-entrypoint /usr/local/bin/isopod-entrypoint
 # Default kernel-hardening profile (guest sysctls). The entrypoint applies these
 # only on microVM boxes (their own guest kernel); see share/hardening-sysctl.conf.
 COPY hardening-sysctl.conf /etc/isopod/hardening-sysctl.conf
+# The extra sysctls for --harden strict, layered on top of the file above. Present
+# in every image; the entrypoint reads it only when the box asked for strict.
+COPY hardening-sysctl-strict.conf /etc/isopod/hardening-sysctl-strict.conf
 # Guest egress ruleset, applied by the entrypoint on microVM boxes when
 # ISOPOD_GUEST_EGRESS=1. nftables above is what loads it; the box user cannot use
 # either without CAP_NET_ADMIN, which it does not have.

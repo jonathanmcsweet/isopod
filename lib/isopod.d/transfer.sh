@@ -388,14 +388,23 @@ remap_split_ident() { # remap_split_ident <the part after "author "/"committer "
   REMAP_IDENT_DATE="${BASH_REMATCH[3]}"
 }
 
+# The identity a remap writes, or signs for: the flag, else ISOPOD_GIT_NAME /
+# ISOPOD_GIT_EMAIL, else the host repo's git config. Sets REMAP_NAME/REMAP_EMAIL.
+REMAP_NAME=""
+REMAP_EMAIL=""
+remap_host_identity() { # remap_host_identity <top> <name-flag|''> <email-flag|''>
+  REMAP_NAME="${2:-${ISOPOD_GIT_NAME:-$(git -C "$1" config user.name 2>/dev/null || true)}}"
+  REMAP_EMAIL="${3:-${ISOPOD_GIT_EMAIL:-$(git -C "$1" config user.email 2>/dev/null || true)}}"
+}
+
 # Prove the host can sign BEFORE any history is touched. Signing fails for
 # reasons that have nothing to do with isopod (no key configured, gpg.format=ssh
 # with no user.signingkey, a locked smartcard), and discovering that halfway
 # through would leave the refs rewritten and unsigned for no reason. Objects go
 # to a throwaway store with the real one read through alternates, so a probe that
 # succeeds leaves nothing behind in the user's repo.
-remap_sign_probe() { # remap_sign_probe <top> <keyid|''> <ref-to-borrow-a-tree-from>
-  local top="$1" key="$2" ref="$3" objdir tmp err
+remap_sign_probe() { # remap_sign_probe <top> <keyid|''> <ref-to-borrow-a-tree-from> [rewrite|sign-only]
+  local top="$1" key="$2" ref="$3" mode="${4:-rewrite}" objdir tmp err
   objdir="$(git -C "$top" rev-parse --git-path objects)"
   # git printed it relative to the repo it was pointed at; the env var is read
   # relative to the process's own directory.
@@ -409,10 +418,28 @@ remap_sign_probe() { # remap_sign_probe <top> <keyid|''> <ref-to-borrow-a-tree-f
   fi
   err="$(sanitize "$(cat "$tmp/err" 2>/dev/null || true)")"
   rm -rf "$tmp"
-  die "git cannot sign a commit in this repo, so nothing was rewritten:
+  # Name the common cause. With gpg.format=ssh, user.signingkey must be a PATH to
+  # a .pub file (or a literal 'key::...' value). A GPG key id there is read as a
+  # filename, and git reports a missing file, which sends people the wrong way.
+  local hint=""
+  if [ "$(git -C "$top" config gpg.format 2>/dev/null || true)" = ssh ]; then
+    case "$err" in
+      *"load public key"*)
+        hint="
+     This repo has gpg.format=ssh, where user.signingkey is the PATH to a public
+     key file, so a GPG key id there is read as a filename. Point it at the .pub:
+       git config --global user.signingkey ~/.ssh/id_ed25519.pub
+     Or switch the format back with: git config --global gpg.format openpgp"
+        ;;
+    esac
+  fi
+  # --no-sign is advice only for a rewrite; --sign-only refuses it.
+  local way="     or pass --no-sign to rewrite the identity without signing it."
+  [ "$mode" = sign-only ] && way="     --sign-only has nothing to do without it."
+  die "git cannot sign a commit in this repo, so nothing was changed:
 ${err:+     $err
-}     Set up signing (git config user.signingkey, gpg.format, an unlocked key),
-     or pass --no-sign to rewrite the identity without signing it."
+}     Set up signing (git config user.signingkey, gpg.format, an unlocked key);
+$way$hint"
 }
 
 # Which commits did this rewrite create? Everything reachable from any OTHER ref
@@ -420,14 +447,22 @@ ${err:+     $err
 # is history that already exists elsewhere, and giving it a new SHA would detach
 # it from there. What is left is exactly what the rewrite produced, so signing
 # can never widen what the rewrite touched.
-remap_new_commits() { # remap_new_commits <top> <ref>...
-  local top="$1"
-  shift
+#
+# In sign-only mode refs/sign-backup/ holds an earlier run's starting point, which
+# can be the very commits about to be signed, so it is ignored there. Every other
+# ref still excludes, refs/remap-backup/ included: re-SHAing a commit that a
+# branch, a tag or a backup also points at would detach it just the same.
+remap_new_commits() { # remap_new_commits <top> <rewrite|sign-only> <ref>...
+  local top="$1" mode="$2"
+  shift 2
   local -a boxrefs=("$@") others=() notargs=()
   local r
   while IFS= read -r r; do
     [ -n "$r" ] || continue
     case " ${boxrefs[*]} " in *" $r "*) continue ;; esac
+    if [ "$mode" = sign-only ]; then
+      case "$r" in refs/sign-backup/*) continue ;; esac
+    fi
     others+=("$r")
   done < <(git -C "$top" for-each-ref --format='%(refname)')
   [ "${#others[@]}" -gt 0 ] && notargs=(--not "${others[@]}")
@@ -435,35 +470,38 @@ remap_new_commits() { # remap_new_commits <top> <ref>...
   git -C "$top" rev-list --topo-order --reverse "${boxrefs[@]}" ${notargs[@]+"${notargs[@]}"}
 }
 
-# Sign the commits the rewrite just created. Signing changes a commit's SHA, so
-# its children have to be rebuilt too, which is why this walks the whole set
-# parent-first and rebuilds every commit in it, signing the ones it may sign and
-# leaving the rest identical apart from their parent list.
-remap_sign_refs() { # remap_sign_refs <top> <mailmap> <keyid|''> <ref>...
-  local top="$1" mm="$2" key="$3"
-  shift 3
+# Sign the commits a rewrite created, or (sign-only) the box commits already on
+# the refs. Signing changes a SHA, so descendants are rebuilt too, parent-first.
+# A commit whose parents did not move and that is either not ours to sign or
+# already signed is kept as it is, so re-running re-SHAs nothing and a teammate's
+# signed commit below everything we sign is never touched.
+remap_sign_refs() { # remap_sign_refs <top> <signable-emails> <keyid|''> <rewrite|sign-only> <ref>...
+  local top="$1" signable="$2" key="$3" mode="$4"
+  shift 4
   local -a boxrefs=("$@") todo=()
-  local c r signable
-  mapfile -t todo < <(remap_new_commits "$top" "${boxrefs[@]}")
+  local c r
+  mapfile -t todo < <(remap_new_commits "$top" "$mode" "${boxrefs[@]}")
   if [ "${#todo[@]}" -eq 0 ]; then
-    warn "nothing to sign: the rewrite produced no new commits on these refs"
+    if [ "$mode" = sign-only ]; then
+      warn "nothing to sign: every commit on these refs is also reachable from another
+     ref, and re-signing would give it a new SHA and detach it from there"
+    else
+      warn "nothing to sign: the rewrite produced no new commits on these refs"
+    fi
     return 0
   fi
-  signable="$(remap_signable_emails "$mm")"
 
   local -A map=()
-  local hdr hline tree enc author committer newsha email
+  local hdr hline tree enc author committer newsha email p moved mine sig tag errf err
   local -a parents=() sargs=() encargs=() envs=()
-  local signed=0 rebuilt=0 mergetags=0
+  local signed=0 rebuilt=0 kept=0 mergetags=0
+  errf="$(mktemp "${TMPDIR:-/tmp}/isopod-sign-err-XXXXXX")" || die "could not create a temp file"
   for c in "${todo[@]}"; do
     # Read only the header block. `sed -n '1,/^$/p'` rather than `sed '/^$/q'`:
     # quitting early would close the pipe on a commit whose message is larger
     # than the pipe buffer, and pipefail would then report that as a failure.
     hdr="$(git -C "$top" cat-file commit "$c" | sed -n '1,/^$/p')"
-    tree=""
-    enc=""
-    author=""
-    committer=""
+    tree="" enc="" author="" committer="" moved=0 sig=0 tag=0
     parents=()
     while IFS= read -r hline; do
       # A gpgsig or mergetag header continues on lines that start with a space,
@@ -472,30 +510,59 @@ remap_sign_refs() { # remap_sign_refs <top> <mailmap> <keyid|''> <ref>...
         "tree "*) tree="${hline#tree }" ;;
         "parent "*)
           hline="${hline#parent }"
-          parents+=(-p "${map[$hline]:-$hline}")
+          p="${map[$hline]:-$hline}"
+          [ "$p" = "$hline" ] || moved=1
+          parents+=(-p "$p")
           ;;
         "author "*) author="${hline#author }" ;;
         "committer "*) committer="${hline#committer }" ;;
         "encoding "*) enc="${hline#encoding }" ;;
-        "mergetag "*) mergetags=$((mergetags + 1)) ;;
+        "gpgsig "* | "gpgsig-sha256 "*) sig=1 ;;
+        "mergetag "*) tag=1 ;;
       esac
     done <<<"$hdr"
-    [ -n "$tree" ] && [ -n "$author" ] && [ -n "$committer" ] ||
+    [ -n "$tree" ] && [ -n "$author" ] && [ -n "$committer" ] || {
+      rm -f "$errf"
       die "commit $c has no tree, author or committer, so it will not be rebuilt"
+    }
 
-    remap_split_ident "$author" || die "commit $c has an author line git would not accept"
+    remap_split_ident "$committer" || {
+      rm -f "$errf"
+      die "commit $c has a committer line git would not accept"
+    }
+    email="$(printf '%s' "$REMAP_IDENT_EMAIL" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    mine=0
+    printf '%s\n' "$signable" | grep -qxF "$email" && mine=1
+
+    # Nothing about this commit would change, so keep it, signature and all.
+    if [ "$moved" = 0 ] && { [ "$mine" = 0 ] || [ "$sig" = 1 ]; }; then
+      map["$c"]="$c"
+      kept=$((kept + 1))
+      continue
+    fi
+    # Rebuilding drops a signature. Ours is put back; anyone else's would be lost.
+    # Only sign-only can meet one: a rewrite's commits never carry a signature.
+    if [ "$sig" = 1 ] && [ "$mine" = 0 ] && [ "$mode" = sign-only ]; then
+      rm -f "$errf"
+      die "commit $c is signed by someone else and sits on a commit this run has to
+     re-sign, so rebuilding it would drop that signature. No branch was moved.
+     Narrow the refs, or rewrite their identity first with a normal 'isopod remap'."
+    fi
+
+    remap_split_ident "$author" || {
+      rm -f "$errf"
+      die "commit $c has an author line git would not accept"
+    }
     envs=("GIT_AUTHOR_NAME=$REMAP_IDENT_NAME")
     envs+=("GIT_AUTHOR_EMAIL=$REMAP_IDENT_EMAIL")
     envs+=("GIT_AUTHOR_DATE=$REMAP_IDENT_DATE")
-    remap_split_ident "$committer" || die "commit $c has a committer line git would not accept"
+    remap_split_ident "$committer"
     envs+=("GIT_COMMITTER_NAME=$REMAP_IDENT_NAME")
     envs+=("GIT_COMMITTER_EMAIL=$REMAP_IDENT_EMAIL")
     envs+=("GIT_COMMITTER_DATE=$REMAP_IDENT_DATE")
 
-    email="$(printf '%s' "$REMAP_IDENT_EMAIL" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
-    if printf '%s\n' "$signable" | grep -qxF "$email"; then
+    if [ "$mine" = 1 ]; then
       sargs=("-S$key")
-      signed=$((signed + 1))
     else
       sargs=(--no-gpg-sign)
     fi
@@ -508,24 +575,53 @@ remap_sign_refs() { # remap_sign_refs <top> <mailmap> <keyid|''> <ref>...
     # text that may hold anything, and commit-tree wants it verbatim.
     if ! newsha="$(git -C "$top" cat-file commit "$c" | sed -e '1,/^$/d' |
       env "${envs[@]}" git -C "$top" ${encargs[@]+"${encargs[@]}"} commit-tree \
-        "${sargs[@]}" ${parents[@]+"${parents[@]}"} "$tree")"; then
-      warn "signing stopped at $c; the identity rewrite stands, unsigned"
+        "${sargs[@]}" ${parents[@]+"${parents[@]}"} "$tree" 2>"$errf")"; then
+      err="$(sanitize "$(cat "$errf" 2>/dev/null || true)")"
+      rm -f "$errf"
+      # Refs only move after the loop, so stopping here changes no branch.
+      [ "$mode" = sign-only ] &&
+        die "signing stopped at $c, so no branch was moved:
+${err:+     $err
+}     Unlock the key and run it again."
+      warn "signing stopped at $c; the identity rewrite stands, unsigned${err:+: $err}"
       return 1
     fi
     map["$c"]="$newsha"
     rebuilt=$((rebuilt + 1))
+    [ "$mine" = 1 ] && signed=$((signed + 1))
+    [ "$tag" = 1 ] && mergetags=$((mergetags + 1))
   done
+  rm -f "$errf"
 
+  # A rewrite backed its refs up before it started; sign-only backs up here, just
+  # before the only step that moves anything, and under its own prefix so a
+  # remap's refs/remap-backup/ (the only pointer to the pre-rewrite commits) is
+  # never overwritten.
+  local moved_any=0
   for r in "${boxrefs[@]}"; do
     c="$(git -C "$top" rev-parse "$r" 2>/dev/null || true)"
-    [ -n "$c" ] && [ -n "${map[$c]:-}" ] || continue
+    [ -n "$c" ] && [ -n "${map[$c]:-}" ] && [ "${map[$c]}" != "$c" ] || continue
+    if [ "$mode" = sign-only ]; then
+      git -C "$top" update-ref "refs/sign-backup/${r#refs/}" "$c" ||
+        die "could not back up $r, so it was not moved"
+    fi
     git -C "$top" update-ref "$r" "${map[$c]}" ||
-      warn "could not move $r onto its signed rewrite"
+      warn "could not move $r onto its signed rebuild"
+    moved_any=1
   done
 
   [ "$mergetags" -eq 0 ] ||
     warn "$mergetags merged signed tag(s) lost their embedded tag header in the rebuild"
-  info "Signed $signed of $rebuilt rewritten commit(s)."
+  if [ "$mode" = sign-only ]; then
+    if [ "$moved_any" = 0 ]; then
+      info "Nothing needed signing: every commit is already signed or not yours to sign."
+    else
+      info "Signed $signed commit(s); $kept left as they were."
+      info "The refs as they were are under refs/sign-backup/ (delete when satisfied)."
+    fi
+  else
+    info "Signed $signed of $rebuilt rewritten commit(s)."
+  fi
   [ "$signed" -gt 0 ] && render_tmpl remap-sign-note.txt
   return 0
 }
@@ -554,7 +650,7 @@ filter_repo_usable() { # filter_repo_usable [repo-toplevel]
 cmd_remap() {
   local name="" target="" new_name="" new_email="" old_email="" old_name="" remap_file="" force=0
   # sign: 1 / 0 / "" for "follow the repo's commit.gpgsign".
-  local sign="" sign_key=""
+  local sign="" sign_key="" sign_only=0
   while [ $# -gt 0 ]; do
     # --sign takes an OPTIONAL key id, so it is read BEFORE the generic
     # --opt=value split below: that split would turn "--sign=<key>" into two
@@ -600,6 +696,10 @@ cmd_remap() {
         sign=0
         shift
         ;;
+      --sign-only)
+        sign_only=1
+        shift
+        ;;
       --force | -f)
         force=1
         shift
@@ -628,6 +728,19 @@ cmd_remap() {
     die "'$target' is not a git repo — run this in (or point it at) the repo you fetched into"
   local top
   top=$(git -C "$target" rev-parse --show-toplevel)
+
+  # --sign-only signs what is already there. It exists for box history that was
+  # remapped before signing landed and so arrived unsigned, which nothing else can
+  # go back and fix. It signs rather than rewrites, so every flag that describes a
+  # rewrite is meaningless with it, and refusing is clearer than ignoring them.
+  if [ "$sign_only" -eq 1 ]; then
+    [ "$sign" != 0 ] || die "--sign-only and --no-sign ask for opposite things"
+    [ -z "$old_email$old_name$remap_file" ] ||
+      die "--sign-only signs the commits that are already on the box refs; it rewrites no
+     identity, so --old-email, --old-name and --remap-file have nothing to act on.
+     Drop them, or drop --sign-only to rewrite and sign in one pass."
+    sign=1
+  fi
 
   # Signing defaults to what the repo already asks for. A rewrite makes new
   # commit objects and no signature survives that, so on a repo configured to
@@ -672,7 +785,20 @@ cmd_remap() {
   # one-line one, the remap-file branch translates the 'old -> new' rules into
   # one. $mm is the resulting file (a temp we clean up when mm_tmp=1).
   local mm mm_tmp=0
-  if [ -n "$remap_src" ]; then
+  local signable=""
+  if [ "$sign_only" -eq 1 ]; then
+    # No rewrite and so no mailmap: isopod signs only commits committed by the one
+    # identity this host holds a key for, and leaves everyone else's alone.
+    remap_src=""
+    remap_host_identity "$top" "" "$new_email"
+    new_email="$REMAP_EMAIL"
+    [ -n "$new_email" ] || die "no identity to sign for: pass --email, set ISOPOD_GIT_EMAIL, or set git config user.email"
+    valid_ident_email "$new_email" || die "invalid --email '$new_email' (no line breaks, spaces or angle brackets)"
+    signable="$(printf '%s' "$new_email" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    info "Signing commits committed by <$(sanitize "$new_email")> on:"
+    printf '    %s\n' "${boxrefs[@]}"
+    info "            (in $top); no identity is rewritten"
+  elif [ -n "$remap_src" ]; then
     # Multi-identity mode: rewrite every identity the rules cover, leaving any
     # unmatched identity (e.g. a teammate's commits) untouched.
     mm=$(mktemp "${TMPDIR:-/tmp}/isopod-remap-XXXXXX")
@@ -684,8 +810,9 @@ cmd_remap() {
   else
     # Single-pair mode. New identity defaults so 'isopod remap <box>' just works:
     #   explicit --name/--email  >  ISOPOD_GIT_NAME/EMAIL  >  host git config.
-    [ -n "$new_name" ] || new_name="${ISOPOD_GIT_NAME:-$(git -C "$top" config user.name 2>/dev/null || true)}"
-    [ -n "$new_email" ] || new_email="${ISOPOD_GIT_EMAIL:-$(git -C "$top" config user.email 2>/dev/null || true)}"
+    remap_host_identity "$top" "$new_name" "$new_email"
+    new_name="$REMAP_NAME"
+    new_email="$REMAP_EMAIL"
     [ -n "$new_name" ] || die "no new author name — pass --name, set ISOPOD_GIT_NAME, or set git config user.name"
     [ -n "$new_email" ] || die "no new author email — pass --email, set ISOPOD_GIT_EMAIL, or set git config user.email"
 
@@ -736,7 +863,11 @@ cmd_remap() {
   fi
 
   if [ "$force" -ne 1 ]; then
-    printf 'This rewrites history on those refs (new commit SHAs). Proceed? [y/N] '
+    if [ "$sign_only" -eq 1 ]; then
+      printf 'Signing changes every commit SHA on those refs, the same as a rewrite. Proceed? [y/N] '
+    else
+      printf 'This rewrites history on those refs (new commit SHAs). Proceed? [y/N] '
+    fi
     local reply
     read -r reply
     case "$reply" in y | Y | yes | YES) ;; *)
@@ -748,17 +879,25 @@ cmd_remap() {
 
   # Ask git to sign one throwaway commit before any ref moves, so a signing setup
   # that cannot work is a refusal rather than a half-finished rewrite.
-  [ "$sign" = 1 ] && remap_sign_probe "$top" "$sign_key" "${boxrefs[0]}"
+  local sign_mode=rewrite
+  [ "$sign_only" -eq 1 ] && sign_mode="sign-only"
+  [ "$sign" = 1 ] && remap_sign_probe "$top" "$sign_key" "${boxrefs[0]}" "$sign_mode"
 
   # Safety net: snapshot the box refs so the user can undo (git update-ref -d
   # refs/remap-backup/... to discard, or reset a ref back to its backup).
-  for r in "${boxrefs[@]}"; do
-    git -C "$top" update-ref "refs/remap-backup/${r#refs/}" "$r"
-  done
-  info "Backed up original refs under refs/remap-backup/ (delete when satisfied)."
+  # Sign-only backs up under its own prefix, inside remap_sign_refs, so this
+  # snapshot of the pre-rewrite commits is never replaced by a later signing run.
+  if [ "$sign_only" -eq 0 ]; then
+    for r in "${boxrefs[@]}"; do
+      git -C "$top" update-ref "refs/remap-backup/${r#refs/}" "$r"
+    done
+    info "Backed up original refs under refs/remap-backup/ (delete when satisfied)."
+  fi
 
   local rewrote=0
-  if filter_repo_usable "$top"; then
+  if [ "$sign_only" -eq 1 ]; then
+    rewrote=1 # nothing to rewrite here; the signing pass below is the whole job
+  elif filter_repo_usable "$top"; then
     # Preferred path: filter-repo applies the mailmap directly.
     # --refs scopes the rewrite (implies --partial: other refs/origin are kept).
     if git -C "$top" filter-repo --force --partial --mailmap "$mm" --refs "${boxrefs[@]}"; then
@@ -804,12 +943,18 @@ cmd_remap() {
      lost. Restore by hand with
        git update-ref refs/remotes/$name/<branch> refs/remap-backup/remotes/$name/<branch>"
   fi
-  # Signing runs on the finished rewrite, and reads the mailmap to decide which
-  # identities it may sign for, so it has to come before the mailmap is dropped.
-  [ "$sign" = 1 ] && { remap_sign_refs "$top" "$mm" "$sign_key" "${boxrefs[@]}" || true; }
+  # Signing runs on the finished rewrite and signs for the identities the mailmap
+  # wrote, so read them before the mailmap is dropped. A rewrite whose signing
+  # fails still stands (remap_sign_refs says so); sign-only dies inside instead.
+  [ "$sign_only" -eq 0 ] && [ "$sign" = 1 ] && signable="$(remap_signable_emails "$mm")"
+  [ "$sign" = 1 ] && { remap_sign_refs "$top" "$signable" "$sign_key" "$sign_mode" "${boxrefs[@]}" || true; }
   [ "$mm_tmp" -eq 1 ] && rm -f "$mm"
 
-  info "Done. Rewritten box branches:"
+  if [ "$sign_only" -eq 1 ]; then
+    info "Done. Signed box branches:"
+  else
+    info "Done. Rewritten box branches:"
+  fi
   # authorname/authoremail come from box-authored commits, so strip control
   # characters on the way out — the same filter the branch list at the top of
   # cmd_fetch uses. A ref whose identity did not match the rewrite still prints
@@ -817,5 +962,7 @@ cmd_remap() {
   git -C "$top" for-each-ref \
     --format='    %(refname:short)  %(authorname) <%(authoremail:trim)>' "${boxrefs[@]}" |
     LC_ALL=C tr -d '\000-\010\013-\037\177'
-  printf '\nCheck the result, then drop the backups when happy:\n  git -C %s for-each-ref refs/remap-backup/\n  git -C %s update-ref -d <each backup ref>\n' "$top" "$top"
+  local bk=refs/remap-backup/
+  [ "$sign_only" -eq 1 ] && bk=refs/sign-backup/
+  printf '\nCheck the result, then drop the backups when happy:\n  git -C %s for-each-ref %s\n  git -C %s update-ref -d <each backup ref>\n' "$top" "$bk" "$top"
 }

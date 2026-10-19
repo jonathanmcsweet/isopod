@@ -295,6 +295,34 @@ cmd_create() {
      Create it under a microVM runtime, or drop --disk/--nested-containers."
   fi
 
+  # Kernel-hardening profile: 'default' (every box), 'strict' (default plus the
+  # heavier toggles), or 'off'. build_run_args turns this into the microVM
+  # guest-sysctl env; container boxes keep the engine defaults regardless. Decided
+  # here, after resolve_runtime, so the strict checks below see the EFFECTIVE
+  # runtime rather than the one that was asked for.
+  local harden="${harden_opt:-default}"
+  case "$harden" in
+    default | off) ;;
+    strict)
+      # Asked for explicitly, so fail closed rather than hand back a box that
+      # quietly did not get it. The profile is guest sysctls, so it needs a kernel
+      # of the box's own: a microVM, or any box on Apple `container`.
+      box_has_own_kernel ||
+        die "--harden strict needs a box with its own kernel (a microVM): the profile is guest
+     sysctls, and a plain container shares the HOST kernel, which isopod will not change.
+     This box resolved to a plain container$([ "$container_opt" -eq 1 ] && printf ' (--container)' || printf ' (no microVM runtime or KVM available, see: isopod doctor)').
+     Create it under a microVM runtime, or use --harden default."
+      # user.max_user_namespaces=0 is the centre of the strict profile and is also
+      # exactly what a rootless engine in the box needs, so the two cannot both hold.
+      [ "$nested" -eq 1 ] &&
+        die "--harden strict and --nested-containers are incompatible: strict sets
+     user.max_user_namespaces=0 in the guest, and rootless podman/docker inside the box
+     cannot start a container without user namespaces. Pick one."
+      ;;
+    *) die "invalid --harden '$harden' (use: default | strict | off)" ;;
+  esac
+  local BOX_HARDEN="$harden"
+
   # --dockerfile: build the project's Dockerfile first and use it as the base the
   # sandbox layers sshd/git onto (same role as --image, you just hand over a
   # Dockerfile). Done before the rollback is armed so a build error leaves no box.
@@ -357,16 +385,6 @@ cmd_create() {
   # applies this from the run env; see build_run_args.
   local BOX_SUDO
   [ "$sudo_opt" -eq 1 ] && BOX_SUDO=1 || BOX_SUDO=0
-  # Kernel-hardening profile: 'default' (on for every box) or 'off'. 'strict' is
-  # reserved for a future release. build_run_args turns this into the microVM
-  # guest-sysctl env; container boxes keep the engine defaults regardless.
-  local harden="${harden_opt:-default}"
-  case "$harden" in
-    default | off) ;;
-    strict) die "--harden strict is not yet available (reserved for a future release); use 'default' or 'off'" ;;
-    *) die "invalid --harden '$harden' (use: default | off)" ;;
-  esac
-  local BOX_HARDEN="$harden"
   # Guest egress isolation (microVM boxes, and only when host-side egress is not
   # doing the job — see build_run_args). On by default: with krun + passt the guest
   # is handed the host's own LAN identity, so a box with no rules is a machine on
@@ -584,7 +602,7 @@ cmd_create() {
   runtime_posture_note
   # State the kernel-hardening posture too (its guest-sysctl arm only applies to
   # microVM boxes), so what the box actually got is legible at create time.
-  harden_posture_note "$BOX_HARDEN"
+  harden_posture_note "$BOX_HARDEN" "$BOX_SUDO"
   disk_posture_note "$name" "$BOX_DISK" "$BOX_NESTED"
 }
 
@@ -593,7 +611,18 @@ cmd_create() {
 # that it is box-local storage that exposes no host directory.
 disk_posture_note() { # disk_posture_note <name> <disk-spec> <nested 0|1>
   local name="$1" spec="$2" nested="${3:-0}" size mount
-  [ -n "$spec" ] || return 0
+  # No volume: the box writes to its rootfs, which is the engine's storage on the
+  # host and has no cap, so a box that fills its disk fills yours. statfs() in the
+  # box reports the host filesystem for the same reason, which is why `df` there
+  # reads as hundreds of free gigabytes and is not a limit on anything. Said only
+  # for a microVM box, the tier where --disk is the answer.
+  if [ -z "$spec" ]; then
+    is_microvm_runtime &&
+      info "Storage: no data volume, so writes land on the box's rootfs, which is host storage
+     with no size cap (df inside the box reports the HOST filesystem). Add
+     --disk <size> for box-local, sized storage if this box writes a lot."
+    return 0
+  fi
   size="${spec%%:*}"
   mount="${spec#*:}"
   info "Data volume: $size ext4 at $mount — box-local (an image in the box's own
