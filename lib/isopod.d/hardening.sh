@@ -333,7 +333,8 @@ harden_posture_note() { # harden_posture_note <level> [sudo 0|1]
       ;;
     *)
       if box_has_own_kernel; then
-        info "Kernel hardening: default profile, reduced-surface guest sysctls applied in the box's own kernel."
+        info "Kernel hardening: default profile, guest sysctls hiding kernel pointers and logs. For code
+     you don't trust, --harden strict also turns off unprivileged eBPF, io_uring and user namespaces."
       else
         info "Kernel hardening: default profile. Container box, so it keeps the engine's default
      seccomp/isolation; the guest-sysctl arm applies to boxes with their own kernel (disable with --harden off)."
@@ -341,6 +342,16 @@ harden_posture_note() { # harden_posture_note <level> [sudo 0|1]
       ;;
   esac
   return 0
+}
+
+# On a box with its own kernel the entrypoint turns no-new-privileges off for
+# rootless podman (setuid newuidmap), unless strict leaves podman unable to run.
+# A container box gets the engine flag instead, so nothing to say there.
+nnp_posture_note() { # nnp_posture_note <level> <sudo 0|1> <rootless 0|1>
+  [ "$2" != 1 ] && [ "$3" = 1 ] && [ "$1" != strict ] && box_has_own_kernel || return 0
+  warn "no-new-privileges is OFF in this box: rootless podman (--dev or --nested-containers)
+     needs setuid newuidmap, so setuid binaries and file capabilities work for the box user.
+     It stays on without rootless podman: no --dev, or --dev --harden strict."
 }
 
 # Is an OCI runtime usable by the engine? True when the binary is on PATH (for

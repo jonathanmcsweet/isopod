@@ -126,9 +126,15 @@ unset iso_bin iso_p
 # from the box itself rather than a list of flags, so a new way to get there
 # cannot fall out of step. Both parts are needed: useradd gives every user a
 # subuid range on Debian, but newuidmap only comes with the uidmap package.
+# --harden strict sets user.max_user_namespaces=0, so rootless podman cannot run
+# there and keeping newuidmap usable would buy nothing.
 iso_nnp=1
-[ -f "/etc/sudoers.d/$iso_u" ] && iso_nnp=0
-command -v newuidmap >/dev/null 2>&1 && grep -q "^$iso_u:" /etc/subuid 2>/dev/null && iso_nnp=0
+if [ -f "/etc/sudoers.d/$iso_u" ]; then
+  iso_nnp=0
+elif [ "${ISOPOD_HARDEN:-}" != strict ] && command -v newuidmap >/dev/null 2>&1 &&
+  grep -q "^$iso_u:" /etc/subuid 2>/dev/null; then
+  iso_nnp=0
+fi
 
 # Name resolution note (allow-list egress only). isopod runs an allow-list box
 # with `--dns=none`, so this box has no resolver at all: proxied clients hand the
@@ -258,21 +264,15 @@ fi
 # that isn't writable, so a key the guest kernel doesn't expose, or a read-only
 # entry, is a no-op rather than a boot failure.
 if [ -n "${ISOPOD_HARDEN:-}" ] && [ "$ISOPOD_HARDEN" != off ]; then
-  # Device nodes the guest kernel hands us that this box has no use for. Each one
-  # is a driver the box can reach: userfaultfd is a well known kernel exploitation
-  # primitive, and eight unbound loop devices plus loop-control are pure surface on
-  # a box with no block storage. Removing a node does NOT disable the driver behind
-  # it (userfaultfd is a syscall as well, which vm.unprivileged_userfaultfd=0
-  # restricts), and box root can mknod them back, so this raises the cost for the
-  # box user rather than closing the driver. Kept where the box actually uses them: loop*
+  # Device nodes the guest kernel hands us that this box has no use for. The guest
+  # has no udev, so devtmpfs leaves every one of them root-only: the box user could
+  # not open them anyway, and this only trims what guest root reaches without first
+  # running mknod. mem, port and msr reach the guest's own memory, ports and
+  # KVM-virtualised registers, not the host's. Removing a node does not disable the
+  # driver behind it (userfaultfd is a syscall as well, which
+  # vm.unprivileged_userfaultfd=0 restricts). Kept where the box uses them: loop*
   # and loop-control back --disk (mounted just above), /dev/fuse and /dev/net/tun
   # back --nested-containers.
-  #
-  # mem, port and the per-cpu msr/cpuid nodes matter more than the rest of the
-  # list put together: they read and write physical memory, I/O ports and model
-  # specific registers, which is exactly what an escape chain reaches for. Nothing
-  # in a development box uses any of them, and CPUID is available to userspace as
-  # an instruction regardless.
   #
   # Deliberately kept: /dev/vsock is the guest's transport to the VMM; hvc* and
   # vport* are its console and serial ports; /dev/kmsg is already gated by

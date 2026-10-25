@@ -603,6 +603,9 @@ cmd_create() {
   # State the kernel-hardening posture too (its guest-sysctl arm only applies to
   # microVM boxes), so what the box actually got is legible at create time.
   harden_posture_note "$BOX_HARDEN" "$BOX_SUDO"
+  local rootless=0
+  [ "$dev_tools" = 1 ] || [ "$BOX_NESTED" = 1 ] && rootless=1
+  nnp_posture_note "$BOX_HARDEN" "$BOX_SUDO" "$rootless"
   disk_posture_note "$name" "$BOX_DISK" "$BOX_NESTED"
 }
 
