@@ -1875,13 +1875,13 @@ EOF
 
 # Run the entrypoint's no-new-privileges decision against a fake /etc, with a
 # PATH holding only grep and, when asked, a newuidmap. Prints iso_nnp.
-entrypoint_nnp() { # entrypoint_nnp [with-newuidmap]
+entrypoint_nnp() { # entrypoint_nnp [with-newuidmap]   (ISOPOD_HARDEN passes through)
   local block bin="$TEST_TMP/nnpbin"
   mkdir -p "$bin" "$TEST_TMP/etc/sudoers.d"
   ln -sf "$(command -v grep)" "$bin/grep"
   rm -f "$bin/newuidmap"
   [ "${1:-}" = with-newuidmap ] && printf '#!/bin/sh\n' >"$bin/newuidmap" && chmod +x "$bin/newuidmap"
-  block="$(sed -n '/^iso_nnp=1$/,/^command -v newuidmap/p' "$ISOPOD_ENTRYPOINT" | sed "s|/etc/|$TEST_TMP/etc/|g")"
+  block="$(sed -n '/^iso_nnp=1$/,/^fi$/p' "$ISOPOD_ENTRYPOINT" | sed "s|/etc/|$TEST_TMP/etc/|g")"
   (
     PATH="$bin"
     iso_u=dev
@@ -1912,6 +1912,22 @@ entrypoint_nnp() { # entrypoint_nnp [with-newuidmap]
   mkdir -p "$TEST_TMP/etc/sudoers.d"
   : >"$TEST_TMP/etc/sudoers.d/dev"
   run entrypoint_nnp
+  assert_output "0"
+}
+
+# Strict sets user.max_user_namespaces=0, so rootless podman cannot run and
+# turning no-new-privileges off for it would give it up for nothing.
+@test "no-new-privileges stays on for a strict box set up for rootless containers" {
+  mkdir -p "$TEST_TMP/etc"
+  printf 'dev:100000:65536\n' >"$TEST_TMP/etc/subuid"
+  ISOPOD_HARDEN=strict run entrypoint_nnp with-newuidmap
+  assert_output "1"
+}
+
+@test "a strict sudo box still escapes no-new-privileges" {
+  mkdir -p "$TEST_TMP/etc/sudoers.d"
+  : >"$TEST_TMP/etc/sudoers.d/dev"
+  ISOPOD_HARDEN=strict run entrypoint_nnp
   assert_output "0"
 }
 

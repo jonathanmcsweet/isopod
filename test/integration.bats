@@ -1344,6 +1344,39 @@ EOF
   assert_output --partial "write these sysctls back"
 }
 
+@test "create on a microVM names what the default profile does and offers strict" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --color teal
+  assert_success
+  assert_output --partial "hiding kernel pointers and logs"
+  assert_output --partial "--harden strict also turns off"
+  refute_output --partial "no-new-privileges is OFF"
+}
+
+@test "create --dev on a microVM says no-new-privileges is off" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --dev --color teal
+  assert_success
+  assert_output --partial "no-new-privileges is OFF"
+}
+
+@test "create --dev --harden strict keeps quiet: no-new-privileges stays on" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --dev --harden strict --color teal
+  assert_success
+  refute_output --partial "no-new-privileges is OFF"
+}
+
+@test "create --dev --sudo does not repeat the warning sudo already implies" {
+  ISOPOD_RUNTIME=krun run "$ISOPOD_ROOT/isopod" create demo --dev --sudo --color teal
+  assert_success
+  refute_output --partial "no-new-privileges is OFF"
+}
+
+# A container box gets the engine's no-new-privileges flag, whatever is inside.
+@test "create --dev on a container box says nothing about no-new-privileges" {
+  run "$ISOPOD_ROOT/isopod" create demo --dev --container --color teal
+  assert_success
+  refute_output --partial "no-new-privileges is OFF"
+}
+
 # Asked for explicitly, so it fails closed: the profile is guest sysctls, and a
 # container box would silently get none of them.
 @test "create rejects --harden strict on a container box" {
